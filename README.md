@@ -124,16 +124,19 @@ Server Agent 自动判断派给谁、派发任务、等待结果、展示给你�
 ```bash
 # Server
 maf-server start      # 启动（首次自动配置）+ 进入交互界面
+maf-server resume     # 恢复上次对话（Ctrl+C 退出后用这个继续）
+maf-server tui        # 启动全新交互会话
 maf-server stop       # 停止
 maf-server restart    # 重启
 maf-server status     # 查看状态
-maf-server tui        # 进入交互界面
 maf-server logs       # 查看日志
 maf-server uninstall  # 卸载（停止 + 清数据 + 删 npm 包）
 maf-server help       # 查看所有命令
 
 # Client
-maf-client init    # 配置 Server 地址 + 安装 Plugin
+maf-client init       # 配置 Server 地址 + 安装 Plugin
+maf-client resume [agent]  # 恢复指定 Agent 的上次对话
+maf-client sessions   # 列出最近的 sessions
 maf-client status     # 查看状态
 maf-client uninstall  # 卸载（停 Daemon + 清 Plugin + 删 npm 包）
 maf-client help       # 查看所有命令

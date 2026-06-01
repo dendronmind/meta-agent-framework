@@ -12,6 +12,17 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|create_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/check-write-path.mjs"
+          }
+        ]
+      }
     ]
   }
 }

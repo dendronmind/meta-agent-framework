@@ -286,6 +286,166 @@ function status() {
 }
 
 // ============================================================
+// Resume（恢复上一个 session）
+// ============================================================
+function resume(agentArg, runtimeArg) {
+  // 解析参数
+  let agent = agentArg || null;
+  let runtime = runtimeArg || null; // "opencode" | "claude"
+
+  const env = detectEnv();
+
+  // 自动检测 runtime
+  if (!runtime) {
+    if (env.hasOpencode && env.hasClaude) {
+      // 两个都有，看有没有 agent 参数来决定
+      runtime = "opencode"; // 默认 opencode
+    } else if (env.hasOpencode) {
+      runtime = "opencode";
+    } else if (env.hasClaude) {
+      runtime = "claude";
+    } else {
+      fail("未检测到 opencode 或 Claude Code");
+      process.exit(1);
+    }
+  }
+
+  if (runtime === "claude" || runtime === "claude-code" || runtime === "cc") {
+    // Claude Code: --continue 自动恢复最近 session
+    const parts = ["claude", "--continue"];
+    if (agent) parts.push("--agent", agent);
+    const cmd = parts.join(" ");
+    console.log(`\n  🔄 恢复 Claude Code session...\n  $ ${cmd}\n`);
+    try {
+      execSync(cmd, { stdio: "inherit" });
+    } catch (e) {
+      if (e.status) process.exit(e.status);
+    }
+    return;
+  }
+
+  // opencode: 查 DB 找最近 session
+  const dbPath = join(HOME, ".local", "share", "opencode", "opencode.db");
+  if (!existsSync(dbPath)) {
+    fail("未找到 opencode 数据库: " + dbPath);
+    log("  请确认 opencode 已正常使用过至少一次");
+    process.exit(1);
+  }
+
+  // 构建查询
+  let query;
+  if (agent) {
+    // 按 agent 名称查最近 session
+    query = `SELECT id, agent, title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') as updated FROM session WHERE agent = '${agent}' ORDER BY time_updated DESC LIMIT 1;`;
+  } else {
+    // 查当前目录的最近 session
+    const cwd = process.cwd();
+    query = `SELECT id, agent, title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') as updated FROM session WHERE directory = '${cwd}' ORDER BY time_updated DESC LIMIT 1;`;
+  }
+
+  let result;
+  try {
+    result = execSync(`sqlite3 "${dbPath}" "${query}"`, { encoding: "utf-8" }).trim();
+  } catch {
+    fail("查询 session 数据库失败");
+    process.exit(1);
+  }
+
+  if (!result) {
+    // 没找到，尝试更宽松的搜索
+    if (agent) {
+      // 模糊匹配 agent
+      const fuzzyQuery = `SELECT id, agent, title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') as updated FROM session WHERE agent LIKE '%${agent}%' ORDER BY time_updated DESC LIMIT 5;`;
+      try {
+        const fuzzyResult = execSync(`sqlite3 "${dbPath}" "${fuzzyQuery}"`, { encoding: "utf-8" }).trim();
+        if (fuzzyResult) {
+          console.log(`\n  ⚠ 未找到 agent="${agent}" 的精确匹配，相近结果:\n`);
+          for (const line of fuzzyResult.split("\n")) {
+            const [id, ag, title, dir, updated] = line.split("|");
+            log(`  ${ag} | ${title} | ${dir} | ${updated}`);
+          }
+          console.log("");
+        } else {
+          fail(`未找到 agent "${agent}" 的任何 session`);
+        }
+      } catch {}
+    } else {
+      fail(`当前目录 (${process.cwd()}) 没有找到历史 session`);
+      log("  提示: 使用 --agent <name> 按 agent 名称搜索");
+    }
+    process.exit(1);
+  }
+
+  const [sessionId, sessionAgent, title, directory, updated] = result.split("|");
+
+  console.log(`\n  🔄 恢复 opencode session`);
+  console.log(`  ────────────────────────────────────`);
+  log(`Session: ${sessionId}`);
+  log(`Agent:   ${sessionAgent || "(default)"}`);
+  log(`Title:   ${title}`);
+  log(`Dir:     ${directory}`);
+  log(`Updated: ${updated}`);
+  console.log(`  ────────────────────────────────────\n`);
+
+  // 构建启动命令
+  const parts = ["opencode", "--session", sessionId];
+  if (sessionAgent) parts.push("--agent", sessionAgent);
+  const launchCmd = parts.join(" ");
+  log(`$ cd ${directory} && ${launchCmd}\n`);
+
+  try {
+    execSync(launchCmd, { stdio: "inherit", cwd: directory });
+  } catch (e) {
+    if (e.status) process.exit(e.status);
+  }
+}
+
+// ============================================================
+// List sessions（列出最近的 sessions）
+// ============================================================
+function listSessions(agentFilter, limit = 10) {
+  const dbPath = join(HOME, ".local", "share", "opencode", "opencode.db");
+  if (!existsSync(dbPath)) {
+    fail("未找到 opencode 数据库: " + dbPath);
+    process.exit(1);
+  }
+
+  let query;
+  if (agentFilter) {
+    query = `SELECT id, agent, title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') as updated FROM session WHERE agent LIKE '%${agentFilter}%' ORDER BY time_updated DESC LIMIT ${limit};`;
+  } else {
+    query = `SELECT id, agent, title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') as updated FROM session ORDER BY time_updated DESC LIMIT ${limit};`;
+  }
+
+  let result;
+  try {
+    result = execSync(`sqlite3 "${dbPath}" "${query}"`, { encoding: "utf-8" }).trim();
+  } catch {
+    fail("查询失败");
+    process.exit(1);
+  }
+
+  if (!result) {
+    log("没有找到 session");
+    process.exit(0);
+  }
+
+  console.log(`\n  📋 最近 sessions${agentFilter ? ` (agent~${agentFilter})` : ""}\n`);
+  console.log("  ID                              │ Agent              │ Title                         │ Updated");
+  console.log("  ────────────────────────────────┼────────────────────┼───────────────────────────────┼────────────────────");
+
+  for (const line of result.split("\n")) {
+    const [id, ag, title, dir, updated] = line.split("|");
+    const shortId = id?.substring(0, 32) || "";
+    const agentCol = (ag || "(default)").padEnd(18).substring(0, 18);
+    const titleCol = (title || "").padEnd(29).substring(0, 29);
+    const updatedCol = updated || "";
+    console.log(`  ${shortId} │ ${agentCol} │ ${titleCol} │ ${updatedCol}`);
+  }
+  console.log("");
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 const args = process.argv.slice(2);
@@ -301,6 +461,41 @@ if (cmd === "status") {
   process.exit(0);
 }
 
+if (cmd === "resume" || cmd === "r") {
+  // maf-client resume [--agent <name>] [--runtime opencode|claude]
+  let agent = null;
+  let runtime = null;
+  for (let i = 1; i < args.length; i++) {
+    if ((args[i] === "--agent" || args[i] === "-a") && args[i + 1]) {
+      agent = args[++i];
+    } else if ((args[i] === "--runtime" || args[i] === "-r") && args[i + 1]) {
+      runtime = args[++i];
+    } else if (!args[i].startsWith("-")) {
+      // 位置参数当 agent 名
+      agent = args[i];
+    }
+  }
+  resume(agent, runtime);
+  process.exit(0);
+}
+
+if (cmd === "sessions" || cmd === "ls") {
+  // maf-client sessions [--agent <name>] [--limit N]
+  let agent = null;
+  let limit = 10;
+  for (let i = 1; i < args.length; i++) {
+    if ((args[i] === "--agent" || args[i] === "-a") && args[i + 1]) {
+      agent = args[++i];
+    } else if ((args[i] === "--limit" || args[i] === "-n") && args[i + 1]) {
+      limit = parseInt(args[++i]) || 10;
+    } else if (!args[i].startsWith("-")) {
+      agent = args[i];
+    }
+  }
+  listSessions(agent, limit);
+  process.exit(0);
+}
+
 if (cmd === "help" || cmd === "--help" || cmd === "-h") {
   console.log(`
 Meta-Agent-Framework Client
@@ -309,9 +504,22 @@ Meta-Agent-Framework Client
 
 命令:
   init        配置 Server 地址 + 安装 Plugin
+  resume [agent]  恢复上一个 session（支持 --agent / --runtime）
+  sessions [agent]  列出最近的 sessions（支持 --limit N）
   status      查看安装状态
   uninstall   卸载（停 Daemon + 清 Plugin + 删 npm 包）
   help        显示此帮助
+
+Resume 用法:
+  maf-client resume                    # 恢复当前目录的最近 session
+  maf-client resume MAF-developer      # 恢复指定 agent 的最近 session
+  maf-client resume --runtime claude   # 用 Claude Code 恢复（claude --continue）
+  maf-client r a2b-booster             # 简写
+
+Sessions 用法:
+  maf-client sessions                  # 列出所有最近 session
+  maf-client sessions MAF-developer    # 按 agent 过滤
+  maf-client ls -n 20                  # 列出最近 20 条
 `);
   process.exit(0);
 }

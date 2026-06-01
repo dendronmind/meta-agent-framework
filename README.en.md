@@ -103,16 +103,19 @@ The Server Agent automatically decides who handles it, dispatches the task, wait
 ```bash
 # Server
 maf-server start      # Start (auto-setup on first run) + enter chat
+maf-server resume     # Resume last session (use after Ctrl+C exit)
+maf-server tui        # Start a new chat session
 maf-server stop       # Stop
 maf-server restart    # Restart
 maf-server status     # Status
-maf-server tui        # Enter chat interface
 maf-server logs       # View logs
 maf-server uninstall  # Uninstall (stop + clean data + remove npm package)
 maf-server help       # Show all commands
 
 # Client
-maf-client init    # Configure Server URL + install Plugin
+maf-client init       # Configure Server URL + install Plugin
+maf-client resume [agent]  # Resume last session for an Agent
+maf-client sessions   # List recent sessions
 maf-client status     # Check status
 maf-client uninstall  # Uninstall (stop Daemon + clean Plugin + remove npm package)
 maf-client help       # Show all commands

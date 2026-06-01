@@ -19,7 +19,7 @@
  *   maf.config.json  配置文件
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync, readdirSync, copyFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, networkInterfaces } from "node:os";
 import { execSync, spawn } from "node:child_process";
@@ -46,44 +46,85 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 // 工作区同步：将 npm 包中的 agent/hook/scripts 同步到 MAF_HOME
 // ============================================================
 
-/** 需要同步到 MAF_HOME 的文件/目录（来自 PACKAGE_ROOT） */
-const SYNC_ITEMS = [
-  ".opencode",               // opencode agent 定义 + rules + skills
+/** 需要覆盖同步的文件/目录（代码、脚本，升级必须用新版） */
+const SYNC_OVERWRITE = [
   ".claude",                 // claude hooks 配置
   "CLAUDE.md",              // claude system prompt
+  "opencode.json",           // opencode 配置（instructions 引用 user/*.md）
   "scripts/maf-server-hook.mjs",  // claude asyncRewake hook
+  "scripts/check-write-path.mjs", // 文件写入保护 hook
   "scripts/poll-workflow.sh",     // 工作流轮询脚本
   "scripts/push-skill.sh",       // skill 推送脚本
 ];
 
+/** 需要"只创建不覆盖"的目录（用户可能积累了修改） */
+const SYNC_NO_CLOBBER = [
+  ".opencode",               // opencode agent 定义 + rules + skills（用户会修改）
+];
+
+/**
+ * 递归同步目录，但已存在的文件不覆盖。
+ * 只创建目标中不存在的文件（新增文件能同步过去，已有文件保留用户修改）。
+ */
+function syncNoClobber(srcDir, dstDir) {
+  if (!existsSync(srcDir)) return;
+  mkdirSync(dstDir, { recursive: true });
+
+  let entries;
+  try { entries = readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry.name);
+    const dstPath = join(dstDir, entry.name);
+
+    if (entry.isDirectory()) {
+      syncNoClobber(srcPath, dstPath);
+    } else {
+      // 只在目标不存在时才拷贝
+      if (!existsSync(dstPath)) {
+        try { copyFileSync(srcPath, dstPath); } catch {}
+      }
+    }
+  }
+}
+
 /**
  * 同步工作区文件到 MAF_HOME。
- * 每次启动时覆盖（确保升级后新版本文件生效）。
- * 同时同步 opencode Plugin 到 ~/.config/opencode/plugins/（npm install -g 不会更新这里）。
+ * - 代码/脚本：每次覆盖（确保升级后新版本生效）
+ * - Agent 定义/规则(.opencode)：只创建不覆盖（保护用户积累的修改）
+ * 同时同步 opencode Plugin 到 ~/.config/opencode/plugins/。
  */
 function syncWorkspace() {
   mkdirSync(join(MAF_HOME, "scripts"), { recursive: true });
 
-  for (const item of SYNC_ITEMS) {
+  // 覆盖同步：代码/脚本（升级必须用新版）
+  for (const item of SYNC_OVERWRITE) {
     const src = join(PACKAGE_ROOT, item);
     const dst = join(MAF_HOME, item);
     if (!existsSync(src)) continue;
 
     try {
       cpSync(src, dst, { recursive: true, force: true });
-    } catch (err) {
-      // 静默忽略，不影响启动
-    }
+    } catch {}
   }
 
-  // 同步 opencode Plugin（整个目录覆盖）
+  // 不覆盖同步：agent/rules/skills（保护用户修改）
+  for (const item of SYNC_NO_CLOBBER) {
+    const src = join(PACKAGE_ROOT, item);
+    const dst = join(MAF_HOME, item);
+    if (!existsSync(src)) continue;
+
+    syncNoClobber(src, dst);
+  }
+
+  // 同步 opencode Plugin（代码，覆盖）
   const pluginSrc = join(PACKAGE_ROOT, "plugins", "opencode-plugin-meta-agent-framework");
   const pluginDst = join(homedir(), ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework");
   if (existsSync(pluginSrc) && existsSync(pluginDst)) {
     try { cpSync(pluginSrc, pluginDst, { recursive: true, force: true }); } catch {}
   }
 
-  // 同步 Claude Code Plugin（整个 marketplace 目录覆盖）
+  // 同步 Claude Code Plugin（代码，覆盖）
   const ccMarketSrc = join(PACKAGE_ROOT, "plugins", ".claude-plugin");
   const ccMarketDst = join(homedir(), ".claude", "plugins", "marketplaces", "maf-plugins", ".claude-plugin");
   if (existsSync(ccMarketSrc) && existsSync(ccMarketDst)) {
@@ -359,6 +400,33 @@ function saveRuntime(runtime) {
   } catch {}
 }
 
+/**
+ * 从 opencode DB 查找指定 agent 在指定目录的最近 session ID
+ */
+function findLastSession(agent, directory) {
+  const dbPath = join(homedir(), ".local", "share", "opencode", "opencode.db");
+  if (!existsSync(dbPath)) return null;
+
+  // 优先按 agent + directory 精确匹配
+  let query;
+  if (agent && directory) {
+    query = `SELECT id FROM session WHERE agent = '${agent}' AND directory = '${directory}' ORDER BY time_updated DESC LIMIT 1;`;
+  } else if (agent) {
+    query = `SELECT id FROM session WHERE agent = '${agent}' ORDER BY time_updated DESC LIMIT 1;`;
+  } else if (directory) {
+    query = `SELECT id FROM session WHERE directory = '${directory}' ORDER BY time_updated DESC LIMIT 1;`;
+  } else {
+    return null;
+  }
+
+  try {
+    const result = execSync(`sqlite3 "${dbPath}" "${query}"`, { encoding: "utf-8", timeout: 3000 }).trim();
+    return result || null;
+  } catch {
+    return null;
+  }
+}
+
 function cmdTui() {
   // 在包目录下启动 TUI agent（支持 opencode 和 claude）
   if (!isServerRunning()) {
@@ -377,44 +445,94 @@ function cmdTui() {
   // 确保工作区已同步
   syncWorkspace();
 
-  // 读取上次的 session ID（用于恢复对话）
-  const sessionFile = join(MAF_HOME, "state", "last-session");
-  let lastSession = "";
-  try { lastSession = readFileSync(sessionFile, "utf-8").trim(); } catch {}
+  const extraArgs = getTuiExtraArgs();
 
   console.log(`📂 工作目录: ${MAF_HOME}`);
   console.log(`🤖 运行时:   ${runtime}`);
-  if (lastSession) console.log(`🔄 恢复会话: ${lastSession}`);
-
-  const extraArgs = getTuiExtraArgs();
 
   try {
     if (runtime === "opencode") {
-      const sessionArg = lastSession && !extraArgs.includes("-s ") ? `-s ${lastSession}` : "";
-      const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${sessionArg} ${extraArgs}`.trim();
+      const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
     } else {
-      // Claude Code: --resume 恢复上次对话
-      const resumeArg = lastSession && !extraArgs.includes("--resume") ? `--resume ${lastSession}` : "";
-      const cmd = `claude ${resumeArg} ${extraArgs}`.trim();
+      const cmd = `claude ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
     }
   } catch {
     // 用户退出 TUI
   }
 
-  // 退出后保存当前 session ID（从 opencode 的状态文件读取）
-  try {
-    // opencode 在 .opencode/state/ 下保存 session 信息
-    const stateDir = join(MAF_HOME, ".opencode", "state");
-    if (existsSync(stateDir)) {
-      const files = require("fs").readdirSync(stateDir).filter(f => f.endsWith(".json")).sort();
-      if (files.length > 0) {
-        const latest = JSON.parse(readFileSync(join(stateDir, files[files.length - 1]), "utf-8"));
-        if (latest.id) writeFileSync(sessionFile, latest.id);
-      }
+  process.exit(0);
+}
+
+function cmdResume() {
+  // 恢复上一个 session（自动查 DB，不依赖当前目录）
+  if (!isServerRunning()) {
+    console.log("⚠️  Server 未运行，先启动...");
+    execSync(`node "${join(PACKAGE_ROOT, "bin", "maf-server.mjs")}" start`, { stdio: "inherit" });
+  }
+
+  const runtime = detectRuntime();
+  if (!runtime) {
+    console.error("❌ 未检测到 opencode 或 claude");
+    process.exit(1);
+  }
+
+  // 确保工作区已同步
+  syncWorkspace();
+
+  const extraArgs = getTuiExtraArgs();
+
+  if (runtime === "opencode") {
+    // 从 opencode DB 按 agent 名查最近 session（不限目录，全局命令不依赖 cwd）
+    const lastSession = findLastSession("Meta-Agent-Server", null);
+
+    if (!lastSession) {
+      console.log("ℹ️  没有找到上一个 session，启动新会话...\n");
+      cmdTui();
+      return;
     }
-  } catch {}
+
+    // 查 session 详情（含 directory）
+    const dbPath = join(homedir(), ".local", "share", "opencode", "opencode.db");
+    let sessionDir = MAF_HOME;
+    let title = "";
+    let updated = "";
+    try {
+      const info = execSync(
+        `sqlite3 "${dbPath}" "SELECT title, directory, datetime(time_updated/1000, 'unixepoch', 'localtime') FROM session WHERE id = '${lastSession}';"`,
+        { encoding: "utf-8", timeout: 3000 }
+      ).trim();
+      const parts = info.split("|");
+      title = parts[0] || "";
+      sessionDir = parts[1] || MAF_HOME;
+      updated = parts[2] || "";
+    } catch {}
+
+    console.log(`\n  🔄 恢复 Meta-Agent-Server session`);
+    console.log(`  ────────────────────────────────────`);
+    console.log(`  Session: ${lastSession}`);
+    if (title) console.log(`  Title:   ${title}`);
+    console.log(`  Dir:     ${sessionDir}`);
+    if (updated) console.log(`  Updated: ${updated}`);
+    console.log(`  ────────────────────────────────────\n`);
+
+    const cmd = `opencode --agent Meta-Agent-Server --hostname localhost --session ${lastSession} ${extraArgs}`.trim();
+    try {
+      execSync(cmd, { cwd: sessionDir, stdio: "inherit" });
+    } catch {
+      // 用户退出 TUI
+    }
+  } else {
+    // Claude Code: --continue 恢复最近对话，cwd 切到 MAF_HOME
+    console.log(`\n  🔄 恢复 Claude Code session (--continue)\n`);
+    const cmd = `claude --continue ${extraArgs}`.trim();
+    try {
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+    } catch {
+      // 用户退出
+    }
+  }
 
   process.exit(0);
 }
@@ -461,7 +579,8 @@ Meta-Agent-Framework Server
   start         启动 Server（首次自动配置）
   stop          停止 Server
   restart       重启 Server
-  tui [runtime] 进入交互界面（opencode 或 claude，默认上次使用的）
+  resume        恢复上一个 session（自动查找最近对话）
+  tui [runtime] 启动新交互界面（opencode 或 claude）
   status        查看运行状态
   logs          查看日志（tail -f）
   version       版本信息
@@ -472,8 +591,9 @@ Meta-Agent-Framework Server
 
 快速开始:
   1. maf-server start         # 首次自动配置 + 启动
-  2. maf-server tui           # 进入交互界面（默认 opencode）
-  3. maf-server tui claude    # 用 Claude Code
+  2. maf-server resume        # 恢复上次对话（最常用！）
+  3. maf-server tui           # 启动全新会话
+  4. maf-server tui claude    # 用 Claude Code 启动新会话
 `);
 }
 
@@ -489,6 +609,7 @@ async function main() {
     case "start":   await cmdStart(); break;
     case "stop":    cmdStop(); break;
     case "restart": await cmdRestart(); break;
+    case "resume": case "r": cmdResume(); break;
     case "tui":     cmdTui(); break;
     case "status":  cmdStatus(); break;
     case "logs":    cmdLogs(); break;

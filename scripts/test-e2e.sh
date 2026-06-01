@@ -26,6 +26,11 @@
 #   15 Proposal Daemon 代理
 #   16 Evolve 进化推送
 #   17 SSE 事件广播
+#   28 check-write-path.mjs 写入保护
+#   29 syncWorkspace no-clobber
+#   30 maf-client sessions 输出格式
+#   31 Plugin 非 Manager 不接收 workflow 广播
+#   32 Agent 切换时 disconnect 旧 agent
 #
 set -uo pipefail
 
@@ -51,7 +56,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -78,7 +83,7 @@ NEED_DAEMON=false
 NEED_CC=false
 for c in "${RUN_CASES[@]}"; do
   NEED_SERVER=true
-  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]]; then NEED_DAEMON=true; fi
+  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]]; then NEED_DAEMON=true; fi
   if [[ $c -eq 5 || $c -eq 7 || $c -eq 8 || $c -eq 9 || $c -eq 10 || $c -eq 11 || $c -eq 13 || $c -eq 18 ]]; then NEED_CC=true; fi
 done
 
@@ -1011,6 +1016,156 @@ assert "CC wait 重连后 online" "online" "$(get_agent_field status $CC_RECONNE
 kill $CC_WAIT_PID 2>/dev/null
 curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
   -d "{\"agent_name\":\"$CC_RECONNECT_AGENT\"}" >/dev/null 2>&1
+fi
+
+# ============================================================
+# Case 28: check-write-path.mjs 写入保护
+# ============================================================
+if should_run 28; then
+echo -e "\n${YELLOW}Case 28: check-write-path.mjs 写入保护${NC}"
+
+HOOK_SCRIPT="$SCRIPT_DIR/scripts/check-write-path.mjs"
+
+# 28a: 写 .opencode/ → 应该拒绝 (exit 2)
+EXIT_CODE=0
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/.opencode/rules/test.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写 .opencode/ 被拒绝 (exit 2)" "2" "$EXIT_CODE"
+
+# 28b: 写 user/ → 应该放行 (exit 0)
+EXIT_CODE=0
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/user/notes.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写 user/ 放行 (exit 0)" "0" "$EXIT_CODE"
+
+# 28c: 写其他路径 → 放行 (exit 0)
+EXIT_CODE=0
+echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/random-file.txt"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写其他路径放行 (exit 0)" "0" "$EXIT_CODE"
+
+# 28d: 非写工具 → 放行 (exit 0)
+EXIT_CODE=0
+echo '{"tool_name":"Read","tool_input":{"file_path":"/home/user/.meta-agent-framework/.opencode/rules/test.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "Read 工具不拦截 (exit 0)" "0" "$EXIT_CODE"
+
+fi
+
+# ============================================================
+# Case 29: syncWorkspace no-clobber（.opencode/ 不覆盖已有文件）
+# ============================================================
+if should_run 29; then
+echo -e "\n${YELLOW}Case 29: syncWorkspace no-clobber${NC}"
+
+# 准备测试目录
+SYNC_TEST_SRC="/tmp/maf-sync-test-src/.opencode/rules"
+SYNC_TEST_DST="/tmp/maf-sync-test-dst/.opencode/rules"
+rm -rf /tmp/maf-sync-test-src /tmp/maf-sync-test-dst
+mkdir -p "$SYNC_TEST_SRC" "$SYNC_TEST_DST"
+
+# 源：有 a.md 和 b.md
+echo "source content A" > "$SYNC_TEST_SRC/a.md"
+echo "source content B" > "$SYNC_TEST_SRC/b.md"
+
+# 目标：已有 a.md（用户修改过的版本）
+echo "user modified A" > "$SYNC_TEST_DST/a.md"
+
+# 执行 syncNoClobber（通过 node 直接调用函数）
+node -e "
+import { existsSync, mkdirSync, readdirSync, copyFileSync } from 'node:fs';
+import { join } from 'node:path';
+function syncNoClobber(srcDir, dstDir) {
+  if (!existsSync(srcDir)) return;
+  mkdirSync(dstDir, { recursive: true });
+  let entries;
+  try { entries = readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry.name);
+    const dstPath = join(dstDir, entry.name);
+    if (entry.isDirectory()) { syncNoClobber(srcPath, dstPath); }
+    else { if (!existsSync(dstPath)) { try { copyFileSync(srcPath, dstPath); } catch {} } }
+  }
+}
+syncNoClobber('/tmp/maf-sync-test-src/.opencode', '/tmp/maf-sync-test-dst/.opencode');
+"
+
+# 验证：a.md 没被覆盖，b.md 被创建
+CONTENT_A=$(cat "$SYNC_TEST_DST/a.md")
+assert "已有文件不被覆盖" "user modified A" "$CONTENT_A"
+
+CONTENT_B=$(cat "$SYNC_TEST_DST/b.md" 2>/dev/null)
+assert "新文件被创建" "source content B" "$CONTENT_B"
+
+rm -rf /tmp/maf-sync-test-src /tmp/maf-sync-test-dst
+fi
+
+# ============================================================
+# Case 30: maf-client sessions 输出格式
+# ============================================================
+if should_run 30; then
+echo -e "\n${YELLOW}Case 30: maf-client sessions${NC}"
+
+# 验证 sessions 命令能正常执行（不报错，输出包含表头）
+SESSIONS_OUTPUT=$(node "$ROOT_DIR/packages/client/bin/maf-install.mjs" sessions 2>&1) || true
+assert "sessions 命令有表头" "Agent" "$SESSIONS_OUTPUT"
+assert "sessions 命令有分隔线" "────" "$SESSIONS_OUTPUT"
+
+fi
+
+# ============================================================
+# Case 31: Plugin 非 Manager 不接收 workflow 广播
+# ============================================================
+if should_run 31; then
+echo -e "\n${YELLOW}Case 31: 非 Manager 不接收 workflow 广播${NC}"
+
+# 验证 Plugin 代码中 isRelevant 只对 Meta-Agent-Server 为 true
+RELEVANT_LINE=$(grep "isRelevant" "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js")
+assert "isRelevant 只认 Meta-Agent-Server" "Meta-Agent-Server" "$RELEVANT_LINE"
+
+# 验证不再包含 nodes.some 逻辑（旧代码）
+NODES_SOME=$(grep "nodes.*some.*activeAgent" "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js" 2>/dev/null || echo "not_found")
+assert "不再有 nodes.some 旧逻辑" "not_found" "$NODES_SOME"
+
+fi
+
+# ============================================================
+# Case 32: Agent 切换时 disconnect 旧 agent（一个 TUI 只注册一个）
+# ============================================================
+if should_run 32; then
+echo -e "\n${YELLOW}Case 32: Agent 切换 disconnect 旧 agent${NC}"
+
+# 模拟：同一个 Plugin 先连 agent-A，再连 agent-B，验证 A 被 disconnect
+SWITCH_AGENT_A="switch-test-a"
+SWITCH_AGENT_B="switch-test-b"
+SWITCH_PID=99999
+
+# 连接 agent-A
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$SWITCH_AGENT_A\",\"runtime\":\"opencode\",\"plugin_pid\":$SWITCH_PID,\"directory\":\"/tmp\"}" >/dev/null 2>&1
+
+# 验证 A 在线
+AGENTS_LIST=$(curl -s "$DAEMON_URL/agents" 2>/dev/null)
+HAS_A=$(echo "$AGENTS_LIST" | python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if any(a['agent_name']=='$SWITCH_AGENT_A' for a in d['agents']) else 'no')" 2>/dev/null)
+assert "agent-A 注册成功" "yes" "$HAS_A"
+
+# 模拟 Tab 切换：先 disconnect A，再 connect B（Plugin chat.message 逻辑）
+curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$SWITCH_AGENT_A\",\"plugin_pid\":$SWITCH_PID}" >/dev/null 2>&1
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$SWITCH_AGENT_B\",\"runtime\":\"opencode\",\"plugin_pid\":$SWITCH_PID,\"directory\":\"/tmp\"}" >/dev/null 2>&1
+
+# 验证：B 在线，A 不在
+AGENTS_LIST=$(curl -s "$DAEMON_URL/agents" 2>/dev/null)
+HAS_B=$(echo "$AGENTS_LIST" | python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if any(a['agent_name']=='$SWITCH_AGENT_B' for a in d['agents']) else 'no')" 2>/dev/null)
+HAS_A_AFTER=$(echo "$AGENTS_LIST" | python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if any(a['agent_name']=='$SWITCH_AGENT_A' for a in d['agents']) else 'no')" 2>/dev/null)
+assert "agent-B 注册成功" "yes" "$HAS_B"
+assert "agent-A 已被 disconnect" "no" "$HAS_A_AFTER"
+
+# 清理
+curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$SWITCH_AGENT_B\",\"plugin_pid\":$SWITCH_PID}" >/dev/null 2>&1
+
 fi
 
 # ============================================================

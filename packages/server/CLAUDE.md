@@ -19,8 +19,15 @@
 
 默认 `localhost:3000`（Server）/ `127.0.0.1:4100`（Daemon），实际以 `~/.meta-agent-framework/maf.config.json` 为准。
 
+## ⚠️ 文件写入规则（铁律）
+
+- **`.opencode/` 目录禁止修改**（框架管理，升级会覆盖）
+- **需要记录/积累的内容统一写入 `user/` 目录**
+- 此规则由 PreToolUse hook 强制执行，违反会直接报错
+
 ## 启动（严格按顺序执行）
 
 1. **必须**：用 Read 工具读取 `.opencode/agents/Meta-Agent-Server.md`（不可跳过）
-2. `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 获取 Agent 概览
-3. 综合 agent_name、capabilities、runtime、status，汇报团队全貌，等待指令
+2. 读取 `user/` 目录下所有 .md 文件（如果存在）— 这是你积累的知识和规则
+3. `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 获取 Agent 概览
+4. 综合 agent_name、capabilities、runtime、status，汇报团队全貌，等待指令
