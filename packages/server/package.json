@@ -1,6 +1,6 @@
 {
   "name": "@maf/meta-agent-server",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Meta-Agent-Framework Server — 分布式 AI Agent 编排调度中心",
   "main": "src/index.ts",
   "bin": {
