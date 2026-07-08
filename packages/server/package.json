@@ -41,6 +41,7 @@
     ".opencode/",
     ".claude/",
     "CLAUDE.md",
+    "AGENTS.md",
     "start.sh",
     "tsconfig.json"
   ],

@@ -97,6 +97,7 @@ async function checkDaemon() {
 /** 拉起 Node Daemon */
 async function spawnNodeDaemon(agentName) {
   const paths = [
+    join(homedir(), ".meta-agent-framework", "daemon.mjs"),
     join(homedir(), ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
     join(process.env.CLAUDE_PLUGIN_ROOT || "", "..", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
   ];

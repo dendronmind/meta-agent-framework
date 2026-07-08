@@ -1,7 +1,7 @@
 {
   "name": "@maf/meta-agent-client",
   "version": "0.4.9",
-  "description": "Meta-Agent Framework Client — opencode + Claude Code Plugin 一键安装",
+  "description": "Meta-Agent Framework Client — opencode + Claude Code + Codex 一键接入",
   "bin": {
     "maf-client": "./bin/maf-client"
   },
@@ -13,12 +13,14 @@
     "bin/maf-install.mjs",
     "opencode/",
     "claude-code/",
+    "codex/",
     "README.md"
   ],
   "keywords": [
     "meta-agent",
     "opencode",
     "claude-code",
+    "codex",
     "agent",
     "distributed"
   ],

@@ -50,6 +50,7 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 const SYNC_OVERWRITE = [
   ".claude",                 // claude hooks 配置
   "CLAUDE.md",              // claude system prompt
+  "AGENTS.md",              // codex project instructions
   "opencode.json",           // opencode 配置（instructions 引用 user/*.md）
   "scripts/maf-server-hook.mjs",  // claude asyncRewake hook
   "scripts/check-write-path.mjs", // 文件写入保护 hook
@@ -148,6 +149,10 @@ function getLocalIP() {
     }
   }
   return "127.0.0.1";
+}
+
+function hasCommand(cmd) {
+  try { execSync(`command -v ${cmd}`, { stdio: "ignore", timeout: 2000 }); return true; } catch { return false; }
 }
 
 function readConfig() {
@@ -368,24 +373,41 @@ function cmdLogs() {
   process.exit(0);  // 直接退出，不走 main().then()
 }
 
+const RUNTIME_ALIASES = {
+  opencode: "opencode",
+  claude: "claude",
+  "claude-code": "claude",
+  cc: "claude",
+  codex: "codex",
+};
+
+function normalizeRuntime(runtime) {
+  if (!runtime) return "";
+  return RUNTIME_ALIASES[String(runtime).trim()] || "";
+}
+
 function detectRuntime() {
-  // 优先级：命令行参数（仅 opencode/claude）> 配置文件 > 默认 opencode
-  const argRuntime = process.argv[3];
-  if (argRuntime && ["opencode", "claude"].includes(argRuntime)) {
+  // 优先级：命令行参数（opencode/claude/codex）> 配置文件 > 默认 opencode
+  const argRuntime = normalizeRuntime(process.argv[3]);
+  if (argRuntime) {
     saveRuntime(argRuntime);
     return argRuntime;
   }
 
   const cfg = readConfig();
-  if (cfg?.server?.runtime) return cfg.server.runtime;
+  const cfgRuntime = normalizeRuntime(cfg?.server?.runtime);
+  if (cfgRuntime) return cfgRuntime;
 
+  if (hasCommand("opencode")) return "opencode";
+  if (hasCommand("claude")) return "claude";
+  if (hasCommand("codex")) return "codex";
   return "opencode";
 }
 
-/** 获取 tui 命令后面的额外参数（排除 runtime 参数） */
+/** 获取 tui/resume 命令后面的额外参数（排除 runtime 参数） */
 function getTuiExtraArgs() {
   const args = process.argv.slice(3);
-  if (args[0] && ["opencode", "claude"].includes(args[0])) {
+  if (args[0] && normalizeRuntime(args[0])) {
     return args.slice(1).join(" ");
   }
   return args.join(" ");
@@ -436,9 +458,10 @@ function cmdTui() {
 
   const runtime = detectRuntime();
   if (!runtime) {
-    console.error("❌ 未检测到 opencode 或 claude，请先安装其中之一：");
+    console.error("❌ 未检测到 opencode / claude / codex，请先安装其中之一：");
     console.error("   opencode: https://opencode.ai");
     console.error("   claude:   npm install -g @anthropic-ai/claude-code");
+    console.error("   codex:    npm install -g @openai/codex");
     process.exit(1);
   }
 
@@ -453,6 +476,9 @@ function cmdTui() {
   try {
     if (runtime === "opencode") {
       const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${extraArgs}`.trim();
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+    } else if (runtime === "codex") {
+      const cmd = `codex -C "${MAF_HOME}" ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
     } else {
       const cmd = `claude ${extraArgs}`.trim();
@@ -474,7 +500,7 @@ function cmdResume() {
 
   const runtime = detectRuntime();
   if (!runtime) {
-    console.error("❌ 未检测到 opencode 或 claude");
+    console.error("❌ 未检测到 opencode / claude / codex");
     process.exit(1);
   }
 
@@ -522,6 +548,15 @@ function cmdResume() {
       execSync(cmd, { cwd: sessionDir, stdio: "inherit" });
     } catch {
       // 用户退出 TUI
+    }
+  } else if (runtime === "codex") {
+    // Codex: 恢复最近对话，cwd 切到 MAF_HOME
+    console.log(`\n  🔄 恢复 Codex session (--last --all)\n`);
+    const cmd = `codex resume --last --all -C "${MAF_HOME}" ${extraArgs}`.trim();
+    try {
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+    } catch {
+      // 用户退出
     }
   } else {
     // Claude Code: --continue 恢复最近对话，cwd 切到 MAF_HOME
@@ -580,7 +615,7 @@ Meta-Agent-Framework Server
   stop          停止 Server
   restart       重启 Server
   resume        恢复上一个 session（自动查找最近对话）
-  tui [runtime] 启动新交互界面（opencode 或 claude）
+  tui [runtime] 启动新交互界面（opencode / claude / codex）
   status        查看运行状态
   logs          查看日志（tail -f）
   version       版本信息
@@ -594,6 +629,7 @@ Meta-Agent-Framework Server
   2. maf-server resume        # 恢复上次对话（最常用！）
   3. maf-server tui           # 启动全新会话
   4. maf-server tui claude    # 用 Claude Code 启动新会话
+  5. maf-server tui codex     # 用 Codex 启动新会话
 `);
 }
 

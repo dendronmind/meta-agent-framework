@@ -21,7 +21,7 @@ export const CLIENT_MIN_VERSION = '0.4.0';
 export type AgentStatus = 'online' | 'offline' | 'busy' | 'dead';
 
 /** Agent 运行时类型：决定 Client 端使用哪个 CLI 工具执行 */
-export type AgentRuntime = 'opencode' | 'claude-code';
+export type AgentRuntime = 'opencode' | 'claude-code' | 'codex';
 
 /** Client 注册时提交的 payload */
 export interface ClientRegisterPayload {
@@ -56,7 +56,7 @@ export interface AgentInfo {
   project_path?: string;           // agent 所在项目目录
   capabilities: string;            // 自然语言描述
   mode?: 'primary' | 'subagent' | 'all';
-  runtime?: AgentRuntime;          // 运行时：opencode（默认）或 claude-code
+  runtime?: AgentRuntime;          // 运行时：opencode（默认）/ claude-code / codex
   skills?: SkillInfo[];            // 该 agent 可用的 skills
   mcps?: McpInfo[];                // 该 agent 可用的 MCP servers
 }
@@ -73,7 +73,7 @@ export interface Agent {
   project_path: string;            // 项目路径
   capabilities: string;            // 能力标签（自然语言）
   mode: string;                    // primary/subagent/all
-  runtime: AgentRuntime;           // 运行时：opencode 或 claude-code
+  runtime: AgentRuntime;           // 运行时：opencode / claude-code / codex
   skills: string;                  // JSON 字符串: SkillInfo[]
   mcps: string;                    // JSON 字符串: McpInfo[]
   client_version: string;          // Client（Plugin）版本号
@@ -246,7 +246,7 @@ export interface ExecuteCommand {
   prompt: string;                  // 执行指令（自然语言描述目标即可）
   scope: ExecuteScope;             // 操作范围：project（默认）| agent_self
   intent: ExecuteIntent;           // 任务意图：query | modify | review | diagnose | execute
-  runtime?: AgentRuntime;          // 运行时：opencode（默认）或 claude-code
+  runtime?: AgentRuntime;          // 运行时：opencode（默认）/ claude-code / codex
   session_id?: string;             // Client 侧 agent session ID（续接用，首次为空）
 }
 

@@ -3,7 +3,7 @@
  * Meta-Agent-Framework Node Daemon（驻地代理）
  *
  * 一台机器一个常驻进程，管理本机所有 agent。
- * 支持 opencode Plugin 和 Claude Code hook 两种 Client 连接。
+ * 支持 opencode Plugin、Claude Code hook，以及 Codex screen+TUI 三种运行时。
  *
  * 职责：
  *   1. 管理本机所有 agent（注册/心跳/状态跟踪）
@@ -15,7 +15,7 @@
  * 环境变量：
  *   MAF_NODE_PORT      — HTTP 端口（默认 4100）
  *   MAF_AGENT_NAME     — 初始 agent 名称（可选，Claude Code --daemon 传入）
- *   MAF_RUNTIME        — 初始 agent 的运行时：opencode（默认）| claude-code
+ *   MAF_RUNTIME        — 初始 agent 的运行时：opencode（默认）| claude-code | codex
  *   MAF_DIRECTORY      — 工作目录
  *   MAF_PLUGIN_DIR     — Plugin 安装目录
  *   MAF_PARENT_PID     — 仅 Claude Code 首次拉起时使用（不再跟随退出）
@@ -123,6 +123,13 @@ let lastInventoryFP = "";
 const AGENT_ALIVE_TIMEOUT = 5_000;  // 5s（long-poll 2s 周期 × 2 + 裕量）
 
 const MAX_QUEUE_SIZE = 10;
+const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 330_000;
+const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
+const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
+const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（默认，screen + Codex TUI）| exec（headless）
+const codexQueueRunners = new Set();
+const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
 
 function getAgentQueue(agentName) {
   if (!taskQueues.has(agentName)) {
@@ -153,6 +160,9 @@ function pruneDeadAgents() {
     const q = taskQueues.get(name);
     if (q?.executingTaskId) continue;  // 正在执行任务，不清理
 
+    // Codex 由 Daemon 自己执行，没有常驻 Plugin；注册后保持在线
+    if (info.runtime === "codex") continue;
+
     // Plugin 进程还活着，不清理
     if (info.pluginPid && isProcessAlive(info.pluginPid)) continue;
 
@@ -182,6 +192,12 @@ function getAgentStatuses() {
   const statuses = {};
   for (const [name, info] of agents) {
     const q = taskQueues.get(name);
+
+    // Codex 模式：Daemon 托管执行；有任务则 busy，否则 online
+    if (info.runtime === "codex") {
+      statuses[name] = q?.executingTaskId ? "busy" : "online";
+      continue;
+    }
 
     // claude-code 模式：--wait 进程每 10s poll 一次刷新 lastSeen
     // lastSeen 在 15s 内 → 在线（--wait 活着）；超过 → 离线（--wait 死了）
@@ -267,6 +283,11 @@ async function spawnAgent(agentName, projectPath, agentRuntime) {
   const agentInfo = agents.get(agentName);
   const runtime = agentRuntime || agentInfo?.runtime || "opencode";
 
+  if (runtime === "codex") {
+    log(`ℹ️ codex runtime 由 Daemon 任务队列通过 screen + Codex TUI 执行: ${agentName}`);
+    return true;
+  }
+
   // 预检查
   try { execSync("which screen", { stdio: "ignore", timeout: 2000 }); } catch {
     log(`❌ screen 未安装，无法拉起 agent`);
@@ -329,10 +350,18 @@ async function spawnAgent(agentName, projectPath, agentRuntime) {
 function cleanIdleServes() {
   const now = Date.now();
   for (const [name, info] of serveProcesses) {
+    if (agents.get(name)?.runtime === "codex") continue;
     if (now - info.lastTaskAt > SERVE_IDLE_TIMEOUT) {
       log(`🗑 agent 空闲超时，关闭 screen: ${name} (${info.screenName})`);
       try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
       serveProcesses.delete(name);
+    }
+  }
+  for (const [taskId, info] of codexTaskScreens) {
+    if (now - info.lastTaskAt > SERVE_IDLE_TIMEOUT) {
+      log(`🗑 Codex screen 空闲超时，关闭: ${info.screenName}`);
+      try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
+      codexTaskScreens.delete(taskId);
     }
   }
 }
@@ -343,6 +372,10 @@ function cleanAllServes() {
     try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
   }
   serveProcesses.clear();
+  for (const [, info] of codexTaskScreens) {
+    try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
+  }
+  codexTaskScreens.clear();
 }
 
 /** 定期清理长期不活跃的 agent（1 小时无活跃则移除，仅清理真正被遗忘的残留） */
@@ -350,6 +383,7 @@ function cleanDeadAgents() {
   const now = Date.now();
   const DEAD_TIMEOUT = 60 * 60_000;
   for (const [name, info] of agents) {
+    if (info.runtime === "codex") continue;
     if (now - (info.lastSeen || 0) > DEAD_TIMEOUT) {
       agents.delete(name);
       const q = taskQueues.get(name);
@@ -369,10 +403,12 @@ function scanSkills() {
   const dirs = [
     join(DIRECTORY, ".opencode", "skills"),
     join(DIRECTORY, ".claude", "skills"),
+    join(DIRECTORY, ".codex", "skills"),
     join(DIRECTORY, ".agents", "skills"),
     join(homedir(), ".config", "opencode", "skills"),
     join(homedir(), ".opencode", "skills"),
     join(homedir(), ".claude", "skills"),
+    join(homedir(), ".codex", "skills"),
     join(homedir(), ".agents", "skills"),
   ];
   const seen = new Set();
@@ -412,6 +448,10 @@ function scanMcps() {
     join(homedir(), ".claude", ".mcp.json"),
     join(homedir(), ".claude", "claude_desktop_config.json"),
   ];
+  const codexPaths = [
+    join(homedir(), ".codex", "config.toml"),
+    join(DIRECTORY, ".codex", "config.toml"),
+  ];
   const seen = new Set();
   const mcps = [];
   for (const p of opencodePaths) {
@@ -444,6 +484,20 @@ function scanMcps() {
       }
     } catch {}
   }
+  for (const p of codexPaths) {
+    if (!existsSync(p)) continue;
+    try {
+      const raw = readFileSync(p, "utf-8");
+      const re = /^\s*\[mcp_servers\.(?:"([^"]+)"|([^\]\s]+))\]\s*$/gm;
+      let m;
+      while ((m = re.exec(raw))) {
+        const name = (m[1] || m[2] || "").trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        mcps.push({ name, type: "unknown", enabled: true });
+      }
+    } catch {}
+  }
   return mcps;
 }
 
@@ -468,25 +522,44 @@ function readAgentMeta(filePath) {
   } catch { return null; }
 }
 
-function findAgentDef(name, runtime, agentDirectory) {
-  // agentDirectory: 该 agent 自己的项目目录（来自 /agents/connect 传入）
+function agentDefPaths(name, agentDirectory) {
   const dir = agentDirectory || DIRECTORY;
-  const paths = [
+  return [
+    join(dir, ".codex", "agents", `${name}.md`),
+    join(homedir(), ".codex", "agents", `${name}.md`),
     join(dir, ".opencode", "agents", `${name}.md`),
     join(homedir(), ".config", "opencode", "agents", `${name}.md`),
     join(dir, ".claude", "agents", `${name}.md`),
     join(homedir(), ".claude", "agents", `${name}.md`),
   ];
+}
+
+function findAgentDef(name, runtime, agentDirectory) {
+  // agentDirectory: 该 agent 自己的项目目录（来自 /agents/connect 传入）
+  const dir = agentDirectory || DIRECTORY;
   let base = { agent_name: name, project_path: dir, capabilities: "", mode: "subagent", runtime: runtime || "opencode" };
-  for (const p of paths) {
+  for (const p of agentDefPaths(name, dir)) {
     if (existsSync(p)) {
       const meta = readAgentMeta(p);
-      if (meta) { base = { ...base, ...meta, runtime: runtime || "opencode" }; break; }
+      if (meta) { base = { ...base, ...meta, runtime: runtime || meta.runtime || "opencode" }; break; }
     }
   }
   base.skills = scanSkills();
   base.mcps = scanMcps();
   return base;
+}
+
+function readAgentInstruction(name, runtime, agentDirectory) {
+  const dir = agentDirectory || DIRECTORY;
+  const paths = runtime === "codex"
+    ? agentDefPaths(name, dir)
+    : agentDefPaths(name, dir).filter(p => !p.includes("/.codex/"));
+  for (const p of paths) {
+    if (existsSync(p)) {
+      try { return { path: p, content: readFileSync(p, "utf-8") }; } catch {}
+    }
+  }
+  return null;
 }
 
 // ============================================================
@@ -609,6 +682,14 @@ function enqueueTask(agentName, task) {
         waiter.writeHead(200, { "Content-Type": "application/json" });
         waiter.end(JSON.stringify({ task: { id: nextTask.id, title: nextTask.title, _notify: true } }));
       } catch {}
+    } else if (runtime === "codex") {
+      // Codex 模式：Daemon 自己执行，不交给 long-poll Plugin
+      q.pending.unshift(nextTask);
+      try {
+        waiter.writeHead(200, { "Content-Type": "application/json" });
+        waiter.end(JSON.stringify({ task: null }));
+      } catch {}
+      scheduleCodexQueue(agentName);
     } else {
       // opencode 模式：直接取走任务给 Plugin 执行
       q.lastExecuted = nextTask;
@@ -664,6 +745,323 @@ async function reportTaskResult(task, status, result, durationMs) {
   } catch (err) { log(`⚠ 回报失败: ${err.message}`); }
 }
 
+// ============================================================
+// Codex executor — 默认 screen + TUI，保留 headless codex exec 模式
+// ============================================================
+function truncateText(text, max = 4000) {
+  const s = String(text || "");
+  return s.length > max ? s.slice(0, max) + `\n...<truncated ${s.length - max} chars>` : s;
+}
+
+function safeFilePart(value) {
+  return String(value || "task").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80) || "task";
+}
+
+function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
+  const agentInfo = agents.get(agentName);
+  const def = readAgentInstruction(agentName, "codex", agentInfo?.directory || cwd);
+  const parts = [
+    `# MAF Codex Runtime Task`,
+    ``,
+    `你正在作为 MAF agent "${agentName}" 执行由 Meta-Agent-Framework Server 下发的任务。`,
+    `工作目录: ${cwd}`,
+    ``,
+    `## 执行要求`,
+    `- 直接完成任务并在最终回答中给出结果摘要、关键改动/发现、验证情况。`,
+    `- 不要调用 MAF 的 /tasks/done 或 workflow 回报接口；Node Daemon 会自动收集你的最终回答并回报。`,
+    `- 如果需要修改文件，遵守仓库内 AGENTS.md 和相关规则。`,
+    `- 如果任务无法完成，说明阻塞原因和建议下一步。`,
+  ];
+  if (reportScript) {
+    parts.push(
+      ``,
+      `## MAF 回报要求`,
+      `本任务运行在 screen + Codex TUI 中，适合长期交互。任务完成或失败后，必须用下面脚本回报 MAF Daemon：`,
+      ``,
+      `1. 先把最终总结写到一个 Markdown 文件，例如 /tmp/maf-codex-result-${safeFilePart(task.id)}.md`,
+      `2. 然后执行：`,
+      ``,
+      `\`\`\`bash`,
+      `node "${reportScript}" completed /tmp/maf-codex-result-${safeFilePart(task.id)}.md`,
+      `# 如果失败：node "${reportScript}" failed /tmp/maf-codex-result-${safeFilePart(task.id)}.md`,
+      `\`\`\``,
+      ``,
+      `不要直接调用 Server workflow API；这个脚本会回报到本机 Daemon。`
+    );
+  }
+  if (def?.content) {
+    parts.push(``, `## Agent 定义 (${def.path})`, def.content.trim());
+  }
+  parts.push(
+    ``,
+    `## 任务元数据`,
+    `- task_id: ${task.id || ""}`,
+    `- workflow_id: ${task.workflow_id || ""}`,
+    `- node_id: ${task.node_id || ""}`,
+    `- type: ${task.type || "custom"}`,
+    `- title: ${task.title || "任务"}`,
+    ``,
+    `## 任务内容`,
+    task.description || task.title || ""
+  );
+  return parts.join("\n");
+}
+
+function buildCodexArgs(cwd, outputFile) {
+  const args = [];
+  if (!CODEX_BYPASS_SANDBOX) {
+    args.push("-a", process.env.MAF_CODEX_APPROVAL || "never");
+  }
+  if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
+  args.push("exec");
+  if (CODEX_BYPASS_SANDBOX) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else {
+    args.push("--sandbox", CODEX_SANDBOX);
+  }
+  if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
+  args.push("-C", cwd, "--skip-git-repo-check", "--color", "never", "-o", outputFile, "-");
+  return args;
+}
+
+function buildCodexTuiArgs(cwd, promptFile) {
+  const args = [];
+  if (!CODEX_BYPASS_SANDBOX) {
+    args.push("-a", process.env.MAF_CODEX_APPROVAL || "never");
+  }
+  if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
+  if (CODEX_BYPASS_SANDBOX) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else {
+    args.push("--sandbox", CODEX_SANDBOX);
+  }
+  if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
+  args.push("-C", cwd);
+  return args;
+}
+
+function writeCodexReportScript(agentName, task) {
+  const reportScript = join(STATE_DIR, `maf-codex-report-${safeFilePart(agentName)}-${safeFilePart(task.id)}.mjs`);
+  const content = `#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+const status = process.argv[2] || "completed";
+const resultFile = process.argv[3] || "";
+let result = process.argv.slice(3).join(" ");
+if (resultFile) {
+  try { result = readFileSync(resultFile, "utf-8"); } catch {}
+}
+const payload = {
+  agent_name: ${JSON.stringify(agentName)},
+  task_id: ${JSON.stringify(task.id)},
+  status,
+  result,
+  duration_ms: 0,
+};
+const res = await fetch(${JSON.stringify(`http://127.0.0.1:${NODE_PORT}/tasks/done`)}, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload),
+});
+if (!res.ok) {
+  console.error(\`MAF report failed: HTTP \${res.status}\`);
+  process.exit(1);
+}
+console.log("MAF report sent");
+`;
+  writeFileSync(reportScript, content, { mode: 0o700 });
+  return reportScript;
+}
+
+async function spawnCodexTuiTask(agentName, task, projectPath) {
+  const started = Date.now();
+  const cwd = (projectPath || agents.get(agentName)?.directory || DIRECTORY).replace(/^~/, homedir());
+  if (!existsSync(cwd)) {
+    const msg = `Codex 工作目录不存在: ${cwd}`;
+    log(`❌ ${msg}`);
+    await reportTaskResult(task, "failed", msg, Date.now() - started);
+    return false;
+  }
+
+  try { execSync("which screen", { stdio: "ignore", timeout: 2000 }); } catch {
+    const msg = "screen 未安装，无法拉起 Codex TUI";
+    log(`❌ ${msg}`);
+    await reportTaskResult(task, "failed", msg, Date.now() - started);
+    return false;
+  }
+  try { execSync(`which ${CODEX_BIN}`, { stdio: "ignore", timeout: 2000 }); } catch {
+    const msg = `${CODEX_BIN} 未安装，无法拉起 Codex TUI`;
+    log(`❌ ${msg}`);
+    await reportTaskResult(task, "failed", msg, Date.now() - started);
+    return false;
+  }
+
+  const screenName = `maf-codex-${safeFilePart(agentName)}-${safeFilePart(task.id).slice(0, 24)}`;
+  const promptFile = join(STATE_DIR, `${screenName}.prompt.md`);
+  const launchScript = join(STATE_DIR, `${screenName}.launch.mjs`);
+  const reportScript = writeCodexReportScript(agentName, task);
+  const prompt = buildCodexPrompt(agentName, task, cwd, reportScript);
+  writeFileSync(promptFile, prompt, "utf-8");
+  const codexArgs = buildCodexTuiArgs(cwd, promptFile);
+  const launcher = `#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+const prompt = readFileSync(${JSON.stringify(promptFile)}, "utf-8");
+const args = ${JSON.stringify(codexArgs)};
+args.push(prompt);
+const child = spawn(${JSON.stringify(CODEX_BIN)}, args, { cwd: ${JSON.stringify(cwd)}, stdio: "inherit", env: process.env });
+child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+child.on("error", (err) => { console.error(err.message); process.exit(1); });
+`;
+  writeFileSync(launchScript, launcher, { mode: 0o700 });
+
+  log(`🚀 拉起 Codex TUI (screen): agent=${agentName} task=${task.id} cwd=${cwd} session=${screenName}`);
+  const ok = await new Promise((resolve) => {
+    const child = spawn("screen", ["-dmS", screenName, process.execPath, launchScript], {
+      cwd,
+      stdio: "ignore",
+      detached: true,
+      env: { ...process.env },
+    });
+    child.on("error", err => { log(`❌ Codex screen 拉起失败: ${err.message}`); resolve(false); });
+    child.on("close", code => resolve(code === 0));
+    child.unref();
+  });
+  if (!ok) {
+    await reportTaskResult(task, "failed", `Codex screen 拉起失败: ${screenName}`, Date.now() - started);
+    return false;
+  }
+
+  task.session_id = screenName;
+  codexTaskScreens.set(task.id, { agentName, screenName, startedAt: Date.now(), lastTaskAt: Date.now() });
+  log(`✅ Codex TUI screen 已创建: ${screenName}`);
+  return true;
+}
+
+async function executeCodexExecTask(agentName, task, projectPath) {
+  const started = Date.now();
+  const cwd = (projectPath || agents.get(agentName)?.directory || DIRECTORY).replace(/^~/, homedir());
+  const outFile = join(STATE_DIR, `codex-${safeFilePart(agentName)}-${safeFilePart(task.id)}-${Date.now()}.txt`);
+
+  if (!existsSync(cwd)) {
+    const msg = `Codex 工作目录不存在: ${cwd}`;
+    log(`❌ ${msg}`);
+    await reportTaskResult(task, "failed", msg, Date.now() - started);
+    return;
+  }
+
+  const prompt = buildCodexPrompt(agentName, task, cwd);
+  const args = buildCodexArgs(cwd, outFile);
+  log(`🤖 Codex exec 开始: agent=${agentName} task=${task.id} cwd=${cwd} sandbox=${CODEX_BYPASS_SANDBOX ? "bypass" : CODEX_SANDBOX}`);
+
+  const result = await new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    let timedOut = false;
+
+    const finish = (status, message, code = null, signal = null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      let finalMessage = "";
+      try { if (existsSync(outFile)) finalMessage = readFileSync(outFile, "utf-8").trim(); } catch {}
+      try { if (existsSync(outFile)) unlinkSync(outFile); } catch {}
+
+      if (status === "completed") {
+        resolve({ status, result: finalMessage || truncateText(stdout.trim() || stderr.trim() || "Codex completed with no output") });
+        return;
+      }
+
+      const chunks = [message];
+      if (code !== null || signal) chunks.push(`exit=${code ?? ""}${signal ? ` signal=${signal}` : ""}`);
+      if (finalMessage) chunks.push(`final:\n${truncateText(finalMessage)}`);
+      if (stderr.trim()) chunks.push(`stderr:\n${truncateText(stderr.trim())}`);
+      if (stdout.trim()) chunks.push(`stdout:\n${truncateText(stdout.trim())}`);
+      resolve({ status: "failed", result: chunks.filter(Boolean).join("\n\n") });
+    };
+
+    const child = spawn(CODEX_BIN, args, {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch {}
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000).unref?.();
+    }, CODEX_TASK_TIMEOUT_MS);
+
+    child.stdout.on("data", d => { stdout += d.toString(); });
+    child.stderr.on("data", d => { stderr += d.toString(); });
+    child.on("error", err => finish("failed", `Codex 启动失败: ${err.message}`));
+    child.on("close", (code, signal) => {
+      if (timedOut) {
+        finish("failed", `Codex 执行超时 (${CODEX_TASK_TIMEOUT_MS}ms)`, code, signal);
+      } else if (code === 0) {
+        finish("completed", "");
+      } else {
+        finish("failed", `Codex 执行失败`, code, signal);
+      }
+    });
+
+    try { child.stdin.write(prompt); child.stdin.end(); } catch (err) { finish("failed", `Codex stdin 写入失败: ${err.message}`); }
+  });
+
+  const duration = Date.now() - started;
+  log(`${result.status === "completed" ? "✅" : "❌"} Codex exec 结束: agent=${agentName} task=${task.id} status=${result.status} (${duration}ms)`);
+  await reportTaskResult(task, result.status, result.result, duration);
+}
+
+async function runCodexQueue(agentName) {
+  const q = getAgentQueue(agentName);
+  try {
+    if (CODEX_MODE === "exec") {
+      while (q.pending.length > 0) {
+        const task = q.pending.shift();
+        if (!task) continue;
+        const agentInfo = agents.get(agentName);
+        if (agentInfo) agentInfo.lastSeen = Date.now();
+        q.lastExecuted = task;
+        q.executingTaskId = task.id;
+        await executeCodexExecTask(agentName, task, task.project_path || agentInfo?.directory || DIRECTORY);
+        q.executingTaskId = null;
+        q.lastExecuted = null;
+        if (agentInfo) agentInfo.lastSeen = Date.now();
+      }
+    } else {
+      if (!q.executingTaskId && q.pending.length > 0) {
+        const task = q.pending.shift();
+        const agentInfo = agents.get(agentName);
+        if (agentInfo) agentInfo.lastSeen = Date.now();
+        q.lastExecuted = task;
+        q.executingTaskId = task.id;
+        const ok = await spawnCodexTuiTask(agentName, task, task.project_path || agentInfo?.directory || DIRECTORY);
+        if (!ok) {
+          q.executingTaskId = null;
+          q.lastExecuted = null;
+        }
+      }
+    }
+  } finally {
+    codexQueueRunners.delete(agentName);
+    if (CODEX_MODE === "exec" && q.pending.length > 0) scheduleCodexQueue(agentName);
+  }
+}
+
+function scheduleCodexQueue(agentName) {
+  const agentInfo = agents.get(agentName);
+  if (agentInfo?.runtime !== "codex") return;
+  if (codexQueueRunners.has(agentName)) return;
+  codexQueueRunners.add(agentName);
+  setImmediate(() => {
+    runCodexQueue(agentName).catch(err => {
+      codexQueueRunners.delete(agentName);
+      log(`❌ Codex queue 失败: ${agentName} ${err.message}`);
+    });
+  });
+}
+
 // 任务轮询（降级）
 async function pollTasks() {
   if (agents.size === 0) return;
@@ -685,6 +1083,7 @@ async function pollTasks() {
         target_agent: name,
       };
       enqueueTask(name, task);
+      if ((agents.get(name)?.runtime || "opencode") === "codex") scheduleCodexQueue(name);
     } catch {}
   }
 }
@@ -716,6 +1115,7 @@ function performOTA(payload) {
         join(homedir(), ".config", "opencode"),
         join(homedir(), ".opencode"),
         join(homedir(), ".claude"),
+        join(homedir(), ".codex"),
         join(homedir(), ".agents"),
         join(homedir(), ".meta-agent-framework"),
         selfDir,
@@ -749,27 +1149,37 @@ function resolveEvolveTargetDir(target, runtime, action) {
     case "skill":
       return runtime === "claude-code"
         ? join(home, ".claude", "skills")
-        : join(home, ".config", "opencode", "skills");
+        : runtime === "codex"
+          ? join(home, ".codex", "skills")
+          : join(home, ".config", "opencode", "skills");
     case "agent":
       return runtime === "claude-code"
         ? join(home, ".claude", "agents")
-        : join(home, ".config", "opencode", "agents");
+        : runtime === "codex"
+          ? join(home, ".codex", "agents")
+          : join(home, ".config", "opencode", "agents");
     case "project_agent": {
       const projPath = action.project_path || DIRECTORY;
       return runtime === "claude-code"
         ? join(projPath, ".claude")
-        : join(projPath, ".opencode", "agents");
+        : runtime === "codex"
+          ? join(projPath, ".codex", "agents")
+          : join(projPath, ".opencode", "agents");
     }
     case "mcp_config": {
       const projPath = action.project_path || DIRECTORY;
       return runtime === "claude-code"
         ? projPath  // claude: .mcp.json 在项目根目录
-        : projPath; // opencode: opencode.json 在项目根目录
+        : runtime === "codex"
+          ? join(projPath, ".codex") // codex: .codex/config.toml
+          : projPath; // opencode: opencode.json 在项目根目录
     }
     case "global_rules":
       return runtime === "claude-code"
         ? join(home, ".claude")
-        : join(home, ".config", "opencode");
+        : runtime === "codex"
+          ? join(home, ".codex")
+          : join(home, ".config", "opencode");
     case "custom":
       return (action.target_path || "").replace(/^~/, home);
     default:
@@ -784,13 +1194,14 @@ function isEvolvePathAllowed(target) {
     join(home, ".config", "opencode"),
     join(home, ".opencode"),
     join(home, ".claude"),
+    join(home, ".codex"),
     join(home, ".agents"),
     join(home, ".meta-agent-framework"),
   ];
-  // 项目目录下的 .opencode/ .claude/ 也允许
-  if (target.includes("/.opencode/") || target.includes("/.claude/")) return true;
-  // 项目根目录的配置文件（opencode.json / .mcp.json）
-  if (target.endsWith("/opencode.json") || target.endsWith("/.mcp.json")) return true;
+  // 项目目录下的 .opencode/ .claude/ .codex/ 也允许
+  if (target.includes("/.opencode/") || target.includes("/.claude/") || target.includes("/.codex/")) return true;
+  // 项目根目录的配置文件（opencode.json / .mcp.json / AGENTS.md）
+  if (target.endsWith("/opencode.json") || target.endsWith("/.mcp.json") || target.endsWith("/AGENTS.md")) return true;
   return allowed.some(d => target.startsWith(d));
 }
 
@@ -1093,6 +1504,28 @@ const httpServer = createServer(async (req, res) => {
       });
     }
 
+    // Codex runtime：无 Plugin/Hook，Daemon 默认通过 screen 拉起 Codex TUI 执行
+    if (runtime === "codex") {
+      const existing = agents.get(targetAgent);
+      agents.set(targetAgent, {
+        runtime: "codex",
+        pluginPid: existing?.pluginPid || 0,
+        directory: projectPath || existing?.directory || DIRECTORY,
+        registered: existing?.registered || false,
+        sessionId: existing?.sessionId || "",
+        lastSeen: Date.now(),
+      });
+      if (!existing?.registered) registerToServer();
+      const ok = enqueueTask(targetAgent, task);
+      if (ok) {
+        json(202, { accepted: true, agent: targetAgent, mode: CODEX_MODE === "exec" ? "codex-exec" : "codex-tui" });
+        scheduleCodexQueue(targetAgent);
+      } else {
+        json(409, { error: "queue full" });
+      }
+      return;
+    }
+
     // 检查是否有 Plugin 在线（long-poll 存活 或 进程存活）
     const q = getAgentQueue(targetAgent);
     const agentInfo = agents.get(targetAgent);
@@ -1109,7 +1542,7 @@ const httpServer = createServer(async (req, res) => {
         json(409, { error: "queue full" });
       }
     } else {
-      // 无 Plugin 在线 → 按需拉起（opencode: screen TUI, claude-code: screen TUI + hooks）
+        // 无 Plugin 在线 → 按需拉起（opencode: screen TUI, claude-code: screen TUI + hooks）
       log(`🔄 ${targetAgent} 无 Plugin 在线，按需拉起 (runtime=${runtime})...`);
 
       // 先入队（拉起后 Plugin/Wait 会取走）
@@ -1281,10 +1714,19 @@ const httpServer = createServer(async (req, res) => {
 
     reportTaskResult(task, body.status, body.result || "", body.duration_ms || 0);
 
+    if (body.task_id && codexTaskScreens.has(body.task_id)) {
+      const info = codexTaskScreens.get(body.task_id);
+      info.lastTaskAt = Date.now();
+    }
+
     // Claude Code 模式：检查队列是否有下一个任务（续传，避免等 asyncRewake）
+    // Codex TUI 模式：完成后再拉起下一个 screen + TUI 任务
     // opencode 模式不续传（它用 long-poll 自己取）
     let nextTask = null;
     const agentInfo = agentName ? agents.get(agentName) : null;
+    if (agentInfo?.runtime === "codex" && agentName && taskQueues.has(agentName)) {
+      if (taskQueues.get(agentName).pending.length > 0) scheduleCodexQueue(agentName);
+    }
     if (agentInfo?.runtime === "claude-code" && agentName && taskQueues.has(agentName)) {
       const q = taskQueues.get(agentName);
       if (q.pending.length > 0) {

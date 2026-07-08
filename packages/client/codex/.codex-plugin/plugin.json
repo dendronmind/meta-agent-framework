@@ -1,0 +1,34 @@
+{
+  "name": "maf",
+  "version": "0.4.9",
+  "description": "Meta-Agent Framework bridge for Codex. Starts the MAF Node Daemon and registers the current project agent on SessionStart.",
+  "author": {
+    "name": "Meta-Agent-Framework"
+  },
+  "license": "MIT",
+  "keywords": [
+    "meta-agent",
+    "maf",
+    "codex",
+    "daemon",
+    "distributed-agents"
+  ],
+  "interface": {
+    "displayName": "MAF",
+    "shortDescription": "Auto-connect Codex projects to Meta-Agent Framework",
+    "longDescription": "Starts the local MAF Node Daemon and registers Codex project agents automatically when a Codex session starts.",
+    "developerName": "Meta-Agent-Framework",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Automation",
+      "Developer Tools"
+    ],
+    "defaultPrompt": [
+      "Connect this Codex project to MAF",
+      "Show MAF daemon status",
+      "Explain this project's MAF agent metadata"
+    ],
+    "brandColor": "#10B981",
+    "screenshots": []
+  }
+}

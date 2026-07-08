@@ -12,19 +12,31 @@
  * 安装内容：
  *   opencode:     index.js（Plugin 主体）+ daemon.mjs（Node Daemon）+ package.json
  *   Claude Code:  plugin.json + hooks.json + maf-agent.mjs + marketplace 注册
+ *   Codex:        Codex plugin + SessionStart hook（自动拉起 Node Daemon + 注册当前 agent）
  *   环境变量:     META_AGENT_SERVER + MAF_NODE_PORT → ~/.bashrc
  */
 
 import { existsSync, mkdirSync, copyFileSync, cpSync, writeFileSync, readFileSync, appendFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(__dirname, "..");
 const HOME = homedir();
 const BASHRC = join(HOME, ".bashrc");
+const MAF_HOME = join(HOME, ".meta-agent-framework");
+const STANDALONE_DAEMON = join(MAF_HOME, "daemon.mjs");
+const CODEX_PLUGIN_NAME = "maf";
+const CODEX_PLUGIN_SOURCE_DIR = join(HOME, "plugins", CODEX_PLUGIN_NAME);
+const CODEX_MARKETPLACE_JSON = join(HOME, ".agents", "plugins", "marketplace.json");
+const CODEX_WRAPPER = join(HOME, ".local", "bin", "codex");
+
+function readPackageInfo() {
+  try { return JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf-8")); } catch { return {}; }
+}
+const CLIENT_PKG = readPackageInfo();
 
 // ============================================================
 // 工具函数
@@ -57,8 +69,23 @@ function bashrcAppend(line) {
 function detectEnv() {
   const hasOpencode = hasCommand("opencode");
   const hasClaude = hasCommand("claude");
+  const hasCodex = hasCommand("codex");
   const serverUrl = process.env.META_AGENT_SERVER || "";
-  return { hasOpencode, hasClaude, serverUrl };
+  return { hasOpencode, hasClaude, hasCodex, serverUrl };
+}
+
+// ============================================================
+// 安装 runtime-neutral Node Daemon
+// ============================================================
+function installStandaloneDaemon() {
+  console.log("\n📥 安装 Node Daemon...");
+  copyFile(join(PKG_ROOT, "opencode", "daemon.mjs"), STANDALONE_DAEMON);
+  writeFileSync(join(MAF_HOME, "package.json"), JSON.stringify({
+    name: "@maf/meta-agent-daemon",
+    version: CLIENT_PKG.version || "0.0.0",
+    type: "module",
+  }, null, 2) + "\n");
+  ok("daemon.mjs → ~/.meta-agent-framework/（runtime-neutral）");
 }
 
 // ============================================================
@@ -170,6 +197,200 @@ function installClaudeCode() {
   }
 }
 
+
+// ============================================================
+// 安装 Codex Plugin
+// ============================================================
+function codexPluginVersion() {
+  const base = CLIENT_PKG.version || "0.0.0";
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  return `${base}+codex.local-${stamp}`;
+}
+
+function writeCodexPluginManifestVersion(pluginDir) {
+  const manifestPath = join(pluginDir, ".codex-plugin", "plugin.json");
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    manifest.version = codexPluginVersion();
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  } catch (err) {
+    warn(`Codex plugin manifest 版本更新失败: ${err.message}`);
+  }
+}
+
+function upsertCodexMarketplace() {
+  mkdirSync(dirname(CODEX_MARKETPLACE_JSON), { recursive: true });
+  let marketplace = null;
+  if (existsSync(CODEX_MARKETPLACE_JSON)) {
+    try { marketplace = JSON.parse(readFileSync(CODEX_MARKETPLACE_JSON, "utf-8")); }
+    catch (err) {
+      const backup = `${CODEX_MARKETPLACE_JSON}.bak.${Date.now()}`;
+      try { copyFileSync(CODEX_MARKETPLACE_JSON, backup); warn(`旧 marketplace.json 解析失败，已备份: ${backup}`); } catch {}
+    }
+  }
+  if (!marketplace || typeof marketplace !== "object") {
+    marketplace = {
+      name: "personal",
+      interface: { displayName: "Personal" },
+      plugins: [],
+    };
+  }
+  marketplace.name = marketplace.name || "personal";
+  marketplace.interface = marketplace.interface || { displayName: "Personal" };
+  marketplace.plugins = Array.isArray(marketplace.plugins) ? marketplace.plugins : [];
+
+  const entry = {
+    name: CODEX_PLUGIN_NAME,
+    source: { source: "local", path: `./plugins/${CODEX_PLUGIN_NAME}` },
+    policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+    category: "Developer Tools",
+  };
+  const idx = marketplace.plugins.findIndex(p => p && p.name === CODEX_PLUGIN_NAME);
+  if (idx >= 0) marketplace.plugins[idx] = { ...marketplace.plugins[idx], ...entry };
+  else marketplace.plugins.push(entry);
+
+  writeFileSync(CODEX_MARKETPLACE_JSON, JSON.stringify(marketplace, null, 2) + "\n");
+  return marketplace.name;
+}
+
+function installCodex() {
+  console.log("\n📥 安装 Codex Plugin...");
+
+  const srcDir = join(PKG_ROOT, "codex");
+  const manifest = join(srcDir, ".codex-plugin", "plugin.json");
+  if (!existsSync(manifest)) {
+    warn("Codex plugin 源文件缺失，跳过安装");
+    return;
+  }
+
+  cpSync(srcDir, CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
+  copyFile(join(PKG_ROOT, "opencode", "daemon.mjs"), join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
+  writeFileSync(join(CODEX_PLUGIN_SOURCE_DIR, "package.json"), JSON.stringify({
+    name: "@maf/codex-plugin",
+    version: CLIENT_PKG.version || "0.0.0",
+    type: "module",
+  }, null, 2) + "\n");
+  writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);
+  ok("Codex plugin source → ~/plugins/maf");
+
+  const marketplaceName = upsertCodexMarketplace();
+  ok(`Codex personal marketplace → ${CODEX_MARKETPLACE_JSON}`);
+
+  try {
+    execSync(`codex plugin add ${CODEX_PLUGIN_NAME}@${marketplaceName} --json`, { stdio: "pipe", timeout: 15000 });
+    ok(`Codex plugin 已安装/启用: ${CODEX_PLUGIN_NAME}@${marketplaceName}`);
+  } catch (err) {
+    const stderr = String(err.stderr || err.message || "").trim().split("\n").slice(-2).join(" ");
+    warn(`Codex plugin 启用失败，可稍后手动执行: codex plugin add ${CODEX_PLUGIN_NAME}@${marketplaceName}${stderr ? ` (${stderr})` : ""}`);
+  }
+
+  installCodexWrapper();
+}
+
+function codexPluginStatus() {
+  const sourceInstalled = existsSync(join(CODEX_PLUGIN_SOURCE_DIR, ".codex-plugin", "plugin.json"));
+  let enabled = false;
+  try {
+    const cfg = readFileSync(join(HOME, ".codex", "config.toml"), "utf-8");
+    enabled = /\[plugins\."maf@[^"\]]+"\][\s\S]*?enabled\s*=\s*true/.test(cfg);
+  } catch {}
+  if (sourceInstalled && enabled) return "✅ 已安装/已启用";
+  if (sourceInstalled) return "⚠ 已安装但未启用";
+  return "❌ 未安装";
+}
+
+function findRealCodexBin() {
+  const candidates = [];
+  try {
+    const out = execSync("which -a codex 2>/dev/null", { encoding: "utf-8" });
+    candidates.push(...out.split("\n").map(s => s.trim()).filter(Boolean));
+  } catch {}
+  return candidates.find(path => path && path !== CODEX_WRAPPER && existsSync(path)) || "";
+}
+
+function installCodexWrapper() {
+  if (!hasCommand("codex")) return;
+  const realCodex = findRealCodexBin();
+  if (!realCodex) {
+    warn("未找到真实 codex 可执行文件，跳过 Codex wrapper");
+    return;
+  }
+
+  mkdirSync(dirname(CODEX_WRAPPER), { recursive: true });
+  const wrapper = `#!/usr/bin/env bash
+# Meta-Agent Framework Codex launcher wrapper.
+# Auto-starts/connects the local MAF Node Daemon before launching real Codex.
+set -euo pipefail
+REAL_CODEX=${JSON.stringify(realCodex)}
+HOOK="$HOME/plugins/maf/scripts/maf-codex-hook.mjs"
+LOG="$HOME/.meta-agent-framework/codex-wrapper.log"
+mkdir -p "$HOME/.meta-agent-framework" 2>/dev/null || true
+
+first_non_option=""
+skip_next=0
+for arg in "$@"; do
+  if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
+  case "$arg" in
+    -c|--config|-i|--image|-m|--model|-p|--profile|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|--remote|--remote-auth-token-env)
+      skip_next=1
+      continue
+      ;;
+    --*) continue ;;
+    -*) continue ;;
+    *) first_non_option="$arg"; break ;;
+  esac
+done
+
+case "$first_non_option" in
+  plugin|mcp|login|logout|completion|update|doctor|debug|features|sandbox|app-server|remote-control|mcp-server|exec-server|cloud|help|archive|delete|unarchive)
+    exec "$REAL_CODEX" "$@"
+    ;;
+esac
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|-V|--version)
+      exec "$REAL_CODEX" "$@"
+      ;;
+  esac
+done
+
+if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-}" != "1" && -f "$HOOK" ]]; then
+  {
+    printf '%s [codex-wrapper] start cwd=%s args=%q\\n' "$(date -Is)" "$PWD" "$*" >> "$LOG"
+    MAF_CODEX_WRAPPER_ACTIVE=1 node "$HOOK" <<JSON
+{"cwd":"$PWD","eventName":"WrapperStart"}
+JSON
+    printf '%s [codex-wrapper] hook done cwd=%s\\n' "$(date -Is)" "$PWD" >> "$LOG"
+  } >/dev/null 2>>"$LOG" || true
+fi
+
+exec "$REAL_CODEX" "$@"
+`;
+  writeFileSync(CODEX_WRAPPER, wrapper);
+  try { execSync(`chmod +x "${CODEX_WRAPPER}"`); } catch {}
+  ok(`Codex launcher wrapper → ${CODEX_WRAPPER}`);
+
+  if (!bashrcHas("$HOME/.local/bin")) {
+    bashrcAppend('export PATH="$HOME/.local/bin:$PATH"');
+    ok("PATH prepend ~/.local/bin → ~/.bashrc");
+  } else {
+    ok("PATH 已包含 ~/.local/bin");
+  }
+}
+
+function codexWrapperStatus() {
+  if (!existsSync(CODEX_WRAPPER)) return "❌ 未安装";
+  try {
+    const content = readFileSync(CODEX_WRAPPER, "utf-8");
+    if (!content.includes("Meta-Agent Framework Codex launcher wrapper")) return "⚠ 被其它文件占用";
+  } catch { return "⚠ 状态未知"; }
+  let first = "";
+  try { first = execSync("which codex 2>/dev/null", { encoding: "utf-8" }).trim(); } catch {}
+  if (first === CODEX_WRAPPER) return "✅ 已安装/已生效";
+  return `⚠ 已安装但 PATH 未优先 (${first || "not found"})`;
+}
+
 // ============================================================
 // 配置环境变量
 // ============================================================
@@ -239,6 +460,16 @@ function uninstall() {
     }
   } catch {}
 
+  // 清理 Codex plugin（不删除用户其它 Codex 配置）
+  try { execSync(`codex plugin remove ${CODEX_PLUGIN_NAME}@personal 2>/dev/null`, { stdio: "ignore" }); ok("卸载 Codex plugin"); } catch {}
+  try { execSync(`rm -rf "${CODEX_PLUGIN_SOURCE_DIR}"`); ok("删除 Codex plugin source ~/plugins/maf"); } catch {}
+  try {
+    if (existsSync(CODEX_WRAPPER) && readFileSync(CODEX_WRAPPER, "utf-8").includes("Meta-Agent Framework Codex launcher wrapper")) {
+      unlinkSync(CODEX_WRAPPER);
+      ok("删除 Codex launcher wrapper");
+    }
+  } catch {}
+
   // 清理配置目录
   const mafHome = join(HOME, ".meta-agent-framework");
   if (existsSync(mafHome)) {
@@ -262,7 +493,7 @@ function status() {
   const ocPlugin = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "index.js");
   const daemon = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs");
   log(`opencode Plugin: ${existsSync(ocPlugin) ? "✅ 已安装" : "❌ 未安装"}`);
-  log(`Node Daemon:     ${existsSync(daemon) ? "✅ 已安装" : "❌ 未安装"}`);
+  log(`Node Daemon:     ${existsSync(STANDALONE_DAEMON) || existsSync(daemon) ? "✅ 已安装" : "❌ 未安装"}`);
 
   try {
     const plList = execSync("claude plugins list 2>/dev/null", { encoding: "utf-8" });
@@ -270,6 +501,10 @@ function status() {
   } catch {
     log("Claude Code:     - (claude 命令不可用)");
   }
+
+  log(`Codex CLI:       ${hasCommand("codex") ? "✅ 可用" : "- (codex 命令不可用)"}`);
+  log(`Codex Plugin:    ${codexPluginStatus()}`);
+  log(`Codex Wrapper:   ${codexWrapperStatus()}`);
 
   log(`META_AGENT_SERVER: ${process.env.META_AGENT_SERVER || "(未设置)"}`);
   log(`MAF_NODE_PORT:     ${process.env.MAF_NODE_PORT || "4100 (默认)"}`);
@@ -304,10 +539,24 @@ function resume(agentArg, runtimeArg) {
       runtime = "opencode";
     } else if (env.hasClaude) {
       runtime = "claude";
+    } else if (env.hasCodex) {
+      runtime = "codex";
     } else {
-      fail("未检测到 opencode 或 Claude Code");
+      fail("未检测到 opencode / Claude Code / Codex");
       process.exit(1);
     }
+  }
+
+  if (runtime === "codex") {
+    const parts = ["codex", "resume", "--last", "--all"];
+    const cmd = parts.join(" ");
+    console.log(`\n  🔄 恢复 Codex session...\n  $ ${cmd}\n`);
+    try {
+      execSync(cmd, { stdio: "inherit" });
+    } catch (e) {
+      if (e.status) process.exit(e.status);
+    }
+    return;
   }
 
   if (runtime === "claude" || runtime === "claude-code" || runtime === "cc") {
@@ -446,10 +695,101 @@ function listSessions(agentFilter, limit = 10) {
 }
 
 // ============================================================
+// Codex / Daemon connect
+// ============================================================
+function normalizeClientRuntime(runtime) {
+  const r = String(runtime || "codex").trim();
+  if (r === "claude" || r === "cc") return "claude-code";
+  if (r === "codex" || r === "opencode" || r === "claude-code") return r;
+  return r;
+}
+
+function findDaemonScript() {
+  const paths = [
+    STANDALONE_DAEMON,
+    join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
+    join(PKG_ROOT, "opencode", "daemon.mjs"),
+  ];
+  return paths.find(p => existsSync(p)) || "";
+}
+
+async function checkDaemon(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) });
+    if (res.ok) return await res.json();
+  } catch {}
+  return null;
+}
+
+async function spawnDaemonForAgent(agentName, runtime, projectPath, serverUrl, port) {
+  if (!existsSync(STANDALONE_DAEMON) && existsSync(join(PKG_ROOT, "opencode", "daemon.mjs"))) {
+    installStandaloneDaemon();
+  }
+  const script = findDaemonScript();
+  if (!script) { fail("daemon.mjs 未找到，请先运行 maf-client init"); return false; }
+  const child = spawn(process.execPath, [script], {
+    stdio: "ignore",
+    detached: true,
+    env: {
+      ...process.env,
+      MAF_NODE_PORT: String(port),
+      MAF_AGENT_NAME: agentName,
+      MAF_RUNTIME: runtime,
+      MAF_DIRECTORY: projectPath,
+      MAF_PLUGIN_DIR: dirname(script),
+      META_AGENT_SERVER: serverUrl || process.env.META_AGENT_SERVER || "",
+    },
+  });
+  child.unref();
+
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (await checkDaemon(port)) return true;
+  }
+  return false;
+}
+
+async function connectAgentCommand({ agent, runtime = "codex", project }) {
+  if (!agent) { fail("缺少 --agent <name>"); process.exit(1); }
+  runtime = normalizeClientRuntime(runtime);
+  const projectPath = (project || process.cwd()).replace(/^~/, HOME);
+  const cfg = readMafConfig() || {};
+  const serverUrl = process.env.META_AGENT_SERVER || cfg.server?.url || "";
+  const port = process.env.MAF_NODE_PORT || String(cfg.daemon?.port || 4100);
+  let health = await checkDaemon(port);
+  if (!health) {
+    log(`Node Daemon 未运行，正在拉起 (${runtime})...`);
+    const ok = await spawnDaemonForAgent(agent, runtime, projectPath, serverUrl, port);
+    if (!ok) { fail("Node Daemon 拉起失败"); process.exit(1); }
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/agents/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_name: agent, runtime, directory: projectPath }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    ok(`agent 已连接: ${agent} (runtime=${runtime}, project=${projectPath})`);
+    log(`agents=[${data.agents?.join(", ") || agent}]`);
+  } catch (err) {
+    fail(`连接 Daemon 失败: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 const args = process.argv.slice(2);
 const cmd = args[0] || "--auto";
+
+if (cmd === "--version" || cmd === "version" || cmd === "-v") {
+  console.log(`maf-client v${CLIENT_PKG.version || "0.0.0"}`);
+  process.exit(0);
+}
 
 if (cmd === "uninstall") {
   uninstall();
@@ -461,8 +801,22 @@ if (cmd === "status") {
   process.exit(0);
 }
 
+if (cmd === "connect" || cmd === "daemon") {
+  let agent = null;
+  let runtime = "codex";
+  let project = process.cwd();
+  for (let i = 1; i < args.length; i++) {
+    if ((args[i] === "--agent" || args[i] === "-a") && args[i + 1]) agent = args[++i];
+    else if ((args[i] === "--runtime" || args[i] === "-r") && args[i + 1]) runtime = args[++i];
+    else if ((args[i] === "--project" || args[i] === "--cwd" || args[i] === "-C") && args[i + 1]) project = args[++i];
+    else if (!args[i].startsWith("-") && !agent) agent = args[i];
+  }
+  await connectAgentCommand({ agent, runtime, project });
+  process.exit(0);
+}
+
 if (cmd === "resume" || cmd === "r") {
-  // maf-client resume [--agent <name>] [--runtime opencode|claude]
+  // maf-client resume [--agent <name>] [--runtime opencode|claude|codex]
   let agent = null;
   let runtime = null;
   for (let i = 1; i < args.length; i++) {
@@ -503,7 +857,8 @@ Meta-Agent-Framework Client
 用法: maf-client <command>
 
 命令:
-  init        配置 Server 地址 + 安装 Plugin
+  init        配置 Server 地址 + 安装 Plugin/Daemon
+  connect     注册/连接一个 Daemon 托管 agent（Codex 常用）
   resume [agent]  恢复上一个 session（支持 --agent / --runtime）
   sessions [agent]  列出最近的 sessions（支持 --limit N）
   status      查看安装状态
@@ -514,7 +869,11 @@ Resume 用法:
   maf-client resume                    # 恢复当前目录的最近 session
   maf-client resume MAF-developer      # 恢复指定 agent 的最近 session
   maf-client resume --runtime claude   # 用 Claude Code 恢复（claude --continue）
+  maf-client resume --runtime codex    # 用 Codex 恢复（codex resume --last --all）
   maf-client r a2b-booster             # 简写
+
+Connect 用法:
+  maf-client connect --runtime codex --agent MAF-developer --project ~/project
 
 Sessions 用法:
   maf-client sessions                  # 列出所有最近 session
@@ -561,16 +920,17 @@ function writeMafConfig(cfg) {
 // install 或 --auto（postinstall）
 console.log("");
 console.log("╔══════════════════════════════════════╗");
-console.log("║  Meta-Agent Framework Client v0.4.0  ║");
+console.log(`║  Meta-Agent Framework Client v${CLIENT_PKG.version || "0.0.0"}  ║`);
 console.log("╚══════════════════════════════════════╝");
 console.log("");
 
 const env = detectEnv();
 
-if (!env.hasOpencode && !env.hasClaude) {
-  warn("未检测到 opencode 或 Claude Code");
+if (!env.hasOpencode && !env.hasClaude && !env.hasCodex) {
+  warn("未检测到 opencode / Claude Code / Codex");
   log("  安装 opencode:    curl -fsSL https://opencode.ai/install | bash");
   log("  安装 Claude Code: npm install -g @anthropic-ai/claude-code");
+  log("  安装 Codex:       npm install -g @openai/codex");
   if (cmd === "--auto") {
     // postinstall: 如果 Plugin 已安装过，整个目录覆盖更新
     const pluginDir = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework");
@@ -583,6 +943,16 @@ if (!env.hasOpencode && !env.hasClaude) {
       const ccSrcDir = join(PKG_ROOT, "claude-code");
       try { cpSync(ccSrcDir, ccPluginDir, { recursive: true, force: true }); } catch {}
     }
+    if (existsSync(CODEX_PLUGIN_SOURCE_DIR)) {
+      try {
+        cpSync(join(PKG_ROOT, "codex"), CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
+        copyFileSync(join(PKG_ROOT, "opencode", "daemon.mjs"), join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
+        writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);
+      } catch {}
+    }
+    if (existsSync(STANDALONE_DAEMON)) {
+      try { copyFileSync(join(PKG_ROOT, "opencode", "daemon.mjs"), STANDALONE_DAEMON); } catch {}
+    }
     process.exit(0);
   }
   process.exit(1);
@@ -591,6 +961,7 @@ if (!env.hasOpencode && !env.hasClaude) {
 log("检测到运行时:");
 if (env.hasOpencode) ok("opencode");
 if (env.hasClaude) ok("Claude Code");
+if (env.hasCodex) ok("Codex");
 
 // 检测已有的 Server URL（环境变量 > maf.config.json）
 let serverUrl = env.serverUrl;
@@ -623,8 +994,10 @@ if (process.stdin.isTTY) {
   console.log("");
 }
 
+installStandaloneDaemon();
 if (env.hasOpencode) installOpencode();
 if (env.hasClaude) installClaudeCode();
+if (env.hasCodex) installCodex();
 configureEnv(serverUrl);
 
 // 生成 maf.config.json（Client 角色）
@@ -657,6 +1030,7 @@ console.log("");
 console.log("  下一步:");
 if (env.hasOpencode) console.log("  [opencode] cd 项目目录 → 创建 .opencode/agents/<name>.md → opencode");
 if (env.hasClaude) console.log("  [claude]   cd 项目目录 → 创建 .claude/agents/<name>.md → claude");
+if (env.hasCodex) console.log("  [codex]    cd 项目目录 → 创建 AGENTS.md/.codex/agents/<name>.md → codex（wrapper 先拉起 MAF，SessionStart hook 作为补充）");
 console.log("");
 console.log("  Agent 启动后自动拉起 Node Daemon → 注册到 Server");
 console.log("");

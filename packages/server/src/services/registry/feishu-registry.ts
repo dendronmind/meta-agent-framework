@@ -359,8 +359,12 @@ export class FeishuRegistry implements ExternalRegistry {
       else if (clientAddr?.link) endpoint = clientAddr.link;
       else if (clientAddr?.text) endpoint = clientAddr.text;
 
-      const runtimeRaw = extractTextValue(f['运行时']) || '';
-      const runtime: AgentRuntime = runtimeRaw === 'claude-code' ? 'claude-code' : 'opencode';
+      const runtimeRaw = (extractTextValue(f['运行时']) || '').trim();
+      const runtime: AgentRuntime = runtimeRaw === 'claude-code'
+        ? 'claude-code'
+        : runtimeRaw === 'codex'
+          ? 'codex'
+          : 'opencode';
 
       let heartbeat = '';
       const hbRaw = f['最后心跳'];
