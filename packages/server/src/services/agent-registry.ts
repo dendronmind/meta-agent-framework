@@ -362,14 +362,18 @@ export class AgentRegistry {
     const { createHash } = await import('crypto');
 
     const pluginDir = join(process.cwd(), 'plugins', 'opencode-plugin-meta-agent-framework');
+    const daemonFile = join(process.cwd(), 'plugins', 'node-daemon', 'daemon.mjs');
     const files: { path: string; content: string; hash: string }[] = [];
 
-    for (const name of ['index.js', 'daemon.mjs', 'package.json']) {
-      const filePath = join(pluginDir, name);
+    for (const [filePath, remoteName] of [
+      [join(pluginDir, 'index.js'), 'index.js'],
+      [daemonFile, 'daemon.mjs'],
+      [join(pluginDir, 'package.json'), 'package.json'],
+    ] as const) {
       if (!existsSync(filePath)) continue;
       const content = readFileSync(filePath, 'utf-8');
       const hash = createHash('sha256').update(content).digest('hex').substring(0, 16);
-      files.push({ path: `plugin/${name}`, content, hash });
+      files.push({ path: `plugin/${remoteName}`, content, hash });
     }
 
     if (files.length === 0) {

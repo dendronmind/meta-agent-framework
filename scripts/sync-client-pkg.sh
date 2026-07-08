@@ -11,9 +11,13 @@ DST="$SCRIPT_DIR/packages/client"
 
 echo "同步 Plugin 源文件到 Client 包..."
 
+# runtime-neutral daemon
+mkdir -p "$DST/daemon"
+cp "$SRC/node-daemon/daemon.mjs" "$DST/daemon/"
+rm -f "$DST/opencode/daemon.mjs"
+
 # opencode
 cp "$SRC/opencode-plugin-meta-agent-framework/index.js" "$DST/opencode/"
-cp "$SRC/opencode-plugin-meta-agent-framework/daemon.mjs" "$DST/opencode/"
 cp "$SRC/opencode-plugin-meta-agent-framework/package.json" "$DST/opencode/"
 
 # claude-code

@@ -10,7 +10,8 @@
  * npm install -g 时会自动执行 postinstall → --auto 模式
  *
  * 安装内容：
- *   opencode:     index.js（Plugin 主体）+ daemon.mjs（Node Daemon）+ package.json
+ *   daemon:       daemon.mjs（runtime-neutral Node Daemon）
+ *   opencode:     index.js（Plugin 主体）+ package.json（安装时会附带 daemon.mjs 兼容副本）
  *   Claude Code:  plugin.json + hooks.json + maf-agent.mjs + marketplace 注册
  *   Codex:        Codex plugin + SessionStart hook（自动拉起 Node Daemon + 注册当前 agent）
  *   环境变量:     META_AGENT_SERVER + MAF_NODE_PORT → ~/.bashrc
@@ -28,6 +29,7 @@ const HOME = homedir();
 const BASHRC = join(HOME, ".bashrc");
 const MAF_HOME = join(HOME, ".meta-agent-framework");
 const STANDALONE_DAEMON = join(MAF_HOME, "daemon.mjs");
+const DAEMON_SRC = join(PKG_ROOT, "daemon", "daemon.mjs");
 const CODEX_PLUGIN_NAME = "maf";
 const CODEX_PLUGIN_SOURCE_DIR = join(HOME, "plugins", CODEX_PLUGIN_NAME);
 const CODEX_MARKETPLACE_JSON = join(HOME, ".agents", "plugins", "marketplace.json");
@@ -79,7 +81,7 @@ function detectEnv() {
 // ============================================================
 function installStandaloneDaemon() {
   console.log("\n📥 安装 Node Daemon...");
-  copyFile(join(PKG_ROOT, "opencode", "daemon.mjs"), STANDALONE_DAEMON);
+  copyFile(DAEMON_SRC, STANDALONE_DAEMON);
   writeFileSync(join(MAF_HOME, "package.json"), JSON.stringify({
     name: "@maf/meta-agent-daemon",
     version: CLIENT_PKG.version || "0.0.0",
@@ -104,7 +106,7 @@ function installOpencode() {
   ok("index.js — opencode Plugin（任务执行桥梁）");
 
   // daemon.mjs — Node Daemon，独立常驻进程，管理本机所有 agent 的注册/心跳/任务路由/OTA
-  copyFile(join(srcDir, "daemon.mjs"), join(pluginDir, "daemon.mjs"));
+  copyFile(DAEMON_SRC, join(pluginDir, "daemon.mjs"));
   ok("daemon.mjs — Node Daemon（机器级别常驻代理）");
 
   // package.json — Plugin 的 npm 包描述（opencode 加载时需要）
@@ -149,7 +151,7 @@ function installClaudeCode() {
   // daemon.mjs — maf-agent.mjs 依赖它来拉起 Node Daemon（纯 Claude Code 环境没有 opencode 安装的那份）
   const ocDaemon = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs");
   if (!existsSync(ocDaemon)) {
-    copyFile(join(PKG_ROOT, "opencode", "daemon.mjs"), ocDaemon);
+    copyFile(DAEMON_SRC, ocDaemon);
     ok("daemon.mjs — 补装 Node Daemon（纯 Claude Code 环境）");
   }
 
@@ -264,7 +266,7 @@ function installCodex() {
   }
 
   cpSync(srcDir, CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
-  copyFile(join(PKG_ROOT, "opencode", "daemon.mjs"), join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
+  copyFile(DAEMON_SRC, join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
   writeFileSync(join(CODEX_PLUGIN_SOURCE_DIR, "package.json"), JSON.stringify({
     name: "@maf/codex-plugin",
     version: CLIENT_PKG.version || "0.0.0",
@@ -708,7 +710,7 @@ function findDaemonScript() {
   const paths = [
     STANDALONE_DAEMON,
     join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
-    join(PKG_ROOT, "opencode", "daemon.mjs"),
+    DAEMON_SRC,
   ];
   return paths.find(p => existsSync(p)) || "";
 }
@@ -722,7 +724,7 @@ async function checkDaemon(port) {
 }
 
 async function spawnDaemonForAgent(agentName, runtime, projectPath, serverUrl, port) {
-  if (!existsSync(STANDALONE_DAEMON) && existsSync(join(PKG_ROOT, "opencode", "daemon.mjs"))) {
+  if (!existsSync(STANDALONE_DAEMON) && existsSync(DAEMON_SRC)) {
     installStandaloneDaemon();
   }
   const script = findDaemonScript();
@@ -936,7 +938,7 @@ if (!env.hasOpencode && !env.hasClaude && !env.hasCodex) {
     const pluginDir = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework");
     if (existsSync(pluginDir)) {
       const srcDir = join(PKG_ROOT, "opencode");
-      try { cpSync(srcDir, pluginDir, { recursive: true, force: true }); } catch {}
+      try { cpSync(srcDir, pluginDir, { recursive: true, force: true }); copyFileSync(DAEMON_SRC, join(pluginDir, "daemon.mjs")); } catch {}
     }
     const ccPluginDir = join(HOME, ".claude", "plugins", "marketplaces", "maf-plugins", "claude-code-plugin-maf");
     if (existsSync(ccPluginDir)) {
@@ -946,12 +948,12 @@ if (!env.hasOpencode && !env.hasClaude && !env.hasCodex) {
     if (existsSync(CODEX_PLUGIN_SOURCE_DIR)) {
       try {
         cpSync(join(PKG_ROOT, "codex"), CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
-        copyFileSync(join(PKG_ROOT, "opencode", "daemon.mjs"), join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
+        copyFileSync(DAEMON_SRC, join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
         writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);
       } catch {}
     }
     if (existsSync(STANDALONE_DAEMON)) {
-      try { copyFileSync(join(PKG_ROOT, "opencode", "daemon.mjs"), STANDALONE_DAEMON); } catch {}
+      try { copyFileSync(DAEMON_SRC, STANDALONE_DAEMON); } catch {}
     }
     process.exit(0);
   }

@@ -176,7 +176,8 @@ EXPECTED_VERSION=$(python3 -c "import json;print(json.load(open('$SCRIPT_DIR/plu
 PLUGIN_DIR="/tmp/maf-e2e-plugin"
 rm -rf "$PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR"
-cp "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework"/{index.js,daemon.mjs,package.json} "$PLUGIN_DIR/"
+cp "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework"/{index.js,package.json} "$PLUGIN_DIR/"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$PLUGIN_DIR/"
 MOCK_PORT=14096
 AGENT_NAME="e2e-agent"
 
@@ -373,7 +374,7 @@ HASH_BEFORE=$(curl -s $DAEMON_URL/health 2>/dev/null | python3 -c "import json,s
 echo "  OTA 前: PID=$PID_BEFORE hash=$HASH_BEFORE"
 OTA_SELF=$(python3 -c "
 import json, urllib.request
-payload = json.dumps({'files': [{'path': 'plugin/daemon.mjs', 'content': open('plugins/opencode-plugin-meta-agent-framework/daemon.mjs').read()}]})
+payload = json.dumps({'files': [{'path': 'plugin/daemon.mjs', 'content': open('plugins/node-daemon/daemon.mjs').read()}]})
 req = urllib.request.Request('$DAEMON_URL/ota', data=payload.encode(), headers={'Content-Type':'application/json'}, method='POST')
 try: resp = urllib.request.urlopen(req, timeout=10); print(resp.read().decode())
 except: print('{}')

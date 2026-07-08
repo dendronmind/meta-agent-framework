@@ -108,7 +108,10 @@ app.get('/plugins/:file', (req, res) => {
   const allowed = ['index.js', 'daemon.mjs', 'package.json'];
   const file = req.params.file;
   if (!allowed.includes(file)) { res.status(404).send('Not found'); return; }
-  res.sendFile(path.join(__dirname, '..', 'plugins', 'opencode-plugin-meta-agent-framework', file));
+  const filePath = file === 'daemon.mjs'
+    ? path.join(__dirname, '..', 'plugins', 'node-daemon', 'daemon.mjs')
+    : path.join(__dirname, '..', 'plugins', 'opencode-plugin-meta-agent-framework', file);
+  res.sendFile(filePath);
 });
 
 // GET /cc-plugins/* — install.sh 从这里下载 Claude Code Plugin 文件

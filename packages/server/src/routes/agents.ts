@@ -345,7 +345,7 @@ router.post('/ota/push', async (req: Request, res: Response) => {
 
     const pluginDir = join(process.cwd(), 'plugins', 'opencode-plugin-meta-agent-framework');
     const indexJs = join(pluginDir, 'index.js');
-    const daemonMjs = join(pluginDir, 'daemon.mjs');
+    const daemonMjs = join(process.cwd(), 'plugins', 'node-daemon', 'daemon.mjs');
     const pkgJson = join(pluginDir, 'package.json');
 
     otaFiles = [];

@@ -143,7 +143,7 @@ fi  # end of RETRY==false block
 echo ""
 echo -e "${CYAN}[2/6] 编译检查...${NC}"
 cd packages/server && npx tsc --noEmit && cd ../..
-node --check packages/server/plugins/opencode-plugin-meta-agent-framework/daemon.mjs
+node --check packages/server/plugins/node-daemon/daemon.mjs
 node --check packages/server/bin/maf-server.mjs
 node --check packages/client/bin/maf-install.mjs
 echo -e "  ${GREEN}✅ 编译通过${NC}"

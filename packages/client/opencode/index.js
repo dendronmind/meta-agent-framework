@@ -629,11 +629,9 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
               if ((eventType === "workflow_completed" || eventType === "workflow_failed") && eventData) {
                 try {
                   const data = JSON.parse(eventData);
-                  // Meta-Agent-Server 是管理者，接收所有 workflow 结果
-                  // 其他 agent 只接收与自己相关的结果
-                  const isManager = activeAgent === "Meta-Agent-Server";
-                  const isRelevant = isManager
-                    || data.data?.nodes?.some(n => n.agent_name === activeAgent);
+                  // 只有 Meta-Agent-Server（管理者）接收 workflow 结果广播
+                  // Client agent 不需要：结果已在执行时输出，协作由 Server 编排传递
+                  const isRelevant = activeAgent === "Meta-Agent-Server";
                   if (isRelevant) {
                     pendingResults.push({
                       type: eventType,
@@ -772,10 +770,17 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
       const newAgent = input.agent;
       if (newAgent && newAgent !== activeAgent) {
         log(`🔄 agent: ${activeAgent || "-"} → ${newAgent}`);
+        // 先断开旧 agent（一个 TUI 同一时间只注册一个 agent）
+        if (activeAgent && activeAgent !== "Meta-Agent-Server") {
+          notifyDaemon("/agents/disconnect", {
+            agent_name: activeAgent,
+            plugin_pid: process.pid,
+          });
+        }
         activeAgent = newAgent;
         // Meta-Agent-Server 是管理者，不注册为 Client Agent
         if (newAgent === "Meta-Agent-Server") return;
-        // 通知 Node Daemon 连接此 agent
+        // 通知 Node Daemon 连接新 agent
         notifyDaemon("/agents/connect", {
           agent_name: newAgent, runtime: "opencode",
           user_id: userId, host_user: hostUser,
@@ -819,6 +824,22 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
       if (isRemoteTaskExecuting) {
         log(`🔓 自动批准权限 [${input.type}]: "${input.title}"`);
         output.status = "allow";
+      }
+    },
+
+    // Meta-Agent-Server 文件写入保护：禁止修改 .opencode/ 目录（框架管理）
+    // 强制 agent 将积累的知识写入 user/ 目录
+    "tool.execute.before": async (input, output) => {
+      if (activeAgent !== "Meta-Agent-Server") return;
+
+      if ((input.tool === "edit" || input.tool === "write") && output.args?.filePath) {
+        const filePath = output.args.filePath;
+        if (filePath.includes("/.opencode/")) {
+          throw new Error(
+            `禁止修改 .opencode/ 目录（框架升级会覆盖）。` +
+            `请将内容写入 user/ 目录，例如: ${filePath.replace(/\/.opencode\//, "/user/")}`
+          );
+        }
       }
     },
   };
