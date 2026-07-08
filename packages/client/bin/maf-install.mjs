@@ -11,7 +11,7 @@
  *
  * 安装内容：
  *   daemon:       daemon.mjs（runtime-neutral Node Daemon）
- *   opencode:     index.js（Plugin 主体）+ package.json（安装时会附带 daemon.mjs 兼容副本）
+ *   opencode:     index.js（Plugin 主体）+ package.json
  *   Claude Code:  plugin.json + hooks.json + maf-agent.mjs + marketplace 注册
  *   Codex:        Codex plugin + SessionStart hook（自动拉起 Node Daemon + 注册当前 agent）
  *   环境变量:     META_AGENT_SERVER + MAF_NODE_PORT → ~/.bashrc
@@ -100,14 +100,10 @@ function installOpencode() {
   const entryFile = join(HOME, ".config", "opencode", "plugins", "meta-agent-framework.js");
   const srcDir = join(PKG_ROOT, "opencode");
 
-  // 拷贝 3 个核心文件
+  // 拷贝 2 个核心文件
   // index.js — Plugin 主体，运行在 opencode 进程内，负责连接 Node Daemon + long-poll 任务 + 驱动 opencode 执行
   copyFile(join(srcDir, "index.js"), join(pluginDir, "index.js"));
   ok("index.js — opencode Plugin（任务执行桥梁）");
-
-  // daemon.mjs — Node Daemon，独立常驻进程，管理本机所有 agent 的注册/心跳/任务路由/OTA
-  copyFile(DAEMON_SRC, join(pluginDir, "daemon.mjs"));
-  ok("daemon.mjs — Node Daemon（机器级别常驻代理）");
 
   // package.json — Plugin 的 npm 包描述（opencode 加载时需要）
   copyFile(join(srcDir, "package.json"), join(pluginDir, "package.json"));
@@ -147,13 +143,6 @@ function installClaudeCode() {
   // maf-agent.mjs — Claude Code 任务通知管道：long-poll 等任务 → exit(2) + stderr 传递给 Claude
   copyFile(join(ccSrcDir, "scripts", "maf-agent.mjs"), join(pluginSrcDir, "scripts", "maf-agent.mjs"));
   ok("maf-agent.mjs — 任务通知管道（asyncRewake）");
-
-  // daemon.mjs — maf-agent.mjs 依赖它来拉起 Node Daemon（纯 Claude Code 环境没有 opencode 安装的那份）
-  const ocDaemon = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs");
-  if (!existsSync(ocDaemon)) {
-    copyFile(DAEMON_SRC, ocDaemon);
-    ok("daemon.mjs — 补装 Node Daemon（纯 Claude Code 环境）");
-  }
 
   // marketplace.json — 让 claude plugins 命令能发现这个 plugin
   const marketplaceJson = join(marketplaceDir, ".claude-plugin", "marketplace.json");
@@ -266,7 +255,6 @@ function installCodex() {
   }
 
   cpSync(srcDir, CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
-  copyFile(DAEMON_SRC, join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
   writeFileSync(join(CODEX_PLUGIN_SOURCE_DIR, "package.json"), JSON.stringify({
     name: "@maf/codex-plugin",
     version: CLIENT_PKG.version || "0.0.0",
@@ -493,9 +481,8 @@ function status() {
   console.log("\n📋 Meta-Agent Framework Client 状态\n");
 
   const ocPlugin = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "index.js");
-  const daemon = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs");
   log(`opencode Plugin: ${existsSync(ocPlugin) ? "✅ 已安装" : "❌ 未安装"}`);
-  log(`Node Daemon:     ${existsSync(STANDALONE_DAEMON) || existsSync(daemon) ? "✅ 已安装" : "❌ 未安装"}`);
+  log(`Node Daemon:     ${existsSync(STANDALONE_DAEMON) ? "✅ 已安装" : "❌ 未安装"}`);
 
   try {
     const plList = execSync("claude plugins list 2>/dev/null", { encoding: "utf-8" });
@@ -709,7 +696,6 @@ function normalizeClientRuntime(runtime) {
 function findDaemonScript() {
   const paths = [
     STANDALONE_DAEMON,
-    join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
     DAEMON_SRC,
   ];
   return paths.find(p => existsSync(p)) || "";
@@ -938,7 +924,7 @@ if (!env.hasOpencode && !env.hasClaude && !env.hasCodex) {
     const pluginDir = join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework");
     if (existsSync(pluginDir)) {
       const srcDir = join(PKG_ROOT, "opencode");
-      try { cpSync(srcDir, pluginDir, { recursive: true, force: true }); copyFileSync(DAEMON_SRC, join(pluginDir, "daemon.mjs")); } catch {}
+      try { cpSync(srcDir, pluginDir, { recursive: true, force: true }); } catch {}
     }
     const ccPluginDir = join(HOME, ".claude", "plugins", "marketplaces", "maf-plugins", "claude-code-plugin-maf");
     if (existsSync(ccPluginDir)) {
@@ -948,7 +934,6 @@ if (!env.hasOpencode && !env.hasClaude && !env.hasCodex) {
     if (existsSync(CODEX_PLUGIN_SOURCE_DIR)) {
       try {
         cpSync(join(PKG_ROOT, "codex"), CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
-        copyFileSync(DAEMON_SRC, join(CODEX_PLUGIN_SOURCE_DIR, "daemon.mjs"));
         writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);
       } catch {}
     }

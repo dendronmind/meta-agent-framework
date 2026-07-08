@@ -96,14 +96,8 @@ async function checkDaemon() {
 
 /** 拉起 Node Daemon */
 async function spawnNodeDaemon(agentName) {
-  const paths = [
-    join(homedir(), ".meta-agent-framework", "daemon.mjs"),
-    join(homedir(), ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
-    join(process.env.CLAUDE_PLUGIN_ROOT || "", "..", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
-  ];
-  let script = "";
-  for (const p of paths) { if (existsSync(p)) { script = p; break; } }
-  if (!script) { log(`❌ daemon.mjs 未找到`); return false; }
+  const script = join(homedir(), ".meta-agent-framework", "daemon.mjs");
+  if (!existsSync(script)) { log(`❌ standalone daemon.mjs 未找到，请重新运行 maf-client init/install: ${script}`); return false; }
 
   log(`拉起 Node Daemon: ${script}`);
   const child = spawn(process.execPath, [script], {

@@ -178,12 +178,8 @@ function readMafConfig(projectPath) {
 }
 
 function findDaemonScript() {
-  const candidates = [
-    join(MAF_HOME, "daemon.mjs"),
-    join(HOME, ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "daemon.mjs"),
-    join(PLUGIN_ROOT, "daemon.mjs"),
-  ];
-  return candidates.find(isFile) || "";
+  const script = join(MAF_HOME, "daemon.mjs");
+  return isFile(script) ? script : "";
 }
 
 async function checkDaemon(port) {

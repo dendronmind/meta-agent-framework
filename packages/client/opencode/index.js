@@ -164,6 +164,7 @@ function inlineFormat(line) {
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
 const LOG_FILE = join(STATE_DIR, "bridge.log");
+const STANDALONE_DAEMON = join(STATE_DIR, "daemon.mjs");
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100");
 
 mkdirSync(STATE_DIR, { recursive: true });
@@ -207,11 +208,10 @@ function isMetaAgentServer(directory) {
   return false;
 }
 
-/** 计算 daemon.mjs 的 hash */
+/** 计算 standalone daemon.mjs 的 hash */
 function localDaemonHash() {
-  const f = join(PLUGIN_DIR, "daemon.mjs");
-  if (!existsSync(f)) return "";
-  try { return createHash("sha256").update(readFileSync(f, "utf-8")).digest("hex").substring(0, 16); } catch { return ""; }
+  if (!existsSync(STANDALONE_DAEMON)) return "";
+  try { return createHash("sha256").update(readFileSync(STANDALONE_DAEMON, "utf-8")).digest("hex").substring(0, 16); } catch { return ""; }
 }
 
 // ============================================================
@@ -229,8 +229,8 @@ async function getDaemonHealth() {
 
 /** 拉起 Node Daemon（仅在没有已运行实例时） */
 async function spawnNodeDaemon(directory) {
-  const script = join(PLUGIN_DIR, "daemon.mjs");
-  if (!existsSync(script)) { log(`⚠ daemon.mjs 不存在: ${script}`); return false; }
+  const script = STANDALONE_DAEMON;
+  if (!existsSync(script)) { log(`⚠ standalone daemon.mjs 不存在: ${script}，请重新运行 maf-client init/install`); return false; }
 
   const child = spawn("node", [script], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -239,7 +239,7 @@ async function spawnNodeDaemon(directory) {
       ...process.env,
       MAF_NODE_PORT: String(NODE_PORT),
       MAF_DIRECTORY: directory,
-      MAF_PLUGIN_DIR: PLUGIN_DIR,
+      MAF_PLUGIN_DIR: dirname(script),
       // 不传 MAF_PARENT_PID — Node Daemon 常驻，不跟随任何 TUI
     },
   });

@@ -47,9 +47,10 @@ SERVER_PID=""; MOCK_PID=""
 
 E2E_STATE_DIR="/tmp/maf-e2e-state"
 E2E_MAF_HOME="/tmp/maf-e2e-home"
+E2E_USER_HOME="/tmp/maf-e2e-user"
 E2E_DB_PATH="/tmp/maf-e2e.db"
 E2E_BIN="/tmp/maf-e2e-bin"
-DAEMON_LOG="$HOME/.meta-agent-framework/daemon.log"
+DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/daemon.log"
 
 # 测试端口（与真实环境隔离）
 E2E_SERVER_PORT=13000
@@ -129,7 +130,7 @@ get_agent_field() {
 CC_AGENT="cc-e2e-agent"
 
 start_cc_agent() {
-  MAF_AGENT_NAME="$CC_AGENT" MAF_RUNTIME="claude-code" \
+  HOME="$E2E_USER_HOME" MAF_AGENT_NAME="$CC_AGENT" MAF_RUNTIME="claude-code" \
   MAF_NODE_PORT=$NODE_PORT \
   MAF_DIRECTORY="/tmp/e2e-cc-project" MAF_USER_ID="e2e-testuser" \
   META_AGENT_SERVER="$E2E_SERVER" \
@@ -138,7 +139,7 @@ start_cc_agent() {
 }
 
 start_mock_opencode() {
-  MOCK_OPENCODE_PORT=$MOCK_PORT \
+  HOME="$E2E_USER_HOME" MOCK_OPENCODE_PORT=$MOCK_PORT \
   MOCK_PLUGIN_DIR="$PLUGIN_DIR" \
   MOCK_DIRECTORY="/tmp/e2e-test-project" \
   META_AGENT_SERVER="$E2E_SERVER" \
@@ -165,7 +166,7 @@ cleanup() {
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc
 }
 trap cleanup EXIT
 
@@ -177,7 +178,6 @@ PLUGIN_DIR="/tmp/maf-e2e-plugin"
 rm -rf "$PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR"
 cp "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework"/{index.js,package.json} "$PLUGIN_DIR/"
-cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$PLUGIN_DIR/"
 MOCK_PORT=14096
 AGENT_NAME="e2e-agent"
 
@@ -200,8 +200,61 @@ for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135; do
 done
 sleep 1
 rm -f "$E2E_DB_PATH"
-rm -rf "$E2E_STATE_DIR" "$E2E_MAF_HOME" "$E2E_BIN"
-mkdir -p "$E2E_STATE_DIR" "$E2E_MAF_HOME/state" "$E2E_MAF_HOME/data"
+rm -rf "$E2E_STATE_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN"
+mkdir -p "$E2E_STATE_DIR" "$E2E_MAF_HOME/state" "$E2E_MAF_HOME/data" "$E2E_USER_HOME/.meta-agent-framework"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$E2E_USER_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$E2E_USER_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+mkdir -p "$E2E_USER_HOME/.opencode/skills/e2e-skill"
+cat > "$E2E_USER_HOME/.opencode/skills/e2e-skill/SKILL.md" << SKILLEOF
+# E2E Skill
+
+Temporary skill fixture for daemon inventory tests.
+SKILLEOF
+cat > "$E2E_USER_HOME/.opencode/opencode.json" << MCPEOF
+{"mcp":{"e2e-mcp":{"command":"echo","enabled":true}}}
+MCPEOF
+mkdir -p "$E2E_USER_HOME/.config/opencode/plugins/opencode-plugin-meta-agent-framework"
+cp "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework"/{index.js,package.json} "$E2E_USER_HOME/.config/opencode/plugins/opencode-plugin-meta-agent-framework/"
+cat > "$E2E_USER_HOME/.config/opencode/plugins/meta-agent-framework.js" << PLUGINEOF
+export { MetaAgentBridge as server } from "./opencode-plugin-meta-agent-framework/index.js";
+PLUGINEOF
+
+mkdir -p "$E2E_BIN"
+cat > "$E2E_BIN/opencode" << OPENCODEMOCK
+#!/usr/bin/env bash
+set -euo pipefail
+agent="mock-agent"
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --agent) agent="\${2:-mock-agent}"; shift 2;;
+    *) shift;;
+  esac
+done
+export MOCK_OPENCODE_PORT="14097"
+export MOCK_PLUGIN_DIR="$E2E_USER_HOME/.config/opencode/plugins/opencode-plugin-meta-agent-framework"
+export MOCK_DIRECTORY="\$PWD"
+exec node "$ROOT_DIR/scripts/mock-opencode.mjs" "\$agent"
+OPENCODEMOCK
+chmod +x "$E2E_BIN/opencode"
+
+# e2e 使用隔离 HOME，避免依赖开发机真实 HOME；所有 runtime 和断言都应基于同一个 HOME。
+export HOME="$E2E_USER_HOME"
+export XDG_CONFIG_HOME="$E2E_USER_HOME/.config"
+export PATH="$E2E_BIN:$PATH"
+
+# maf-client sessions 需要 opencode session DB；创建最小 fixture，避免依赖开发机真实 HOME。
+mkdir -p "$E2E_USER_HOME/.local/share/opencode"
+python3 - << PYDB
+import sqlite3, time
+path = "$E2E_USER_HOME/.local/share/opencode/opencode.db"
+con = sqlite3.connect(path)
+con.execute("CREATE TABLE IF NOT EXISTS session (id TEXT, agent TEXT, title TEXT, directory TEXT, time_updated INTEGER)")
+con.execute("DELETE FROM session")
+con.execute("INSERT INTO session VALUES (?,?,?,?,?)", ("ses_e2e_001", "$AGENT_NAME", "E2E Session", "/tmp/e2e-test-project", int(time.time()*1000)))
+con.commit(); con.close()
+PYDB
 
 # Codex mock：需要在 Daemon 启动前放进环境，让 Daemon 读取 CODEX_BIN
 if should_run 33 || should_run 34 || should_run 35; then
@@ -361,7 +414,7 @@ echo -e "${YELLOW}[6] OTA 写文件${NC}"
 R=$(curl -s -X POST $DAEMON_URL/ota -H 'Content-Type: application/json' \
   -d '{"files":[{"path":"~/.meta-agent-framework/ota-e2e-test.txt","content":"e2e-pass"}]}' 2>/dev/null)
 assert "OTA applied" '"applied":1' "$R"
-assert "OTA 内容" "e2e-pass" "$(cat ~/.meta-agent-framework/ota-e2e-test.txt 2>/dev/null)"
+assert "OTA 内容" "e2e-pass" "$(cat "$E2E_USER_HOME/.meta-agent-framework/ota-e2e-test.txt" 2>/dev/null)"
 fi
 
 # ============================================================
@@ -521,7 +574,7 @@ fi
 # ============================================================
 if should_run 13; then
 echo -e "${YELLOW}[13] Claude Code: 任务链路${NC}"
-MAF_AGENT_NAME="$CC_AGENT" \
+HOME="$E2E_USER_HOME" MAF_AGENT_NAME="$CC_AGENT" \
 META_AGENT_SERVER="$E2E_SERVER" \
 MAF_NODE_PORT=$NODE_PORT \
 node plugins/claude-code-plugin-maf/scripts/maf-agent.mjs --wait 2>/tmp/cc-e2e-stderr.log &
@@ -623,7 +676,7 @@ EVOLVE_DIRECT=$(curl -s -X POST "$DAEMON_URL/evolve" \
 assert "Daemon evolve accepted" "true" "$(echo "$EVOLVE_DIRECT" | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
 EVOLVE_D_STATUS=$(echo "$EVOLVE_DIRECT" | python3 -c "import json,sys;print(json.load(sys.stdin).get('result',{}).get('status',''))" 2>/dev/null)
 assert "Daemon evolve completed" "completed" "$EVOLVE_D_STATUS"
-SKILL_FILE="$HOME/.config/opencode/skills/e2e-test-skill/SKILL.md"
+SKILL_FILE="$E2E_USER_HOME/.config/opencode/skills/e2e-test-skill/SKILL.md"
 assert "Skill 文件已写入" "true" "$([ -f "$SKILL_FILE" ] && echo true || echo false)"
 assert "Skill 文件内容" "true" "$(grep -q 'E2E Test Skill' "$SKILL_FILE" 2>/dev/null && echo true || echo false)"
 EVOLVE_BAD=$(curl -s -X POST "$DAEMON_URL/evolve" \
@@ -631,7 +684,7 @@ EVOLVE_BAD=$(curl -s -X POST "$DAEMON_URL/evolve" \
   -d '{"evolve_id":"e2e-bad","title":"恶意写入","actions":[{"type":"push_files","target":"custom","target_path":"/tmp","files":[{"relative_path":"evil.sh","content":"rm -rf /"}]}]}' 2>/dev/null)
 EVOLVE_BAD_STATUS=$(echo "$EVOLVE_BAD" | python3 -c "import json,sys;print(json.load(sys.stdin).get('result',{}).get('status',''))" 2>/dev/null)
 assert "白名单外拒绝" "failed" "$EVOLVE_BAD_STATUS"
-rm -rf "$HOME/.config/opencode/skills/e2e-test-skill" "$HOME/.config/opencode/skills/e2e-direct-skill"
+rm -rf "$E2E_USER_HOME/.config/opencode/skills/e2e-test-skill" "$E2E_USER_HOME/.config/opencode/skills/e2e-direct-skill"
 fi
 
 # ============================================================
@@ -672,7 +725,7 @@ wait_until 5 "get_agent_field status" "online" || true
 wait_until 5 "get_agent_field status $CC_AGENT" "online" || true
 
 # 启动 CC Wait（接收 CC agent 的任务）
-MAF_AGENT_NAME="$CC_AGENT" \
+HOME="$E2E_USER_HOME" MAF_AGENT_NAME="$CC_AGENT" \
 META_AGENT_SERVER="$E2E_SERVER" \
 MAF_NODE_PORT=$NODE_PORT \
 node plugins/claude-code-plugin-maf/scripts/maf-agent.mjs --wait 2>/tmp/cc-concurrent-stderr.log &

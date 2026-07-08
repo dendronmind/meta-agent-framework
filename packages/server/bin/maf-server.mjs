@@ -118,15 +118,11 @@ function syncWorkspace() {
     syncNoClobber(src, dst);
   }
 
-  // 同步 opencode Plugin（代码，覆盖）+ 共用 Node Daemon 兼容副本
+  // 同步 opencode Plugin（代码，覆盖）；Node Daemon 独立安装到 ~/.meta-agent-framework/daemon.mjs
   const pluginSrc = join(PACKAGE_ROOT, "plugins", "opencode-plugin-meta-agent-framework");
-  const daemonSrc = join(PACKAGE_ROOT, "plugins", "node-daemon", "daemon.mjs");
   const pluginDst = join(homedir(), ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework");
   if (existsSync(pluginSrc) && existsSync(pluginDst)) {
     try { cpSync(pluginSrc, pluginDst, { recursive: true, force: true }); } catch {}
-    if (existsSync(daemonSrc)) {
-      try { copyFileSync(daemonSrc, join(pluginDst, "daemon.mjs")); } catch {}
-    }
   }
 
   // 同步 Claude Code Plugin（代码，覆盖）

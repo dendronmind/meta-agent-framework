@@ -44,6 +44,17 @@ $HAS_OPENCODE && echo "    ✅ opencode $(opencode --version 2>/dev/null || echo
 $HAS_CLAUDE && echo "    ✅ Claude Code $(claude --version 2>/dev/null || echo '')"
 echo ""
 
+# ---- 安装 runtime-neutral Node Daemon ----
+echo "📥 安装 Node Daemon..."
+MAF_HOME="${HOME}/.meta-agent-framework"
+mkdir -p "${MAF_HOME}"
+if curl -fsSL "${SERVER}/plugins/daemon.mjs" -o "${MAF_HOME}/daemon.mjs"; then
+  echo "  ✅ daemon.mjs → ~/.meta-agent-framework/"
+else
+  echo "  ❌ daemon.mjs 下载失败（Node Daemon 将无法拉起）"
+  return 1 2>/dev/null || exit 1
+fi
+
 # ---- 安装 opencode Plugin ----
 if $HAS_OPENCODE; then
   echo "📥 安装 opencode Plugin..."
@@ -52,7 +63,7 @@ if $HAS_OPENCODE; then
   ENTRY_FILE="${HOME}/.config/opencode/plugins/meta-agent-framework.js"
 
   mkdir -p "${PLUGIN_DIR}"
-  for f in index.js daemon.mjs package.json; do
+  for f in index.js package.json; do
     if curl -fsSL "${SERVER}/plugins/${f}" -o "${PLUGIN_DIR}/${f}"; then
       echo "  ✅ ${f}"
     else
@@ -99,19 +110,6 @@ if $HAS_CLAUDE; then
       return 1 2>/dev/null || exit 1
     fi
   done
-
-  # daemon.mjs — maf-agent.mjs 依赖它来拉起 Node Daemon
-  # 如果 opencode 没装（没有 ~/.config/opencode/plugins/ 下的 daemon.mjs），需要单独安装
-  OC_DAEMON="${HOME}/.config/opencode/plugins/opencode-plugin-meta-agent-framework/daemon.mjs"
-  if [ ! -f "$OC_DAEMON" ]; then
-    echo "  📥 安装 daemon.mjs（纯 Claude Code 环境）..."
-    mkdir -p "$(dirname "$OC_DAEMON")"
-    if curl -fsSL "${SERVER}/plugins/daemon.mjs" -o "$OC_DAEMON"; then
-      echo "  ✅ daemon.mjs"
-    else
-      echo "  ❌ daemon.mjs 下载失败（Node Daemon 将无法拉起）"
-    fi
-  fi
 
   # 写 marketplace.json
   cat > "${MARKETPLACE_JSON}" << 'MEOF'
