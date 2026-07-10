@@ -1,17 +1,16 @@
 #!/usr/bin/env node
-/** Minimal line-delimited JSON-RPC mock for maf-codex-attached-receiver e2e. */
+/** Minimal JSON-RPC mock for maf-codex-attached-receiver e2e.
+ * Supports line-delimited stdio and a tiny websocket listener used by Codex
+ * wrapper auto-remote tests.
+ */
 import { createInterface } from "node:readline";
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 
 const THREAD_ID = process.env.MOCK_CODEX_THREAD_ID || "mock-thread-1";
-const rl = createInterface({ input: process.stdin });
 let nextTurn = 0;
 
-function send(obj) { process.stdout.write(JSON.stringify(obj) + "\n"); }
-
-rl.on("line", line => {
-  if (!line.trim()) return;
-  let msg;
-  try { msg = JSON.parse(line); } catch { return; }
+function responseFor(msg, send) {
   const { id, method, params = {} } = msg;
   if (method === "initialize") {
     send({ id, result: { userAgent: "mock-codex-app-server/0", codexHome: "/tmp/mock-codex-home", platformFamily: "unix", platformOs: "linux" } });
@@ -35,4 +34,108 @@ rl.on("line", line => {
     return;
   }
   if (id !== undefined) send({ id, error: { code: -32601, message: `method not found: ${method}` } });
-});
+}
+
+function runStdio() {
+  const rl = createInterface({ input: process.stdin });
+  const send = obj => process.stdout.write(JSON.stringify(obj) + "\n");
+  rl.on("line", line => {
+    if (!line.trim()) return;
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    responseFor(msg, send);
+  });
+}
+
+function encodeFrame(text) {
+  const payload = Buffer.from(text);
+  const len = payload.length;
+  if (len < 126) return Buffer.concat([Buffer.from([0x81, len]), payload]);
+  if (len < 65536) {
+    const head = Buffer.alloc(4);
+    head[0] = 0x81; head[1] = 126; head.writeUInt16BE(len, 2);
+    return Buffer.concat([head, payload]);
+  }
+  const head = Buffer.alloc(10);
+  head[0] = 0x81; head[1] = 127; head.writeBigUInt64BE(BigInt(len), 2);
+  return Buffer.concat([head, payload]);
+}
+
+function decodeFrames(buffer) {
+  const messages = [];
+  let offset = 0;
+  while (buffer.length - offset >= 2) {
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const opcode = b0 & 0x0f;
+    const masked = Boolean(b1 & 0x80);
+    let len = b1 & 0x7f;
+    let header = 2;
+    if (len === 126) {
+      if (buffer.length - offset < 4) break;
+      len = buffer.readUInt16BE(offset + 2);
+      header = 4;
+    } else if (len === 127) {
+      if (buffer.length - offset < 10) break;
+      len = Number(buffer.readBigUInt64BE(offset + 2));
+      header = 10;
+    }
+    const maskBytes = masked ? 4 : 0;
+    if (buffer.length - offset < header + maskBytes + len) break;
+    let payload = buffer.subarray(offset + header + maskBytes, offset + header + maskBytes + len);
+    if (masked) {
+      const mask = buffer.subarray(offset + header, offset + header + 4);
+      payload = Buffer.from(payload.map((byte, i) => byte ^ mask[i % 4]));
+    }
+    offset += header + maskBytes + len;
+    if (opcode === 0x8) messages.push({ close: true });
+    else if (opcode === 0x1) messages.push({ text: payload.toString("utf-8") });
+  }
+  return { messages, rest: buffer.subarray(offset) };
+}
+
+function runListen(url) {
+  const u = new URL(url);
+  const port = Number(u.port);
+  const host = u.hostname || "127.0.0.1";
+  const server = createServer((req, res) => {
+    if (req.url === "/readyz" || req.url === "/healthz") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, mock: true }));
+      return;
+    }
+    res.writeHead(404); res.end("not found");
+  });
+  server.on("upgrade", (req, socket) => {
+    const key = req.headers["sec-websocket-key"];
+    if (!key) { socket.destroy(); return; }
+    const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    socket.write([
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${accept}`,
+      "\r\n",
+    ].join("\r\n"));
+    const send = obj => socket.write(encodeFrame(JSON.stringify(obj)));
+    let buffer = Buffer.alloc(0);
+    socket.on("data", chunk => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const decoded = decodeFrames(buffer);
+      buffer = decoded.rest;
+      for (const msg of decoded.messages) {
+        if (msg.close) { socket.end(); continue; }
+        if (!msg.text?.trim()) continue;
+        try { responseFor(JSON.parse(msg.text), send); } catch {}
+      }
+    });
+  });
+  server.listen(port, host, () => {
+    process.stderr.write(`mock codex app-server listening on ${url}\n`);
+  });
+}
+
+const args = process.argv.slice(2);
+const listenIdx = args.indexOf("--listen");
+if (listenIdx >= 0 && args[listenIdx + 1]) runListen(args[listenIdx + 1]);
+else runStdio();

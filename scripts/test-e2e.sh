@@ -36,6 +36,7 @@
 #   35 Codex launcher wrapper 自动拉起 Daemon
 #   36 Codex attached 默认不伪装 online
 #   37 Codex attached receiver app-server bridge
+#   38 Codex wrapper auto-remote attached receiver
 #
 set -uo pipefail
 
@@ -63,7 +64,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -163,13 +164,13 @@ cleanup() {
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14938; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc
 }
 trap cleanup EXIT
 
@@ -197,7 +198,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14938; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -260,11 +261,18 @@ con.commit(); con.close()
 PYDB
 
 # Codex mock：需要在 Daemon 启动前放进环境，让 Daemon 读取 CODEX_BIN
-if should_run 33 || should_run 34 || should_run 35; then
+if should_run 33 || should_run 34 || should_run 35 || should_run 38; then
   mkdir -p "$E2E_BIN"
   cat > "$E2E_BIN/codex" << 'CODEXMOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+{ printf 'mock codex args:'; printf ' [%s]' "$@"; printf '
+'; } >> "${MOCK_CODEX_ARGS_LOG:-/tmp/e2e-codex-mock-args.log}" 2>/dev/null || true
+if [[ "${1:-}" == "app-server" ]]; then
+  shift
+  node "${MOCK_CODEX_APP_SERVER_SCRIPT:-/dev/null}" "$@"
+  exit $?
+fi
 if [[ "${1:-}" == "plugin" ]]; then
   shift
   sub="${1:-}"
@@ -295,7 +303,7 @@ args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output-last-message) out="$2"; shift 2;;
-    -C|--cd|-s|--sandbox|-p|--profile|-m|--model|-a|--ask-for-approval|--color) shift 2;;
+    -C|--cd|-s|--sandbox|-p|--profile|-m|--model|-a|--ask-for-approval|--color|--remote) shift 2;;
     exec|--skip-git-repo-check) shift;;
     --dangerously-bypass-approvals-and-sandbox) shift;;
     -) prompt="$(cat)"; shift;;
@@ -1558,6 +1566,70 @@ assert "Codex attached result from mock" "mock attached codex completed" "$RECV_
 assert "Codex attached did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
 
 kill -9 "$CODEX_RECV_PID" "$CODEX_RECV_DAEMON_PID" 2>/dev/null || true
+
+fi
+
+
+# ============================================================
+# Case 38: Codex wrapper 自动 remote 化并接入 attached receiver
+# ============================================================
+if should_run 38; then
+echo -e "
+${YELLOW}Case 38: Codex wrapper auto-remote attached receiver${NC}"
+
+CODEX_REMOTE_AGENT="codex-auto-remote-agent-$$"
+CODEX_REMOTE_HOME="/tmp/e2e-codex-auto-remote-home"
+CODEX_REMOTE_PROJECT="/tmp/e2e-codex-auto-remote-project"
+CODEX_REMOTE_MISC="/tmp/e2e-codex-auto-remote-misc"
+CODEX_REMOTE_PORT=14138
+CODEX_REMOTE_APP_PORT=14938
+CODEX_REMOTE_DAEMON="http://127.0.0.1:${CODEX_REMOTE_PORT}"
+CODEX_REMOTE_ARGS_LOG="/tmp/e2e-codex-auto-remote-args.log"
+rm -rf "$CODEX_REMOTE_HOME" "$CODEX_REMOTE_PROJECT" "$CODEX_REMOTE_MISC" "$CODEX_REMOTE_ARGS_LOG"
+mkdir -p "$CODEX_REMOTE_HOME" "$CODEX_REMOTE_PROJECT" "$CODEX_REMOTE_MISC"
+cat > "$CODEX_REMOTE_PROJECT/AGENTS.md" << AGENTEOF
+# Codex project agent: ${CODEX_REMOTE_AGENT}
+
+E2E Codex wrapper auto-remote project.
+AGENTEOF
+
+PATH="$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_HOME/.config"   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_REMOTE_PORT"   node "$ROOT_DIR/packages/client/bin/maf-install.mjs" --auto >/tmp/e2e-codex-auto-remote-install.log 2>&1
+
+assert "Codex auto-remote wrapper installed" "true" "$([ -x "$CODEX_REMOTE_HOME/.local/bin/codex" ] && echo true || echo false)"
+assert "Codex auto-remote helper installed" "true" "$([ -x "$CODEX_REMOTE_HOME/plugins/maf/scripts/maf-codex-app-server.mjs" ] && echo true || echo false)"
+
+(cd "$CODEX_REMOTE_MISC" && PATH="$CODEX_REMOTE_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_HOME/.config"   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_REMOTE_PORT"   MAF_CODEX_APP_SERVER_PORT="$CODEX_REMOTE_APP_PORT" MAF_CODEX_THREAD_WAIT_MS=5000   MOCK_CODEX_APP_SERVER_SCRIPT="$ROOT_DIR/scripts/mock-codex-app-server.mjs" MOCK_CODEX_ARGS_LOG="$CODEX_REMOTE_ARGS_LOG"   timeout 5s codex -C "$CODEX_REMOTE_PROJECT" resume --last --all >/tmp/e2e-codex-auto-remote-run.log 2>&1 || true)
+
+wait_until 10 "curl -s $CODEX_REMOTE_DAEMON/health 2>/dev/null" '"ok":true' || true
+assert "Codex auto-remote daemon running" '"ok":true' "$(curl -s $CODEX_REMOTE_DAEMON/health 2>/dev/null)"
+assert "Codex auto-remote arg injected" "[--remote]" "$(cat "$CODEX_REMOTE_ARGS_LOG" 2>/dev/null || true)"
+assert "Codex auto-remote url injected" "ws://127.0.0.1:${CODEX_REMOTE_APP_PORT}" "$(cat "$CODEX_REMOTE_ARGS_LOG" 2>/dev/null || true)"
+assert "Codex auto-remote wrapper log" "auto remote url=ws://127.0.0.1:${CODEX_REMOTE_APP_PORT}" "$(cat "$CODEX_REMOTE_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
+
+wait_until 15 "get_agent_field status $CODEX_REMOTE_AGENT" "online" || true
+assert "Codex auto-remote receiver online" "online" "$(get_agent_field status $CODEX_REMOTE_AGENT)"
+assert "Codex auto-remote runtime" "codex" "$(get_agent_field runtime $CODEX_REMOTE_AGENT)"
+
+REMOTE_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\":\"Codex auto remote receiver e2e\",\"nodes\":[{\"id\":\"remote-1\",\"agent_name\":\"$CODEX_REMOTE_AGENT\",\"prompt\":\"Codex attached e2e task: hello from auto remote wrapper\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+REMOTE_WF_ID=$(echo "$REMOTE_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
+assert "Codex auto-remote workflow 创建" "true" "$([ -n "$REMOTE_WF_ID" ] && echo true || echo false)"
+
+for i in $(seq 1 20); do
+  REMOTE_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$REMOTE_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status',''))" 2>/dev/null)
+  [[ "$REMOTE_STATUS" == "completed" ]] && break
+  sleep 1
+done
+assert "Codex auto-remote workflow completed" "completed" "$REMOTE_STATUS"
+REMOTE_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$REMOTE_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
+assert "Codex auto-remote result from mock" "mock attached codex completed" "$REMOTE_RESULT"
+assert "Codex auto-remote did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
+
+CODEX_REMOTE_APP_PID=$(python3 -c "import json,sys,pathlib; p=pathlib.Path('$CODEX_REMOTE_HOME/.meta-agent-framework/state/codex-app-server-${CODEX_REMOTE_AGENT}.json'); print(json.loads(p.read_text()).get('pid','') if p.exists() else '')" 2>/dev/null || true)
+CODEX_REMOTE_RECV_PID=$(cat "$CODEX_REMOTE_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_REMOTE_AGENT}.pid" 2>/dev/null || true)
+CODEX_REMOTE_DAEMON_PID=$(ss -tlnp 2>/dev/null | grep ":${CODEX_REMOTE_PORT} " | grep -oP 'pid=\K\d+' | head -1)
+kill -9 "$CODEX_REMOTE_APP_PID" "$CODEX_REMOTE_RECV_PID" "$CODEX_REMOTE_DAEMON_PID" 2>/dev/null || true
 
 fi
 

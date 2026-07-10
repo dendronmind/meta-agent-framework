@@ -313,6 +313,7 @@ function installCodexWrapper() {
 set -euo pipefail
 REAL_CODEX=${JSON.stringify(realCodex)}
 HOOK="$HOME/plugins/maf/scripts/maf-codex-hook.mjs"
+APP_SERVER_HELPER="$HOME/plugins/maf/scripts/maf-codex-app-server.mjs"
 LOG="$HOME/.meta-agent-framework/logs/codex-plugin.log"
 mkdir -p "$HOME/.meta-agent-framework/logs" 2>/dev/null || true
 
@@ -332,7 +333,7 @@ for arg in "$@"; do
 done
 
 case "$first_non_option" in
-  plugin|mcp|login|logout|completion|update|doctor|debug|features|sandbox|app-server|remote-control|mcp-server|exec-server|cloud|help|archive|delete|unarchive)
+  exec|e|review|apply|a|plugin|mcp|login|logout|completion|update|doctor|debug|features|sandbox|app-server|remote-control|mcp-server|exec-server|cloud|help|archive|delete|unarchive)
     exec "$REAL_CODEX" "$@"
     ;;
 esac
@@ -345,9 +346,11 @@ for arg in "$@"; do
   esac
 done
 
+maf_exec_args=("$@")
 if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-}" != "1" && -f "$HOOK" ]]; then
   maf_hook_cwd="$PWD"
   maf_remote="\${MAF_CODEX_APP_SERVER_URL:-}"
+  maf_has_remote_arg=0
   maf_args=("$@")
   for ((i=0; i<\${#maf_args[@]}; i++)); do
     case "\${maf_args[$i]}" in
@@ -358,9 +361,11 @@ if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-
         maf_hook_cwd="\${maf_args[$i]#*=}"
         ;;
       --remote)
+        maf_has_remote_arg=1
         if (( i + 1 < \${#maf_args[@]} )); then maf_remote="\${maf_args[$((i + 1))]}"; fi
         ;;
       --remote=*)
+        maf_has_remote_arg=1
         maf_remote="\${maf_args[$i]#*=}"
         ;;
     esac
@@ -369,6 +374,16 @@ if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-
     maf_hook_cwd="$(cd "$maf_hook_cwd" 2>/dev/null && pwd -P || printf '%s/%s' "$PWD" "$maf_hook_cwd")"
   fi
   {
+    if [[ -z "$maf_remote" && -f "$APP_SERVER_HELPER" ]]; then
+      maf_auto_remote="$(MAF_CODEX_REAL_BIN="$REAL_CODEX" CODEX_CWD="$maf_hook_cwd" node "$APP_SERVER_HELPER" --real "$REAL_CODEX" --cwd "$maf_hook_cwd" -- "$@" 2>>"$LOG" || true)"
+      if [[ -n "$maf_auto_remote" ]]; then
+        maf_remote="$maf_auto_remote"
+        printf '%s [codex-wrapper] auto remote url=%s cwd=%s\n' "$(date -Is)" "$maf_remote" "$maf_hook_cwd" >> "$LOG"
+      fi
+    fi
+    if [[ -n "$maf_remote" && "$maf_has_remote_arg" != "1" ]]; then
+      maf_exec_args=("--remote" "$maf_remote" "$@")
+    fi
     printf '%s [codex-wrapper] start cwd=%s hook_cwd=%s remote=%s args=%q\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" "$*" >> "$LOG"
     MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" node "$HOOK" <<JSON
 {"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperStart","remote":"$maf_remote"}
@@ -377,7 +392,7 @@ JSON
   } >/dev/null 2>>"$LOG" || true
 fi
 
-exec "$REAL_CODEX" "$@"
+exec "$REAL_CODEX" "\${maf_exec_args[@]}"
 `;
   writeFileSync(CODEX_WRAPPER, wrapper);
   try { execSync(`chmod +x "${CODEX_WRAPPER}"`); } catch {}
