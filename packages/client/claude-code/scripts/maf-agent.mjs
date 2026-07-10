@@ -18,8 +18,9 @@ import { execSync } from "node:child_process";
 import { spawn } from "node:child_process";
 
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
+const LOG_DIR = join(STATE_DIR, "logs");
 const MODE = process.argv.includes("--daemon") ? "daemon" : "wait";
-const LOG_FILE = join(STATE_DIR, "claude-agent.log");
+const LOG_FILE = join(LOG_DIR, "claude-plugin.log");
 
 /** 读取 maf.config.json */
 function loadMafConfig() {
@@ -38,7 +39,7 @@ const _mafCfg = loadMafConfig();
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "0") || _mafCfg.daemon?.port || 4100;
 const DAEMON_URL = `http://127.0.0.1:${NODE_PORT}`;
 
-mkdirSync(STATE_DIR, { recursive: true });
+mkdirSync(LOG_DIR, { recursive: true });
 
 function log(msg) {
   const line = `${new Date().toISOString().slice(11, 23)} [cc-${MODE}] ${msg}`;

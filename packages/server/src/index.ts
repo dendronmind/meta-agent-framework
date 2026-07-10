@@ -21,7 +21,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 // 日志：同时输出到 console 和文件（不依赖 shell 重定向）
 // ============================================================
 const MAF_HOME = process.env.MAF_HOME || path.join(os.homedir(), '.meta-agent-framework');
-const LOG_DIR = path.join(MAF_HOME, 'state');
+const LOG_DIR = path.join(MAF_HOME, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'server.log');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });

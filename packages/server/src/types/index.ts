@@ -188,6 +188,9 @@ export interface WorkflowNode {
   prompt: string;                  // 给 agent 的指令（描述目标即可，不需要写具体命令）
   scope?: ExecuteScope;            // 操作范围：project（默认）| agent_self
   intent?: ExecuteIntent;          // 任务意图：query（默认）| modify | review | diagnose | execute
+  delivery_mode?: 'attached' | 'detached' | 'auto'; // Codex 可选投递语义
+  execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
+  detached?: boolean;              // Codex detached screen/TUI 兜底开关
   depends_on?: string[];           // 依赖的前置节点 ID
   status: WorkflowNodeStatus;
   result?: string;                 // 执行结果
@@ -247,6 +250,9 @@ export interface ExecuteCommand {
   scope: ExecuteScope;             // 操作范围：project（默认）| agent_self
   intent: ExecuteIntent;           // 任务意图：query | modify | review | diagnose | execute
   runtime?: AgentRuntime;          // 运行时：opencode（默认）/ claude-code / codex
+  delivery_mode?: 'attached' | 'detached' | 'auto'; // Codex 可选投递语义
+  execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
+  detached?: boolean;              // Codex detached screen/TUI 兜底开关
   session_id?: string;             // Client 侧 agent session ID（续接用，首次为空）
 }
 

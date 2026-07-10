@@ -15,7 +15,8 @@
  *
  * 数据目录：~/.meta-agent-framework/
  *   data/       SQLite 数据库
- *   state/      PID、日志
+ *   state/      PID、运行状态
+ *   logs/       日志
  *   maf.config.json  配置文件
  */
 
@@ -35,11 +36,13 @@ const PACKAGE_ROOT = resolve(__dirname, "..");  // npm 包的根目录
 const MAF_HOME = process.env.MAF_HOME || join(homedir(), ".meta-agent-framework");
 const STATE_DIR = join(MAF_HOME, "state");
 const PID_FILE = join(STATE_DIR, "server.pid");
-const LOG_FILE = join(STATE_DIR, "server.log");
+const LOG_DIR = join(MAF_HOME, "logs");
+const LOG_FILE = join(LOG_DIR, "server.log");
 const CONFIG_FILE = join(MAF_HOME, "maf.config.json");
 
 // 确保目录
 mkdirSync(STATE_DIR, { recursive: true });
+mkdirSync(LOG_DIR, { recursive: true });
 mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 
 // ============================================================

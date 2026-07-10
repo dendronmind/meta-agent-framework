@@ -34,6 +34,7 @@
 #   33 Codex runtime screen+TUI 链路
 #   34 Codex plugin SessionStart 自动拉起 Daemon
 #   35 Codex launcher wrapper 自动拉起 Daemon
+#   36 Codex attached 默认不伪装 online
 #
 set -uo pipefail
 
@@ -50,7 +51,7 @@ E2E_MAF_HOME="/tmp/maf-e2e-home"
 E2E_USER_HOME="/tmp/maf-e2e-user"
 E2E_DB_PATH="/tmp/maf-e2e.db"
 E2E_BIN="/tmp/maf-e2e-bin"
-DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/daemon.log"
+DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/logs/client-daemon.log"
 
 # 测试端口（与真实环境隔离）
 E2E_SERVER_PORT=13000
@@ -61,7 +62,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -145,6 +146,7 @@ start_mock_opencode() {
   META_AGENT_SERVER="$E2E_SERVER" \
   MAF_USER_ID="e2e-testuser" \
   MAF_NODE_PORT=$NODE_PORT \
+  MAF_CODEX_DELIVERY="detached" \
   node "$ROOT_DIR/scripts/mock-opencode.mjs" "$AGENT_NAME" &>/dev/null &
   MOCK_PID=$!
   disown $MOCK_PID
@@ -160,13 +162,13 @@ cleanup() {
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project
 }
 trap cleanup EXIT
 
@@ -194,7 +196,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -1363,14 +1365,14 @@ E2E Codex autostart project.
 AGENTEOF
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_AUTO_HOME" XDG_CONFIG_HOME="$CODEX_AUTO_HOME/.config" \
-  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_AUTO_PORT" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_AUTO_PORT" MAF_CODEX_DELIVERY="detached" \
   node "$ROOT_DIR/packages/client/bin/maf-install.mjs" --auto >/tmp/e2e-codex-autostart-install.log 2>&1
 
 assert "Codex plugin source installed" "true" "$([ -f "$CODEX_AUTO_HOME/plugins/maf/scripts/maf-codex-hook.mjs" ] && echo true || echo false)"
 assert "Codex plugin enabled" "maf@personal" "$(cat "$CODEX_AUTO_HOME/.codex/config.toml" 2>/dev/null || true)"
 
 HOME="$CODEX_AUTO_HOME" XDG_CONFIG_HOME="$CODEX_AUTO_HOME/.config" \
-  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_AUTO_PORT" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_AUTO_PORT" MAF_CODEX_DELIVERY="detached" \
   node "$CODEX_AUTO_HOME/plugins/maf/scripts/maf-codex-hook.mjs" << JSON
 {"cwd":"$CODEX_AUTO_PROJECT","eventName":"SessionStart"}
 JSON
@@ -1409,34 +1411,84 @@ E2E Codex wrapper project.
 AGENTEOF
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
-  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
   node "$ROOT_DIR/packages/client/bin/maf-install.mjs" --auto >/tmp/e2e-codex-wrapper-install.log 2>&1
 
 assert "Codex wrapper installed" "true" "$([ -x "$CODEX_WRAP_HOME/.local/bin/codex" ] && echo true || echo false)"
 assert "Codex wrapper points to mock" "$E2E_BIN/codex" "$(grep 'REAL_CODEX=' "$CODEX_WRAP_HOME/.local/bin/codex" 2>/dev/null || true)"
 
 (cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
-  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
   timeout 5s codex --no-alt-screen >/tmp/e2e-codex-wrapper-misc-run.log 2>&1 || true)
 
 wait_until 10 "curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null" '"ok":true' || true
 assert "Codex wrapper arbitrary-dir daemon running" '"ok":true' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
 assert "Codex wrapper arbitrary-dir no agent" '"agents":\[\]' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
-assert "Codex wrapper arbitrary-dir log" "daemon ready without explicit" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/codex-hook.log" 2>/dev/null || true)"
+assert "Codex wrapper arbitrary-dir log" "daemon ready without explicit" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
 
-(cd "$CODEX_WRAP_PROJECT" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
-  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" \
-  timeout 5s codex --no-alt-screen >/tmp/e2e-codex-wrapper-run.log 2>&1 || true)
+(cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
+  timeout 5s codex -C "$CODEX_WRAP_PROJECT" --no-alt-screen >/tmp/e2e-codex-wrapper-run.log 2>&1 || true)
 
 wait_until 10 "curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null" "$CODEX_WRAP_AGENT" || true
 assert "Codex wrapper daemon agent" "$CODEX_WRAP_AGENT" "$(curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null)"
-assert "Codex wrapper log" "codex-wrapper" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/codex-wrapper.log" 2>/dev/null || true)"
+assert "Codex wrapper log" "codex-wrapper" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
 
 wait_until 10 "get_agent_field runtime $CODEX_WRAP_AGENT" "codex" || true
 assert "Codex wrapper runtime" "codex" "$(get_agent_field runtime $CODEX_WRAP_AGENT)"
 
 WRAP_PID=$(ss -tlnp 2>/dev/null | grep ":${CODEX_WRAP_PORT} " | grep -oP 'pid=\K\d+' | head -1)
 [[ -n "$WRAP_PID" ]] && kill -9 "$WRAP_PID" 2>/dev/null || true
+
+fi
+
+
+# ============================================================
+# Case 36: Codex attached 默认不伪装 online
+# ============================================================
+if should_run 36; then
+echo -e "\n${YELLOW}Case 36: Codex attached 默认不伪装 online${NC}"
+
+CODEX_ATT_AGENT="codex-attached-agent"
+CODEX_ATT_HOME="/tmp/e2e-codex-attached-home"
+CODEX_ATT_PROJECT="/tmp/e2e-codex-attached-project"
+CODEX_ATT_PORT=14136
+CODEX_ATT_DAEMON="http://127.0.0.1:${CODEX_ATT_PORT}"
+rm -rf "$CODEX_ATT_HOME" "$CODEX_ATT_PROJECT"
+mkdir -p "$CODEX_ATT_HOME/.meta-agent-framework" "$CODEX_ATT_PROJECT"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$CODEX_ATT_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$CODEX_ATT_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+cat > "$CODEX_ATT_PROJECT/AGENTS.md" << AGENTEOF
+# Codex project agent: ${CODEX_ATT_AGENT}
+
+Default attached delivery should not pretend to be online without an attached receiver.
+AGENTEOF
+
+HOME="$CODEX_ATT_HOME" XDG_CONFIG_HOME="$CODEX_ATT_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_ATT_PORT" MAF_DIRECTORY="$CODEX_ATT_PROJECT" \
+  node "$CODEX_ATT_HOME/.meta-agent-framework/daemon.mjs" >/tmp/e2e-codex-attached-daemon.log 2>&1 &
+CODEX_ATT_PID=$!
+disown $CODEX_ATT_PID
+
+wait_until 10 "curl -s $CODEX_ATT_DAEMON/health 2>/dev/null" '"ok":true' || true
+assert "Codex attached daemon running" '"ok":true' "$(curl -s $CODEX_ATT_DAEMON/health 2>/dev/null)"
+
+curl -s -X POST "$CODEX_ATT_DAEMON/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$CODEX_ATT_AGENT\",\"runtime\":\"codex\",\"directory\":\"$CODEX_ATT_PROJECT\"}" >/dev/null 2>&1
+
+wait_until 10 "get_agent_field runtime $CODEX_ATT_AGENT" "codex" || true
+assert "Codex attached runtime" "codex" "$(get_agent_field runtime $CODEX_ATT_AGENT)"
+assert "Codex attached default offline" "offline" "$(get_agent_field status $CODEX_ATT_AGENT)"
+
+ATT_EXEC=$(curl -s -w '\nHTTP:%{http_code}' -X POST "$CODEX_ATT_DAEMON/execute" \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$CODEX_ATT_AGENT\",\"runtime\":\"codex\",\"prompt\":\"should fail attached clearly\"}")
+assert "Codex attached execute rejected" "HTTP:409" "$ATT_EXEC"
+assert "Codex attached clear error" "attached delivery" "$ATT_EXEC"
+
+kill -9 "$CODEX_ATT_PID" 2>/dev/null || true
 
 fi
 

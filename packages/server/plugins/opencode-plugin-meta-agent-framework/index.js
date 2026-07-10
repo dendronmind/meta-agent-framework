@@ -163,11 +163,12 @@ function inlineFormat(line) {
 // ============================================================
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
-const LOG_FILE = join(STATE_DIR, "bridge.log");
+const LOG_DIR = join(STATE_DIR, "logs");
+const LOG_FILE = join(LOG_DIR, "opencode-plugin.log");
 const STANDALONE_DAEMON = join(STATE_DIR, "daemon.mjs");
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100");
 
-mkdirSync(STATE_DIR, { recursive: true });
+mkdirSync(LOG_DIR, { recursive: true });
 
 function log(msg) {
   const line = `${new Date().toISOString().slice(11, 23)} [plugin] ${msg}`;

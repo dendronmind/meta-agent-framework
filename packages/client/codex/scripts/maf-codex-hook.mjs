@@ -5,7 +5,7 @@
  * Runs at Codex session startup through the Codex plugin system or the launcher
  * wrapper. It always tries to keep the machine-level MAF Node Daemon running, and
  * only connects a Codex agent when explicit project metadata is available. It is
- * intentionally quiet: diagnostics go to ~/.meta-agent-framework/codex-hook.log so
+ * intentionally quiet: diagnostics go to ~/.meta-agent-framework/logs/codex-plugin.log so
  * Codex TUI startup is not polluted.
  */
 
@@ -19,12 +19,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(__dirname);
 const HOME = homedir();
 const MAF_HOME = join(HOME, ".meta-agent-framework");
-const LOG_FILE = join(MAF_HOME, "codex-hook.log");
+const LOG_DIR = join(MAF_HOME, "logs");
+const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
 const DEFAULT_PORT = 4100;
 
 function log(message) {
   try {
-    mkdirSync(MAF_HOME, { recursive: true });
+    mkdirSync(LOG_DIR, { recursive: true });
     appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-hook] ${message}\n`);
   } catch {}
 }

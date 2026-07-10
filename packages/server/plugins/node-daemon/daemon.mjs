@@ -3,7 +3,7 @@
  * Meta-Agent-Framework Node Daemon（驻地代理）
  *
  * 一台机器一个常驻进程，管理本机所有 agent。
- * 支持 opencode Plugin、Claude Code hook，以及 Codex screen+TUI 三种运行时。
+ * 支持 opencode Plugin、Claude Code hook，以及 Codex attached/detached 两种投递语义。
  *
  * 职责：
  *   1. 管理本机所有 agent（注册/心跳/状态跟踪）
@@ -19,6 +19,7 @@
  *   MAF_DIRECTORY      — 工作目录
  *   MAF_PLUGIN_DIR     — Plugin 安装目录
  *   MAF_PARENT_PID     — 仅 Claude Code 首次拉起时使用（不再跟随退出）
+ *   MAF_CODEX_DELIVERY  — Codex 投递语义：attached（默认）| detached | auto
  */
 
 import { createServer } from "node:http";
@@ -67,7 +68,9 @@ mkdirSync(STATE_DIR, { recursive: true });
 // ============================================================
 // 日志
 // ============================================================
-const LOG_FILE = join(STATE_DIR, "daemon.log");
+const LOG_DIR = join(STATE_DIR, "logs");
+const LOG_FILE = join(LOG_DIR, "client-daemon.log");
+mkdirSync(LOG_DIR, { recursive: true });
 function log(msg) {
   const line = `${new Date().toISOString().slice(11, 23)} [node-daemon] ${msg}`;
   // 只写文件，不用 console.error（detached 进程 stderr 可能 EPIPE）
@@ -127,9 +130,57 @@ const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") 
 const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
-const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（默认，screen + Codex TUI）| exec（headless）
+const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
+const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "attached");
 const codexQueueRunners = new Set();
 const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
+
+function normalizeCodexDelivery(value) {
+  const v = String(value || "attached").trim().toLowerCase();
+  if (["detached", "screen", "tui", "daemon", "offline"].includes(v)) return "detached";
+  if (["auto", "fallback"].includes(v)) return "auto";
+  return "attached";
+}
+
+function codexDeliveryForTask(task = {}) {
+  if (task.detached === true) return "detached";
+  if (task.detached === false) return "attached";
+
+  const direct = task.delivery_mode ?? task.deliveryMode ?? task.execution_mode ?? task.executionMode;
+  if (direct) return normalizeCodexDelivery(direct);
+
+  const metadata = task.metadata && typeof task.metadata === "object" ? task.metadata : null;
+  if (metadata) {
+    if (metadata.detached === true) return "detached";
+    if (metadata.detached === false) return "attached";
+    const metaDelivery = metadata.delivery_mode ?? metadata.deliveryMode ?? metadata.execution_mode ?? metadata.executionMode;
+    if (metaDelivery) return normalizeCodexDelivery(metaDelivery);
+  }
+
+  return CODEX_DELIVERY;
+}
+
+function hasCodexAttachedReceiver(agentName) {
+  const q = taskQueues.get(agentName);
+  if (q?.waitingResponse) return true;
+  const info = agents.get(agentName);
+  return Boolean(info?.pluginPid && isProcessAlive(info.pluginPid));
+}
+
+function codexEffectiveDelivery(agentName, task = {}) {
+  const requested = codexDeliveryForTask(task);
+  if (requested === "auto") return hasCodexAttachedReceiver(agentName) ? "attached" : "detached";
+  return requested;
+}
+
+function codexShouldRunDetached(agentName, task = {}) {
+  return codexEffectiveDelivery(agentName, task) === "detached";
+}
+
+function codexAttachedUnavailableMessage(agentName, task = {}) {
+  const requested = codexDeliveryForTask(task);
+  return `Codex attached delivery 当前不可用：agent=${agentName}, requested=${requested}。当前 Codex 尚无可被 Daemon 主动注入任务的附着 TUI 接收器；如需离线 screen+TUI 执行，请设置 MAF_CODEX_DELIVERY=detached/auto 或在任务中传 detached=true。`;
+}
 
 function getAgentQueue(agentName) {
   if (!taskQueues.has(agentName)) {
@@ -160,7 +211,7 @@ function pruneDeadAgents() {
     const q = taskQueues.get(name);
     if (q?.executingTaskId) continue;  // 正在执行任务，不清理
 
-    // Codex 由 Daemon 自己执行，没有常驻 Plugin；注册后保持在线
+    // Codex 注册信息需要保留；是否 online 由 getAgentStatuses 根据 delivery/receiver 判定。
     if (info.runtime === "codex") continue;
 
     // Plugin 进程还活着，不清理
@@ -193,9 +244,14 @@ function getAgentStatuses() {
   for (const [name, info] of agents) {
     const q = taskQueues.get(name);
 
-    // Codex 模式：Daemon 托管执行；有任务则 busy，否则 online
+    // Codex：默认 attached 语义下，只有当前 TUI 接收器存在才 online；
+    // detached/auto 是显式允许 Daemon 通过 screen/exec 兜底执行。
     if (info.runtime === "codex") {
-      statuses[name] = q?.executingTaskId ? "busy" : "online";
+      if (q?.executingTaskId) {
+        statuses[name] = "busy";
+      } else {
+        statuses[name] = (CODEX_DELIVERY !== "attached" || hasCodexAttachedReceiver(name)) ? "online" : "offline";
+      }
       continue;
     }
 
@@ -683,13 +739,24 @@ function enqueueTask(agentName, task) {
         waiter.end(JSON.stringify({ task: { id: nextTask.id, title: nextTask.title, _notify: true } }));
       } catch {}
     } else if (runtime === "codex") {
-      // Codex 模式：Daemon 自己执行，不交给 long-poll Plugin
-      q.pending.unshift(nextTask);
-      try {
-        waiter.writeHead(200, { "Content-Type": "application/json" });
-        waiter.end(JSON.stringify({ task: null }));
-      } catch {}
-      scheduleCodexQueue(agentName);
+      const requested = codexDeliveryForTask(nextTask);
+      if (requested !== "detached") {
+        // attached/auto：当前 long-poll 请求就是附着接收器，直接交给它。
+        q.lastExecuted = nextTask;
+        q.executingTaskId = nextTask.id;
+        try {
+          waiter.writeHead(200, { "Content-Type": "application/json" });
+          waiter.end(JSON.stringify({ task: nextTask, delivery_mode: "attached" }));
+        } catch {}
+      } else {
+        // detached：显式要求 Daemon 托管执行，不交给 attached receiver。
+        q.pending.unshift(nextTask);
+        try {
+          waiter.writeHead(200, { "Content-Type": "application/json" });
+          waiter.end(JSON.stringify({ task: null, delivery_mode: "detached" }));
+        } catch {}
+        scheduleCodexQueue(agentName);
+      }
     } else {
       // opencode 模式：直接取走任务给 Plugin 执行
       q.lastExecuted = nextTask;
@@ -746,7 +813,7 @@ async function reportTaskResult(task, status, result, durationMs) {
 }
 
 // ============================================================
-// Codex executor — 默认 screen + TUI，保留 headless codex exec 模式
+// Codex executor — detached screen+TUI / headless exec 兜底
 // ============================================================
 function truncateText(text, max = 4000) {
   const s = String(text || "");
@@ -768,7 +835,7 @@ function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
     ``,
     `## 执行要求`,
     `- 直接完成任务并在最终回答中给出结果摘要、关键改动/发现、验证情况。`,
-    `- 不要调用 MAF 的 /tasks/done 或 workflow 回报接口；Node Daemon 会自动收集你的最终回答并回报。`,
+    `- 不要直接调用 MAF Server workflow API；完成或失败后必须按下方 MAF 回报要求执行本机回报脚本。`,
     `- 如果需要修改文件，遵守仓库内 AGENTS.md 和相关规则。`,
     `- 如果任务无法完成，说明阻塞原因和建议下一步。`,
   ];
@@ -842,8 +909,9 @@ function buildCodexTuiArgs(cwd, promptFile) {
 
 function writeCodexReportScript(agentName, task) {
   const reportScript = join(STATE_DIR, `maf-codex-report-${safeFilePart(agentName)}-${safeFilePart(task.id)}.mjs`);
+  const markerFile = `${reportScript}.sent`;
   const content = `#!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 const status = process.argv[2] || "completed";
 const resultFile = process.argv[3] || "";
 let result = process.argv.slice(3).join(" ");
@@ -857,15 +925,23 @@ const payload = {
   result,
   duration_ms: 0,
 };
-const res = await fetch(${JSON.stringify(`http://127.0.0.1:${NODE_PORT}/tasks/done`)}, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(payload),
-});
+let res;
+try {
+  res = await fetch(${JSON.stringify(`http://127.0.0.1:${NODE_PORT}/tasks/done`)}, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10000),
+  });
+} catch (err) {
+  console.error(\`MAF report failed: \${err.message}\`);
+  process.exit(1);
+}
 if (!res.ok) {
   console.error(\`MAF report failed: HTTP \${res.status}\`);
   process.exit(1);
 }
+try { writeFileSync(${JSON.stringify(markerFile)}, JSON.stringify({ status, at: new Date().toISOString() }) + "\\n"); } catch {}
 console.log("MAF report sent");
 `;
   writeFileSync(reportScript, content, { mode: 0o700 });
@@ -899,18 +975,56 @@ async function spawnCodexTuiTask(agentName, task, projectPath) {
   const promptFile = join(STATE_DIR, `${screenName}.prompt.md`);
   const launchScript = join(STATE_DIR, `${screenName}.launch.mjs`);
   const reportScript = writeCodexReportScript(agentName, task);
+  const resultFile = join("/tmp", `maf-codex-result-${safeFilePart(task.id)}.md`);
+  const markerFile = `${reportScript}.sent`;
   const prompt = buildCodexPrompt(agentName, task, cwd, reportScript);
   writeFileSync(promptFile, prompt, "utf-8");
   const codexArgs = buildCodexTuiArgs(cwd, promptFile);
   const launcher = `#!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 const prompt = readFileSync(${JSON.stringify(promptFile)}, "utf-8");
 const args = ${JSON.stringify(codexArgs)};
+const resultFile = ${JSON.stringify(resultFile)};
+const reportScript = ${JSON.stringify(reportScript)};
+const markerFile = ${JSON.stringify(markerFile)};
+let finished = false;
+
+function runReport(status, resultPath) {
+  return new Promise((resolve) => {
+    const reporter = spawn(process.execPath, [reportScript, status, resultPath], { stdio: "inherit", env: process.env });
+    reporter.on("error", (err) => { console.error(\`MAF report launcher failed: \${err.message}\`); resolve(1); });
+    reporter.on("close", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+}
+
+async function finish(status, exitCode, signal, fallbackMessage = "") {
+  if (finished) return;
+  finished = true;
+  let finalStatus = status;
+  if (!existsSync(markerFile)) {
+    if (!existsSync(resultFile)) {
+      finalStatus = "failed";
+      const reason = fallbackMessage || (exitCode === 0
+        ? "Codex exited without writing result file or calling MAF report script"
+        : "Codex exited before MAF report: exit=" + (exitCode ?? "") + (signal ? " signal=" + signal : ""));
+      try { writeFileSync(resultFile, reason + "\\n"); } catch (err) { console.error(\`write result fallback failed: \${err.message}\`); }
+    }
+    const reportCode = await runReport(finalStatus, resultFile);
+    if (reportCode !== 0) process.exit(reportCode);
+  }
+  process.exit(exitCode ?? (signal ? 1 : 0));
+}
+
 args.push(prompt);
 const child = spawn(${JSON.stringify(CODEX_BIN)}, args, { cwd: ${JSON.stringify(cwd)}, stdio: "inherit", env: process.env });
-child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
-child.on("error", (err) => { console.error(err.message); process.exit(1); });
+child.on("exit", (code, signal) => {
+  const exitCode = code ?? (signal ? 1 : 0);
+  finish(exitCode === 0 ? "completed" : "failed", exitCode, signal);
+});
+child.on("error", (err) => {
+  finish("failed", 1, null, \`Codex 启动失败: \${err.message}\`);
+});
 `;
   writeFileSync(launchScript, launcher, { mode: 0o700 });
 
@@ -1018,9 +1132,21 @@ async function runCodexQueue(agentName) {
   try {
     if (CODEX_MODE === "exec") {
       while (q.pending.length > 0) {
-        const task = q.pending.shift();
-        if (!task) continue;
+        const task = q.pending[0];
+        if (!task) { q.pending.shift(); continue; }
         const agentInfo = agents.get(agentName);
+        if (!codexShouldRunDetached(agentName, task)) {
+          q.pending.shift();
+          const msg = codexAttachedUnavailableMessage(agentName, task);
+          q.lastExecuted = task;
+          q.executingTaskId = task.id;
+          log(`⚠ ${msg}`);
+          await reportTaskResult(task, "failed", msg, 0);
+          q.executingTaskId = null;
+          q.lastExecuted = null;
+          continue;
+        }
+        q.pending.shift();
         if (agentInfo) agentInfo.lastSeen = Date.now();
         q.lastExecuted = task;
         q.executingTaskId = task.id;
@@ -1031,8 +1157,20 @@ async function runCodexQueue(agentName) {
       }
     } else {
       if (!q.executingTaskId && q.pending.length > 0) {
-        const task = q.pending.shift();
+        const task = q.pending[0];
         const agentInfo = agents.get(agentName);
+        if (!codexShouldRunDetached(agentName, task)) {
+          q.pending.shift();
+          const msg = codexAttachedUnavailableMessage(agentName, task);
+          q.lastExecuted = task;
+          q.executingTaskId = task.id;
+          log(`⚠ ${msg}`);
+          await reportTaskResult(task, "failed", msg, 0);
+          q.executingTaskId = null;
+          q.lastExecuted = null;
+          return;
+        }
+        q.pending.shift();
         if (agentInfo) agentInfo.lastSeen = Date.now();
         q.lastExecuted = task;
         q.executingTaskId = task.id;
@@ -1045,13 +1183,18 @@ async function runCodexQueue(agentName) {
     }
   } finally {
     codexQueueRunners.delete(agentName);
-    if (CODEX_MODE === "exec" && q.pending.length > 0) scheduleCodexQueue(agentName);
+    if (q.pending.length > 0 && codexShouldRunDetached(agentName, q.pending[0]) && (CODEX_MODE === "exec" || !q.executingTaskId)) {
+      scheduleCodexQueue(agentName);
+    }
   }
 }
 
 function scheduleCodexQueue(agentName) {
   const agentInfo = agents.get(agentName);
   if (agentInfo?.runtime !== "codex") return;
+  const q = getAgentQueue(agentName);
+  if (q.pending.length === 0) return;
+  if (!codexShouldRunDetached(agentName, q.pending[0])) return;
   if (codexQueueRunners.has(agentName)) return;
   codexQueueRunners.add(agentName);
   setImmediate(() => {
@@ -1489,6 +1632,9 @@ const httpServer = createServer(async (req, res) => {
       workflow_id: body.workflow_id || "",
       node_id: body.node_id || "",
       execution_id: body.execution_id || "",
+      detached: body.detached,
+      delivery_mode: body.delivery_mode || body.deliveryMode || body.execution_mode || body.executionMode || "",
+      metadata: body.metadata || {},
     };
 
     // 记录到 workflow 跟踪表
@@ -1504,22 +1650,35 @@ const httpServer = createServer(async (req, res) => {
       });
     }
 
-    // Codex runtime：无 Plugin/Hook，Daemon 默认通过 screen 拉起 Codex TUI 执行
+    // Codex runtime：默认只接受 attached 当前 TUI；detached/auto 才由 Daemon screen/exec 托管执行。
     if (runtime === "codex") {
       const existing = agents.get(targetAgent);
+      const directory = projectPath || existing?.directory || DIRECTORY;
+      task.project_path = directory;
       agents.set(targetAgent, {
         runtime: "codex",
         pluginPid: existing?.pluginPid || 0,
-        directory: projectPath || existing?.directory || DIRECTORY,
+        directory,
         registered: existing?.registered || false,
         sessionId: existing?.sessionId || "",
         lastSeen: Date.now(),
       });
       if (!existing?.registered) registerToServer();
+
+      const delivery = codexEffectiveDelivery(targetAgent, task);
+      if (delivery === "attached" && !hasCodexAttachedReceiver(targetAgent)) {
+        const msg = codexAttachedUnavailableMessage(targetAgent, task);
+        log(`⚠ ${msg}`);
+        await reportTaskResult(task, "failed", msg, 0);
+        json(409, { accepted: false, agent: targetAgent, error: msg, delivery_mode: codexDeliveryForTask(task) });
+        return;
+      }
+
       const ok = enqueueTask(targetAgent, task);
       if (ok) {
-        json(202, { accepted: true, agent: targetAgent, mode: CODEX_MODE === "exec" ? "codex-exec" : "codex-tui" });
-        scheduleCodexQueue(targetAgent);
+        const mode = delivery === "attached" ? "codex-attached" : (CODEX_MODE === "exec" ? "codex-exec" : "codex-tui");
+        json(202, { accepted: true, agent: targetAgent, mode, delivery_mode: delivery });
+        if (delivery === "detached") scheduleCodexQueue(targetAgent);
       } else {
         json(409, { error: "queue full" });
       }
@@ -1649,6 +1808,18 @@ const httpServer = createServer(async (req, res) => {
     if (q.pending.length > 0) {
       if (runtime === "claude-code") {
         json(200, { task: { id: q.pending[0].id, title: q.pending[0].title, _notify: true } });
+      } else if (runtime === "codex") {
+        const task = q.pending[0];
+        const requested = codexDeliveryForTask(task);
+        if (requested !== "detached") {
+          q.pending.shift();
+          q.lastExecuted = task;
+          q.executingTaskId = task.id;
+          json(200, { task, delivery_mode: "attached" });
+        } else {
+          json(200, { task: null, delivery_mode: "detached" });
+          scheduleCodexQueue(targetAgent);
+        }
       } else {
         const task = q.pending.shift();
         q.lastExecuted = task;
@@ -1720,7 +1891,7 @@ const httpServer = createServer(async (req, res) => {
     }
 
     // Claude Code 模式：检查队列是否有下一个任务（续传，避免等 asyncRewake）
-    // Codex TUI 模式：完成后再拉起下一个 screen + TUI 任务
+    // Codex detached 模式：完成后再拉起下一个 screen + TUI/exec 任务（attached 不会被 scheduleCodexQueue 调度）
     // opencode 模式不续传（它用 long-poll 自己取）
     let nextTask = null;
     const agentInfo = agentName ? agents.get(agentName) : null;

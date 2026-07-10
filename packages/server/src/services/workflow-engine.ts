@@ -486,9 +486,12 @@ export class WorkflowEngine {
       agent_name: node.agent_name,
       project_path: agent.project_path,
       prompt,
-      scope: 'project',
-      intent: 'query',
+      scope: node.scope || 'project',
+      intent: node.intent || 'query',
       runtime: agent.runtime || 'opencode',
+      delivery_mode: node.delivery_mode,
+      execution_mode: node.execution_mode,
+      detached: node.detached,
       session_id: sessionId,
     };
 
