@@ -9,7 +9,7 @@
  * Codex TUI startup is not polluted.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, appendFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -178,6 +178,82 @@ function readMafConfig(projectPath) {
   return cfg;
 }
 
+function processAlive(pid) {
+  const n = Number(pid || 0);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try { process.kill(n, 0); return true; } catch { return false; }
+}
+
+function receiverPidFile(agentName) {
+  const safe = String(agentName || "codex").replace(/[^A-Za-z0-9_.-]/g, "_");
+  return join(MAF_HOME, `codex-attached-receiver-${safe}.pid`);
+}
+
+function findCodexRemote(hookEvent) {
+  if (process.env.MAF_CODEX_APP_SERVER_URL) return process.env.MAF_CODEX_APP_SERVER_URL;
+  if (process.env.MAF_CODEX_REMOTE) return process.env.MAF_CODEX_REMOTE;
+
+  const args = [];
+  if (Array.isArray(hookEvent?.args)) args.push(...hookEvent.args);
+  if (Array.isArray(hookEvent?.argv)) args.push(...hookEvent.argv);
+  for (let i = 0; i < args.length; i++) {
+    const arg = String(args[i] || "");
+    if (arg === "--remote" && args[i + 1]) return String(args[i + 1]);
+    if (arg.startsWith("--remote=")) return arg.slice("--remote=".length);
+  }
+  return "";
+}
+
+function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, appServerCmd }) {
+  if (process.env.MAF_CODEX_ATTACHED_RECEIVER_DISABLE === "1" || process.env.MAF_CODEX_AUTO_ATTACHED_RECEIVER === "0") {
+    log("attached receiver autostart disabled");
+    return false;
+  }
+  if (!agentName || (!appServerUrl && !appServerCmd)) return false;
+
+  const receiverScript = join(PLUGIN_ROOT, "scripts", "maf-codex-attached-receiver.mjs");
+  if (!isFile(receiverScript)) {
+    log(`attached receiver script missing: ${receiverScript}`);
+    return false;
+  }
+
+  const pidFile = receiverPidFile(agentName);
+  let oldPid = "";
+  try { oldPid = readFileSync(pidFile, "utf-8").trim(); } catch {}
+  if (processAlive(oldPid)) {
+    log(`attached receiver already running: agent=${agentName} pid=${oldPid}`);
+    return true;
+  }
+
+  const env = {
+    ...process.env,
+    MAF_NODE_PORT: String(port),
+    MAF_DAEMON_URL: `http://127.0.0.1:${port}`,
+    MAF_AGENT_NAME: agentName,
+    MAF_RUNTIME: "codex",
+    MAF_DIRECTORY: projectPath,
+    MAF_CODEX_RECEIVER_PID_FILE: pidFile,
+  };
+  if (appServerUrl && !env.MAF_CODEX_APP_SERVER_URL) env.MAF_CODEX_APP_SERVER_URL = appServerUrl;
+  if (appServerCmd && !env.MAF_CODEX_APP_SERVER_CMD) env.MAF_CODEX_APP_SERVER_CMD = appServerCmd;
+
+  try {
+    const child = spawn(process.execPath, [receiverScript], {
+      cwd: projectPath,
+      detached: true,
+      stdio: "ignore",
+      env,
+    });
+    child.unref();
+    writeFileSync(pidFile, `${child.pid || ""}\n`);
+    log(`spawn attached receiver: pid=${child.pid || "?"} agent=${agentName} project=${projectPath} appServer=${appServerUrl || "cmd"}`);
+    return true;
+  } catch (err) {
+    log(`attached receiver spawn failed: ${err.message}`);
+    return false;
+  }
+}
+
 function findDaemonScript() {
   const script = join(MAF_HOME, "daemon.mjs");
   return isFile(script) ? script : "";
@@ -286,6 +362,16 @@ async function main() {
     log(`daemon ready without explicit MAF Codex agent metadata for ${startDir}`);
     return;
   }
+
+  const appServerUrl = findCodexRemote(hookEvent);
+  const appServerCmd = process.env.MAF_CODEX_APP_SERVER_CMD || "";
+  startAttachedReceiver({
+    agentName: inferred.agentName,
+    projectPath,
+    port,
+    appServerUrl,
+    appServerCmd,
+  });
 
   await connectAgent({ agentName: inferred.agentName, projectPath, port });
 }

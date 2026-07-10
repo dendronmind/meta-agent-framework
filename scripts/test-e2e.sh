@@ -35,6 +35,7 @@
 #   34 Codex plugin SessionStart 自动拉起 Daemon
 #   35 Codex launcher wrapper 自动拉起 Daemon
 #   36 Codex attached 默认不伪装 online
+#   37 Codex attached receiver app-server bridge
 #
 set -uo pipefail
 
@@ -62,7 +63,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -162,13 +163,13 @@ cleanup() {
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project
 }
 trap cleanup EXIT
 
@@ -196,7 +197,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -1489,6 +1490,74 @@ assert "Codex attached execute rejected" "HTTP:409" "$ATT_EXEC"
 assert "Codex attached clear error" "attached delivery" "$ATT_EXEC"
 
 kill -9 "$CODEX_ATT_PID" 2>/dev/null || true
+
+fi
+
+
+# ============================================================
+# Case 37: Codex attached receiver app-server bridge
+# ============================================================
+if should_run 37; then
+echo -e "\n${YELLOW}Case 37: Codex attached receiver app-server bridge${NC}"
+
+CODEX_RECV_AGENT="codex-receiver-agent"
+CODEX_RECV_HOME="/tmp/e2e-codex-receiver-home"
+CODEX_RECV_PROJECT="/tmp/e2e-codex-receiver-project"
+CODEX_RECV_PORT=14137
+CODEX_RECV_DAEMON="http://127.0.0.1:${CODEX_RECV_PORT}"
+rm -rf "$CODEX_RECV_HOME" "$CODEX_RECV_PROJECT"
+mkdir -p "$CODEX_RECV_HOME/.meta-agent-framework" "$CODEX_RECV_PROJECT"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$CODEX_RECV_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$CODEX_RECV_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+cat > "$CODEX_RECV_PROJECT/AGENTS.md" << AGENTEOF
+# Codex project agent: ${CODEX_RECV_AGENT}
+
+E2E Codex attached receiver project.
+AGENTEOF
+
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  node "$CODEX_RECV_HOME/.meta-agent-framework/daemon.mjs" >/tmp/e2e-codex-receiver-daemon.log 2>&1 &
+CODEX_RECV_DAEMON_PID=$!
+disown $CODEX_RECV_DAEMON_PID
+
+wait_until 10 "curl -s $CODEX_RECV_DAEMON/health 2>/dev/null" '"ok":true' || true
+assert "Codex receiver daemon running" '"ok":true' "$(curl -s $CODEX_RECV_DAEMON/health 2>/dev/null)"
+
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-hook.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"SessionStart"}
+HOOKJSON
+CODEX_RECV_PID_FILE="$CODEX_RECV_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_RECV_AGENT}.pid"
+CODEX_RECV_PID="$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+assert "Codex attached receiver spawned by hook" "true" "$([[ -n "$CODEX_RECV_PID" ]] && kill -0 "$CODEX_RECV_PID" 2>/dev/null && echo true || echo false)"
+
+wait_until 10 "get_agent_field status $CODEX_RECV_AGENT" "online" || true
+assert "Codex attached receiver online" "online" "$(get_agent_field status $CODEX_RECV_AGENT)"
+assert "Codex attached receiver runtime" "codex" "$(get_agent_field runtime $CODEX_RECV_AGENT)"
+
+RECV_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\":\"Codex attached receiver e2e\",\"nodes\":[{\"id\":\"recv-1\",\"agent_name\":\"$CODEX_RECV_AGENT\",\"prompt\":\"Codex attached e2e task: say hello from current receiver\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+RECV_WF_ID=$(echo "$RECV_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
+assert "Codex attached workflow 创建" "true" "$([ -n "$RECV_WF_ID" ] && echo true || echo false)"
+
+for i in $(seq 1 20); do
+  RECV_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$RECV_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status',''))" 2>/dev/null)
+  [[ "$RECV_STATUS" == "completed" ]] && break
+  sleep 1
+done
+assert "Codex attached workflow completed" "completed" "$RECV_STATUS"
+RECV_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$RECV_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
+assert "Codex attached result from mock" "mock attached codex completed" "$RECV_RESULT"
+assert "Codex attached did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
+
+kill -9 "$CODEX_RECV_PID" "$CODEX_RECV_DAEMON_PID" 2>/dev/null || true
 
 fi
 

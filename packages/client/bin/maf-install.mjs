@@ -347,6 +347,7 @@ done
 
 if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-}" != "1" && -f "$HOOK" ]]; then
   maf_hook_cwd="$PWD"
+  maf_remote="\${MAF_CODEX_APP_SERVER_URL:-}"
   maf_args=("$@")
   for ((i=0; i<\${#maf_args[@]}; i++)); do
     case "\${maf_args[$i]}" in
@@ -356,17 +357,23 @@ if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-
       -C=*|--cd=*)
         maf_hook_cwd="\${maf_args[$i]#*=}"
         ;;
+      --remote)
+        if (( i + 1 < \${#maf_args[@]} )); then maf_remote="\${maf_args[$((i + 1))]}"; fi
+        ;;
+      --remote=*)
+        maf_remote="\${maf_args[$i]#*=}"
+        ;;
     esac
   done
   if [[ "$maf_hook_cwd" != /* ]]; then
     maf_hook_cwd="$(cd "$maf_hook_cwd" 2>/dev/null && pwd -P || printf '%s/%s' "$PWD" "$maf_hook_cwd")"
   fi
   {
-    printf '%s [codex-wrapper] start cwd=%s hook_cwd=%s args=%q\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$*" >> "$LOG"
-    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" node "$HOOK" <<JSON
-{"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperStart"}
+    printf '%s [codex-wrapper] start cwd=%s hook_cwd=%s remote=%s args=%q\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" "$*" >> "$LOG"
+    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" node "$HOOK" <<JSON
+{"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperStart","remote":"$maf_remote"}
 JSON
-    printf '%s [codex-wrapper] hook done cwd=%s hook_cwd=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" >> "$LOG"
+    printf '%s [codex-wrapper] hook done cwd=%s hook_cwd=%s remote=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" >> "$LOG"
   } >/dev/null 2>>"$LOG" || true
 fi
 
