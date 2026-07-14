@@ -293,15 +293,16 @@ failure_policy 可选：
    */
   private runOpencode(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
+      const mafHome = process.env.MAF_HOME || path.join(require('os').homedir(), '.meta-agent-framework');
       const child = spawn(OPENCODE_BIN, [
         'run', '--agent', 'Meta-Agent-Server', prompt,
       ], {
-        cwd: path.resolve(__dirname, '../..'),  // npm 包根目录
+        cwd: mafHome,  // 安装态工作区，包含 .opencode/agents、rules、skills
         timeout: 600_000,
         env: {
           ...process.env,
-          OPENCODE_AGENTS_DIR: path.resolve(__dirname, '../../.opencode/agents'),
-          MAF_HOME: process.env.MAF_HOME || path.join(require('os').homedir(), '.meta-agent-framework'),
+          OPENCODE_AGENTS_DIR: path.join(mafHome, '.opencode/agents'),
+          MAF_HOME: mafHome,
         },
       });
 

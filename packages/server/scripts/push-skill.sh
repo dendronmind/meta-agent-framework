@@ -7,9 +7,10 @@
 #
 # 示例:
 #   bash scripts/push-skill.sh a2b-booster meta-agent-client
-#   bash scripts/push-skill.sh MAF-developer meta-agent-client skills/meta-agent-client
+#   bash scripts/push-skill.sh MAF-developer meta-agent-client common_agent/client_skills/meta-agent-client
 #
-# skill_dir 默认为 skills/<skill_name>（相对于项目根目录）
+# skill_dir 默认优先使用安装态 skills/<skill_name>；
+# 在源码包内开发运行时，回退到 common_agent/client_skills/<skill_name>。
 
 set -euo pipefail
 
@@ -36,6 +37,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 if [[ -z "$SKILL_DIR" ]]; then
   SKILL_DIR="$PROJECT_ROOT/skills/$SKILL_NAME"
+  if [[ ! -d "$SKILL_DIR" && -d "$PROJECT_ROOT/common_agent/client_skills/$SKILL_NAME" ]]; then
+    SKILL_DIR="$PROJECT_ROOT/common_agent/client_skills/$SKILL_NAME"
+  fi
 fi
 
 if [[ ! -d "$SKILL_DIR" ]]; then

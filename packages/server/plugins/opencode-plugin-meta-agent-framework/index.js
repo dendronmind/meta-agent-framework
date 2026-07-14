@@ -828,17 +828,29 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
       }
     },
 
-    // Meta-Agent-Server 文件写入保护：禁止修改 .opencode/ 目录（框架管理）
+    // Meta-Agent-Server 文件写入保护：禁止修改框架托管资产
     // 强制 agent 将积累的知识写入 user/ 目录
     "tool.execute.before": async (input, output) => {
       if (activeAgent !== "Meta-Agent-Server") return;
 
       if ((input.tool === "edit" || input.tool === "write") && output.args?.filePath) {
         const filePath = output.args.filePath;
-        if (filePath.includes("/.opencode/")) {
+        const isManagedAsset =
+          filePath.includes("/.opencode/") ||
+          filePath.includes("/.claude/") ||
+          filePath.includes("/common_agent/") ||
+          filePath.endsWith("/AGENTS.md") ||
+          filePath.endsWith("/CLAUDE.md") ||
+          filePath.endsWith("/opencode.json");
+
+        if (isManagedAsset) {
+          const suggested = filePath
+            .replace(/\/\.opencode\//, "/user/")
+            .replace(/\/\.claude\//, "/user/")
+            .replace(/\/common_agent\//, "/user/");
           throw new Error(
-            `禁止修改 .opencode/ 目录（框架升级会覆盖）。` +
-            `请将内容写入 user/ 目录，例如: ${filePath.replace(/\/.opencode\//, "/user/")}`
+            `禁止修改框架托管资产（升级会覆盖）。` +
+            `请将内容写入 user/ 目录，例如: ${suggested}`
           );
         }
       }

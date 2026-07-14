@@ -54,12 +54,12 @@ POST /api/evolve/mcp        → { "agent_name": "xxx", "files": [...], "install_
 
 | status | 含义 | 派发 |
 |--------|------|------|
-| `online` | Plugin/Wait 在线 | ✅ 立即执行 |
+| `online` | runtime 接收端在线 | ✅ 立即执行 |
 | `offline` | 心跳超时 15s | ✅ Daemon 可达时自动拉起 |
 | `dead` | 心跳超时 45s | ✅ Daemon 可达时自动拉起 |
 
-- 所有 agent 不论 runtime 不论状态都正常派发
-- Daemon 自动通过 screen 拉起 TUI（opencode 或 claude）
+- 所有 agent 不论 runtime 不论状态都优先通过 Workflow 正常派发
+- Daemon 会按 runtime 能力自动拉起、唤醒或转交任务
 - Daemon 不可达时 Server workflow 会报失败（HTTP 超时）
 
 ## 创建工作流 Body 格式

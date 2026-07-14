@@ -27,7 +27,7 @@
 #   16 Evolve 进化推送
 #   17 SSE 事件广播
 #   28 check-write-path.mjs 写入保护
-#   29 syncWorkspace no-clobber
+#   29 syncWorkspace managed asset overwrite
 #   30 maf-client sessions 输出格式
 #   31 Plugin 非 Manager 不接收 workflow 广播
 #   32 Agent 切换时 disconnect 旧 agent
@@ -1177,19 +1177,31 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-fram
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写 .opencode/ 被拒绝 (exit 2)" "2" "$EXIT_CODE"
 
-# 28b: 写 user/ → 应该放行 (exit 0)
+# 28b: 写 common_agent/ → 应该拒绝 (exit 2)
+EXIT_CODE=0
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/common_agent/rules/test.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写 common_agent/ 被拒绝 (exit 2)" "2" "$EXIT_CODE"
+
+# 28c: 写 runtime 入口文件 → 应该拒绝 (exit 2)
+EXIT_CODE=0
+echo '{"tool_name":"Write","tool_input":{"file_path":"/home/user/.meta-agent-framework/AGENTS.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写 AGENTS.md 被拒绝 (exit 2)" "2" "$EXIT_CODE"
+
+# 28d: 写 user/ → 应该放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/user/notes.md"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写 user/ 放行 (exit 0)" "0" "$EXIT_CODE"
 
-# 28c: 写其他路径 → 放行 (exit 0)
+# 28e: 写其他路径 → 放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/random-file.txt"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写其他路径放行 (exit 0)" "0" "$EXIT_CODE"
 
-# 28d: 非写工具 → 放行 (exit 0)
+# 28f: 非写工具 → 放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Read","tool_input":{"file_path":"/home/user/.meta-agent-framework/.opencode/rules/test.md"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
@@ -1198,51 +1210,39 @@ assert "Read 工具不拦截 (exit 0)" "0" "$EXIT_CODE"
 fi
 
 # ============================================================
-# Case 29: syncWorkspace no-clobber（.opencode/ 不覆盖已有文件）
+# Case 29: syncWorkspace managed asset overwrite（框架管理资产升级覆盖）
 # ============================================================
 if should_run 29; then
-echo -e "\n${YELLOW}Case 29: syncWorkspace no-clobber${NC}"
+echo -e "\n${YELLOW}Case 29: syncWorkspace managed asset overwrite${NC}"
 
-# 准备测试目录
-SYNC_TEST_SRC="/tmp/maf-sync-test-src/.opencode/rules"
-SYNC_TEST_DST="/tmp/maf-sync-test-dst/.opencode/rules"
-rm -rf /tmp/maf-sync-test-src /tmp/maf-sync-test-dst
-mkdir -p "$SYNC_TEST_SRC" "$SYNC_TEST_DST"
+# 用真实 maf-server sync-plugins 验证源码布局映射到安装态隐藏目录。
+SYNC_TEST_HOME="/tmp/maf-sync-test-home"
+SYNC_TEST_MAF_HOME="/tmp/maf-sync-test-maf-home"
+rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
+mkdir -p "$SYNC_TEST_HOME" \
+  "$SYNC_TEST_MAF_HOME/common_agent/rules" \
+  "$SYNC_TEST_MAF_HOME/skills/meta-agent-client"
 
-# 源：有 a.md 和 b.md
-echo "source content A" > "$SYNC_TEST_SRC/a.md"
-echo "source content B" > "$SYNC_TEST_SRC/b.md"
+# 目标：已有托管资产旧版本，升级同步必须覆盖。
+echo "old framework dispatch" > "$SYNC_TEST_MAF_HOME/common_agent/rules/dispatch-flow.md"
+echo "old client skill" > "$SYNC_TEST_MAF_HOME/skills/meta-agent-client/SKILL.md"
+echo "old codex agents" > "$SYNC_TEST_MAF_HOME/AGENTS.md"
 
-# 目标：已有 a.md（用户修改过的版本）
-echo "user modified A" > "$SYNC_TEST_DST/a.md"
+HOME="$SYNC_TEST_HOME" MAF_HOME="$SYNC_TEST_MAF_HOME" \
+  node "$SCRIPT_DIR/bin/maf-server.mjs" sync-plugins
 
-# 执行 syncNoClobber（通过 node 直接调用函数）
-node -e "
-import { existsSync, mkdirSync, readdirSync, copyFileSync } from 'node:fs';
-import { join } from 'node:path';
-function syncNoClobber(srcDir, dstDir) {
-  if (!existsSync(srcDir)) return;
-  mkdirSync(dstDir, { recursive: true });
-  let entries;
-  try { entries = readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
-  for (const entry of entries) {
-    const srcPath = join(srcDir, entry.name);
-    const dstPath = join(dstDir, entry.name);
-    if (entry.isDirectory()) { syncNoClobber(srcPath, dstPath); }
-    else { if (!existsSync(dstPath)) { try { copyFileSync(srcPath, dstPath); } catch {} } }
-  }
-}
-syncNoClobber('/tmp/maf-sync-test-src/.opencode', '/tmp/maf-sync-test-dst/.opencode');
-"
+# 验证：common_agent/、opencode/、claude/、codex/ 已物化为安装态 runtime 布局。
+assert "common instructions 同步" "通用管理者协议" "$(cat "$SYNC_TEST_MAF_HOME/common_agent/instructions/Meta-Agent-Server.md" 2>/dev/null || true)"
+assert "common rules 被覆盖" "标准派发流程" "$(cat "$SYNC_TEST_MAF_HOME/common_agent/rules/dispatch-flow.md" 2>/dev/null || true)"
+assert "opencode agent 同步到 .opencode" "opencode runtime wrapper" "$(cat "$SYNC_TEST_MAF_HOME/.opencode/agents/Meta-Agent-Server.md" 2>/dev/null || true)"
+assert "opencode skill 同步到 .opencode" "Meta-Agent Server Protocol" "$(cat "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
+assert "client skill 被覆盖" "Meta-Agent Client Protocol" "$(cat "$SYNC_TEST_MAF_HOME/skills/meta-agent-client/SKILL.md" 2>/dev/null || true)"
+assert "opencode 配置同步" "instructions" "$(cat "$SYNC_TEST_MAF_HOME/opencode.json" 2>/dev/null || true)"
+assert "Claude settings 同步" "SessionStart" "$(cat "$SYNC_TEST_MAF_HOME/.claude/settings.local.json" 2>/dev/null || true)"
+assert "Claude 入口同步" "Meta-Agent-Server" "$(cat "$SYNC_TEST_MAF_HOME/CLAUDE.md" 2>/dev/null || true)"
+assert "Codex 入口被覆盖" "Codex project agent: Meta-Agent-Server" "$(cat "$SYNC_TEST_MAF_HOME/AGENTS.md" 2>/dev/null || true)"
 
-# 验证：a.md 没被覆盖，b.md 被创建
-CONTENT_A=$(cat "$SYNC_TEST_DST/a.md")
-assert "已有文件不被覆盖" "user modified A" "$CONTENT_A"
-
-CONTENT_B=$(cat "$SYNC_TEST_DST/b.md" 2>/dev/null)
-assert "新文件被创建" "source content B" "$CONTENT_B"
-
-rm -rf /tmp/maf-sync-test-src /tmp/maf-sync-test-dst
+rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
 fi
 
 # ============================================================
@@ -1273,7 +1273,7 @@ NODES_SOME=$(grep "nodes.*some.*activeAgent" "$SCRIPT_DIR/plugins/opencode-plugi
 assert "不再有 nodes.some 旧逻辑" "not_found" "$NODES_SOME"
 
 # 验证 Codex maf-server 能被 receiver 识别为 Meta-Agent-Server
-assert "Server Codex AGENTS marker" "Codex project agent: Meta-Agent-Server" "$(head -n 1 "$SCRIPT_DIR/AGENTS.md" 2>/dev/null || true)"
+assert "Server Codex AGENTS marker" "Codex project agent: Meta-Agent-Server" "$(head -n 1 "$SCRIPT_DIR/codex/AGENTS.md" 2>/dev/null || true)"
 assert "maf-server codex env agent" "MAF_AGENT_NAME: \"Meta-Agent-Server\"" "$(grep 'MAF_AGENT_NAME: \"Meta-Agent-Server\"' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server Codex plugin source" '"name": "maf"' "$(cat "$SCRIPT_DIR/plugins/codex/.codex-plugin/plugin.json" 2>/dev/null || true)"
 assert "Server Codex installer source" "Server-served Codex client installer" "$(head -n 8 "$SCRIPT_DIR/plugins/codex-install.mjs" 2>/dev/null || true)"
@@ -1284,11 +1284,20 @@ assert "Server Codex installer route" "Server-served Codex client installer" "$(
 assert "Server Codex plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/codex-plugins/.codex-plugin/plugin.json" 2>/dev/null || true)"
 assert "Server Claude dotfile plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/cc-plugins/.claude-plugin/plugin.json" 2>/dev/null || true)"
 
-# 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据
-DISPATCH_DOC="$(cat "$SCRIPT_DIR/.opencode/agents/Meta-Agent-Server.md" "$SCRIPT_DIR/.opencode/rules/dispatch-flow.md" 2>/dev/null || true)"
+# 验证 Server agent 资产已拆到非隐藏源码目录，安装时再物化为 runtime 隐藏布局
+assert "Server common_agent source layout" "common_agent/" "$(grep 'common_agent/' "$SCRIPT_DIR/package.json" 2>/dev/null || true)"
+assert "Server source no dot opencode package files" "not_found" "$(grep '\".opencode/' "$SCRIPT_DIR/package.json" 2>/dev/null || echo "not_found")"
+assert "Server sync maps common instructions" "common_agent/instructions" "$(grep 'common_agent/instructions' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Server sync maps opencode agents" "opencode/agents" "$(grep 'opencode/agents' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Server sync maps codex AGENTS" "codex/AGENTS.md" "$(grep 'codex/AGENTS.md' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+
+# 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据，且明确点名任务走 fast path
+DISPATCH_DOC="$(cat "$SCRIPT_DIR/common_agent/instructions/Meta-Agent-Server.md" "$SCRIPT_DIR/common_agent/rules/dispatch-flow.md" "$SCRIPT_DIR/opencode/agents/Meta-Agent-Server.md" "$SCRIPT_DIR/codex/AGENTS.md" "$SCRIPT_DIR/claude/CLAUDE.md" 2>/dev/null || true)"
 assert "Meta-Agent-Server dispatch origin" '"origin"' "$DISPATCH_DOC"
 assert "Meta-Agent-Server dispatch notify" '"notify"' "$DISPATCH_DOC"
 assert "Meta-Agent-Server dispatch origin agent" '"agent_name": "Meta-Agent-Server"' "$DISPATCH_DOC"
+assert "Meta-Agent-Server explicit dispatch fast path" "明确点名" "$DISPATCH_DOC"
+assert "Meta-Agent-Server avoids reading big rules first" "不要先读取" "$DISPATCH_DOC"
 
 fi
 

@@ -24,7 +24,7 @@ bash scripts/poll-workflow.sh <workflow_id>
 | `Server-side 超时` | 执行超时 | 告知用户"执行超时"，可能是任务太复杂或 agent 拉起慢 |
 | 其他 | 业务错误 | 展示具体错误 |
 
-注意：所有 agent 即使 offline/dead 也会尝试自动拉起（通过 screen），不需要用户干预。只有 Daemon 不可达才是真正的失败。
+注意：所有 agent 即使 offline/dead 也会通过标准 Workflow 进入 Daemon 处理，Daemon 会按 runtime 能力尝试拉起或唤醒。只有 Daemon 不可达才是真正的基础设施失败。
 
 失败后可 `curl -s http://localhost:3000/api/agents` 确认 agent 当前状态，决定是否建议重试。
 

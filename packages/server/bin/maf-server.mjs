@@ -20,7 +20,7 @@
  *   maf.config.json  配置文件
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync, readdirSync, copyFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, networkInterfaces } from "node:os";
 import { execSync, spawn } from "node:child_process";
@@ -47,78 +47,61 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 
 // ============================================================
 // 工作区同步：将 npm 包中的 agent/hook/scripts 同步到 MAF_HOME
+//
+// 源码包内使用非隐藏、按职责分层的目录：
+//   common_agent/  通用 Meta-Agent-Server 协议、rules、client skill 模板
+//   opencode/      opencode 运行时 agent/skills/入口配置
+//   claude/        Claude Code 运行时入口配置
+//   codex/         Codex 运行时入口配置
+//
+// 安装/启动时再物化为各 runtime 原生布局：
+//   common_agent/instructions   -> $MAF_HOME/common_agent/instructions
+//   common_agent/rules          -> $MAF_HOME/common_agent/rules
+//   common_agent/client_skills  -> $MAF_HOME/skills
+//   opencode/agents             -> $MAF_HOME/.opencode/agents
+//   opencode/skills             -> $MAF_HOME/.opencode/skills
+//   opencode/opencode.json      -> $MAF_HOME/opencode.json
+//   claude/settings.local.json  -> $MAF_HOME/.claude/settings.local.json
+//   claude/CLAUDE.md            -> $MAF_HOME/CLAUDE.md
+//   codex/AGENTS.md             -> $MAF_HOME/AGENTS.md
 // ============================================================
 
-/** 需要覆盖同步的文件/目录（代码、脚本，升级必须用新版） */
-const SYNC_OVERWRITE = [
-  ".claude",                 // claude hooks 配置
-  "CLAUDE.md",              // claude system prompt
-  "AGENTS.md",              // codex project instructions
-  "opencode.json",           // opencode 配置（instructions 引用 user/*.md）
-  "scripts/maf-server-hook.mjs",  // claude asyncRewake hook
-  "scripts/check-write-path.mjs", // 文件写入保护 hook
-  "scripts/poll-workflow.sh",     // 工作流轮询脚本
-  "scripts/push-skill.sh",       // skill 推送脚本
+/** 需要覆盖同步的文件/目录（框架管理资产，升级必须用新版；用户内容放 user/） */
+const SYNC_MANAGED = [
+  ["common_agent/instructions", "common_agent/instructions"],  // 通用 Meta-Agent-Server 协议
+  ["common_agent/rules", "common_agent/rules"],                // 通用规则
+  ["common_agent/client_skills", "skills"],                    // 推送给远端 agent 的 client skill 模板
+  ["opencode/agents", ".opencode/agents"],                    // opencode agent 定义
+  ["opencode/skills", ".opencode/skills"],                    // opencode runtime skills
+  ["opencode/opencode.json", "opencode.json"],                 // opencode 配置（instructions 引用 user/*.md）
+  ["claude/settings.local.json", ".claude/settings.local.json"], // claude hooks 配置
+  ["claude/CLAUDE.md", "CLAUDE.md"],                           // claude system prompt
+  ["codex/AGENTS.md", "AGENTS.md"],                            // codex project instructions
+  ["scripts/maf-server-hook.mjs", "scripts/maf-server-hook.mjs"],   // claude asyncRewake hook
+  ["scripts/check-write-path.mjs", "scripts/check-write-path.mjs"], // 文件写入保护 hook
+  ["scripts/poll-workflow.sh", "scripts/poll-workflow.sh"],         // 工作流轮询脚本
+  ["scripts/push-skill.sh", "scripts/push-skill.sh"],               // skill 推送脚本
 ];
-
-/** 需要"只创建不覆盖"的目录（用户可能积累了修改） */
-const SYNC_NO_CLOBBER = [
-  ".opencode",               // opencode agent 定义 + rules + skills（用户会修改）
-];
-
-/**
- * 递归同步目录，但已存在的文件不覆盖。
- * 只创建目标中不存在的文件（新增文件能同步过去，已有文件保留用户修改）。
- */
-function syncNoClobber(srcDir, dstDir) {
-  if (!existsSync(srcDir)) return;
-  mkdirSync(dstDir, { recursive: true });
-
-  let entries;
-  try { entries = readdirSync(srcDir, { withFileTypes: true }); } catch { return; }
-
-  for (const entry of entries) {
-    const srcPath = join(srcDir, entry.name);
-    const dstPath = join(dstDir, entry.name);
-
-    if (entry.isDirectory()) {
-      syncNoClobber(srcPath, dstPath);
-    } else {
-      // 只在目标不存在时才拷贝
-      if (!existsSync(dstPath)) {
-        try { copyFileSync(srcPath, dstPath); } catch {}
-      }
-    }
-  }
-}
 
 /**
  * 同步工作区文件到 MAF_HOME。
- * - 代码/脚本：每次覆盖（确保升级后新版本生效）
- * - Agent 定义/规则(.opencode)：只创建不覆盖（保护用户积累的修改）
+ * - 框架管理资产：每次覆盖（确保升级后新版本生效）
+ * - 用户长期知识：不要写入这些框架目录，应放在 $MAF_HOME/user/
  * 同时同步已安装的 opencode / Claude Code / Codex Plugin 代码。
  */
 function syncWorkspace() {
   mkdirSync(join(MAF_HOME, "scripts"), { recursive: true });
 
-  // 覆盖同步：代码/脚本（升级必须用新版）
-  for (const item of SYNC_OVERWRITE) {
-    const src = join(PACKAGE_ROOT, item);
-    const dst = join(MAF_HOME, item);
+  // 覆盖同步：框架管理资产（升级必须用新版）
+  for (const [srcRel, dstRel] of SYNC_MANAGED) {
+    const src = join(PACKAGE_ROOT, srcRel);
+    const dst = join(MAF_HOME, dstRel);
     if (!existsSync(src)) continue;
 
     try {
+      mkdirSync(dirname(dst), { recursive: true });
       cpSync(src, dst, { recursive: true, force: true });
     } catch {}
-  }
-
-  // 不覆盖同步：agent/rules/skills（保护用户修改）
-  for (const item of SYNC_NO_CLOBBER) {
-    const src = join(PACKAGE_ROOT, item);
-    const dst = join(MAF_HOME, item);
-    if (!existsSync(src)) continue;
-
-    syncNoClobber(src, dst);
   }
 
   // 同步 opencode Plugin（代码，覆盖）；Node Daemon 独立安装到 ~/.meta-agent-framework/daemon.mjs
