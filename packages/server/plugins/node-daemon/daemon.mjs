@@ -711,6 +711,29 @@ async function heartbeat() {
   }
 }
 
+async function reportAgentStatusToServer(agentName, status) {
+  if (!META_AGENT_SERVER || !agentName || !userId) return false;
+  try {
+    const res = await fetch(`${META_AGENT_SERVER}/api/clients/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        host_user: hostUser,
+        agent_statuses: { [agentName]: status },
+        client_version: CLIENT_VERSION,
+        plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+        daemon_port: parseInt(daemonUrl.split(":").pop()),
+      }),
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch (err) {
+    log(`⚠ 上报 agent 状态失败: ${agentName}=${status} ${err.message}`);
+    return false;
+  }
+}
+
 // ============================================================
 // 任务队列：按 agent_name 路由
 // ============================================================
@@ -798,18 +821,32 @@ async function reportTaskResult(task, status, result, durationMs) {
         }),
         signal: AbortSignal.timeout(10000),
       });
-      if (!res.ok) log(`⚠ workflow 回报 HTTP ${res.status}`);
-    } catch (err) { log(`⚠ workflow 回报失败: ${err.message}`); }
-    return;
+      if (!res.ok) {
+        let detail = "";
+        try { detail = await res.text(); } catch {}
+        log(`⚠ workflow 回报 HTTP ${res.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+        return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
+      }
+      log(`✅ workflow 回报成功: workflow=${task.workflow_id} node=${task.node_id}`);
+      return { ok: true, workflow_reported: true };
+    } catch (err) {
+      log(`⚠ workflow 回报失败: ${err.message}`);
+      return { ok: false, workflow_reported: false, error: err.message };
+    }
   }
   try {
-    await fetch(`${META_AGENT_SERVER}/api/tasks/${task.id}/result`, {
+    const res = await fetch(`${META_AGENT_SERVER}/api/tasks/${task.id}/result`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status, result: result.substring(0, 5000), duration_ms: durationMs }),
       signal: AbortSignal.timeout(10000),
     });
-  } catch (err) { log(`⚠ 回报失败: ${err.message}`); }
+    if (!res.ok) return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
+    return { ok: true, workflow_reported: true };
+  } catch (err) {
+    log(`⚠ 回报失败: ${err.message}`);
+    return { ok: false, workflow_reported: false, error: err.message };
+  }
 }
 
 // ============================================================
@@ -1521,6 +1558,7 @@ const httpServer = createServer(async (req, res) => {
         json(200, { ok: true, ignored: true, agents: [...agents.keys()] });
         return;
       }
+      await reportAgentStatusToServer(name, "offline");
       agents.delete(name);
       // 清理任务队列
       const q = taskQueues.get(name);
@@ -1786,6 +1824,15 @@ const httpServer = createServer(async (req, res) => {
     touchAgent(targetAgent);
 
     const q = getAgentQueue(targetAgent);
+    const bindWaitingResponse = () => {
+      q.waitingResponse = res;
+      req.on("close", () => {
+        if (q.waitingResponse === res) {
+          q.waitingResponse = null;
+          log(`🔌 ${targetAgent} long-poll 断开`);
+        }
+      });
+    };
     const agentInfo = agents.get(targetAgent);
     const runtime = agentInfo?.runtime || "opencode";
 
@@ -1795,7 +1842,7 @@ const httpServer = createServer(async (req, res) => {
       if (q.waitingResponse) {
         try { q.waitingResponse.writeHead(200, { "Content-Type": "application/json" }); q.waitingResponse.end('{"task":null}'); } catch {}
       }
-      q.waitingResponse = res;
+      bindWaitingResponse();
       setTimeout(() => {
         if (q.waitingResponse === res) {
           q.waitingResponse = null;
@@ -1832,7 +1879,7 @@ const httpServer = createServer(async (req, res) => {
       if (q.waitingResponse) {
         try { q.waitingResponse.writeHead(200, { "Content-Type": "application/json" }); q.waitingResponse.end('{"task":null}'); } catch {}
       }
-      q.waitingResponse = res;
+      bindWaitingResponse();
       setTimeout(() => {
         if (q.waitingResponse === res) {
           q.waitingResponse = null;
@@ -1883,7 +1930,7 @@ const httpServer = createServer(async (req, res) => {
     }
     if (!task) task = { id: body.task_id };
 
-    reportTaskResult(task, body.status, body.result || "", body.duration_ms || 0);
+    const reportAck = await reportTaskResult(task, body.status, body.result || "", body.duration_ms || 0);
 
     if (body.task_id && codexTaskScreens.has(body.task_id)) {
       const info = codexTaskScreens.get(body.task_id);
@@ -1907,7 +1954,7 @@ const httpServer = createServer(async (req, res) => {
         log(`📋 ${agentName} 续传下一个任务: "${nextTask.title}"`);
       }
     }
-    json(200, { ok: true, next_task: nextTask });
+    json(200, { ok: true, workflow_reported: reportAck?.workflow_reported !== false, workflow_error: reportAck?.error || "", next_task: nextTask });
     return;
   }
 

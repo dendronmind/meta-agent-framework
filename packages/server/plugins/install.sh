@@ -2,7 +2,7 @@
 #
 # Meta-Agent Framework Client 一键安装 (v0.4.0 — Node Daemon)
 #
-# 自动检测 opencode / Claude Code，安装对应的 Plugin。
+# 自动检测 opencode / Claude Code / Codex，安装对应的 Plugin。
 # 此脚本由 Server 动态注入地址，远端直接执行：
 #   source <(curl -fsSL http://<server>:3000/install.sh)
 #
@@ -29,19 +29,23 @@ fi
 # ---- 检测运行时 ----
 HAS_OPENCODE=false
 HAS_CLAUDE=false
+HAS_CODEX=false
 command -v opencode &>/dev/null && HAS_OPENCODE=true
 command -v claude &>/dev/null && HAS_CLAUDE=true
+command -v codex &>/dev/null && HAS_CODEX=true
 
-if ! $HAS_OPENCODE && ! $HAS_CLAUDE; then
-  echo "❌ 未检测到 opencode 或 Claude Code"
+if ! $HAS_OPENCODE && ! $HAS_CLAUDE && ! $HAS_CODEX; then
+  echo "❌ 未检测到 opencode、Claude Code 或 Codex"
   echo "   安装 opencode:    curl -fsSL https://opencode.ai/install | bash"
   echo "   安装 Claude Code: npm install -g @anthropic-ai/claude-code"
+  echo "   安装 Codex:       npm install -g @openai/codex"
   return 1 2>/dev/null || exit 1
 fi
 
 echo "  检测到运行时:"
 $HAS_OPENCODE && echo "    ✅ opencode $(opencode --version 2>/dev/null || echo '')"
 $HAS_CLAUDE && echo "    ✅ Claude Code $(claude --version 2>/dev/null || echo '')"
+$HAS_CODEX && echo "    ✅ Codex $(codex --version 2>/dev/null || echo '')"
 echo ""
 
 # ---- 安装 runtime-neutral Node Daemon ----
@@ -146,6 +150,21 @@ MEOF
   echo ""
 fi
 
+# ---- 安装 Codex Plugin ----
+if $HAS_CODEX; then
+  if command -v node &>/dev/null; then
+    CODEX_INSTALLER="$(mktemp -t maf-codex-install.XXXXXX.mjs)"
+    if curl -fsSL "${SERVER}/codex-install.mjs" -o "${CODEX_INSTALLER}"; then
+      MAF_INSTALL_SERVER="${SERVER}" node "${CODEX_INSTALLER}" "${SERVER}" || echo "  ⚠ Codex plugin 安装失败"
+      rm -f "${CODEX_INSTALLER}" 2>/dev/null || true
+    else
+      echo "  ⚠ Codex installer 下载失败"
+    fi
+  else
+    echo "  ⚠ 未检测到 node，跳过 Codex plugin（Node Daemon/Codex hook 需要 Node.js）"
+  fi
+fi
+
 # ---- 配置环境变量 ----
 BASHRC="${HOME}/.bashrc"
 if ! grep -q "META_AGENT_SERVER" "${BASHRC}" 2>/dev/null; then
@@ -177,6 +196,7 @@ echo ""
 echo "  下一步:"
 $HAS_OPENCODE && echo "  [opencode] cd 项目目录 → 创建 .opencode/agents/<name>.md → opencode"
 $HAS_CLAUDE && echo "  [claude]   cd 项目目录 → 创建 .claude/agents/<name>.md → claude"
+$HAS_CODEX && echo "  [codex]    cd 项目目录 → 创建 AGENTS.md 或 .codex/agents/<name>.md → codex"
 echo ""
 echo "  Agent 启动后自动拉起 Node Daemon → 注册到 Server: ${SERVER}"
 echo ""

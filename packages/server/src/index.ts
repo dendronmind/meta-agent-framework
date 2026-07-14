@@ -46,10 +46,14 @@ console.error = (...args: any[]) => {
 
 /** 探测本机局域网 IP */
 function getLocalIP(): string {
-  for (const ifaces of Object.values(os.networkInterfaces())) {
-    for (const iface of ifaces || []) {
-      if (!iface.internal && iface.family === 'IPv4') return iface.address;
+  try {
+    for (const ifaces of Object.values(os.networkInterfaces())) {
+      for (const iface of ifaces || []) {
+        if (!iface.internal && iface.family === 'IPv4') return iface.address;
+      }
     }
+  } catch (err: any) {
+    console.warn(`[Server] networkInterfaces unavailable, fallback to 127.0.0.1: ${err?.message || err}`);
   }
   return '127.0.0.1';
 }
@@ -114,6 +118,16 @@ app.get('/plugins/:file', (req, res) => {
   res.sendFile(filePath);
 });
 
+// GET /codex-install.mjs — install.sh 用它在远端安装 Codex plugin + launcher wrapper
+app.get('/codex-install.mjs', (_req, res) => {
+  const filePath = path.join(__dirname, '..', 'plugins', 'codex-install.mjs');
+  if (fs.existsSync(filePath)) {
+    res.type('text/javascript').sendFile(filePath);
+  } else {
+    res.status(404).send('Not found');
+  }
+});
+
 // GET /cc-plugins/* — install.sh 从这里下载 Claude Code Plugin 文件
 app.get('/cc-plugins/{*path}', (req, res) => {
   const rawPath = (req.params as any).path;
@@ -122,7 +136,21 @@ app.get('/cc-plugins/{*path}', (req, res) => {
   if (!relPath || relPath.includes('..')) { res.status(400).send('Bad request'); return; }
   const filePath = path.join(__dirname, '..', 'plugins', 'claude-code-plugin-maf', relPath);
   if (fs.existsSync(filePath)) {
-    res.sendFile(filePath);
+    res.sendFile(filePath, { dotfiles: 'allow' });
+  } else {
+    res.status(404).send('Not found');
+  }
+});
+
+// GET /codex-plugins/* — codex-install.mjs 从这里下载 Codex Plugin 文件
+app.get('/codex-plugins/{*path}', (req, res) => {
+  const rawPath = (req.params as any).path;
+  const relPath = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath || '');
+  // 安全检查：不允许路径穿越
+  if (!relPath || relPath.includes('..')) { res.status(400).send('Bad request'); return; }
+  const filePath = path.join(__dirname, '..', 'plugins', 'codex', relPath);
+  if (fs.existsSync(filePath)) {
+    res.sendFile(filePath, { dotfiles: 'allow' });
   } else {
     res.status(404).send('Not found');
   }

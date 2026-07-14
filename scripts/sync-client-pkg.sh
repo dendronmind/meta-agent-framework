@@ -23,4 +23,8 @@ cp -r "$SRC/claude-code-plugin-maf/.claude-plugin" "$DST/claude-code/"
 cp -r "$SRC/claude-code-plugin-maf/hooks" "$DST/claude-code/"
 cp -r "$SRC/claude-code-plugin-maf/scripts" "$DST/claude-code/"
 
+# codex
+rm -rf "$DST/codex"
+cp -r "$SRC/codex" "$DST/codex"
+
 echo "✅ 同步完成"

@@ -172,6 +172,8 @@ export interface MASSession {
   status: SessionStatus;
   rounds: SessionRound[];            // 多轮交互历史
   max_rounds: number;                // 最大轮次（防无限循环，默认 5）
+  origin?: Record<string, unknown>;  // 发起方上下文（透传给 MAS 创建的 workflow）
+  notify?: Record<string, unknown>;  // 通知偏好（透传给 MAS 创建的 workflow）
   created_at: string;
   completed_at?: string;
 }
@@ -180,6 +182,9 @@ export interface MASSession {
 
 /** 工作流节点状态 */
 export type WorkflowNodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+/** 工作流失败策略 */
+export type WorkflowFailurePolicy = 'fail_fast' | 'all_settled';
 
 /** 工作流节点定义 */
 export interface WorkflowNode {
@@ -204,6 +209,9 @@ export interface Workflow {
   title: string;
   nodes: WorkflowNode[];
   status: 'pending' | 'running' | 'completed' | 'failed';
+  failure_policy?: WorkflowFailurePolicy;  // fail_fast（默认）| all_settled（等所有已可达分支完成/失败/超时后汇总）
+  origin?: Record<string, unknown>;        // 发起方上下文（用于结果通知路由）
+  notify?: Record<string, unknown>;        // 通知偏好/目标（用于前台 TUI 注入）
   created_at: string;
   completed_at?: string;
 }

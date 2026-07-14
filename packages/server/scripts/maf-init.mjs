@@ -24,11 +24,13 @@ const CONFIG_PATH = join(STATE_DIR, "maf.config.json");
 // ============================================================
 
 function getLocalIP() {
-  for (const ifaces of Object.values(networkInterfaces())) {
-    for (const iface of ifaces || []) {
-      if (!iface.internal && iface.family === "IPv4") return iface.address;
+  try {
+    for (const ifaces of Object.values(networkInterfaces())) {
+      for (const iface of ifaces || []) {
+        if (!iface.internal && iface.family === "IPv4") return iface.address;
+      }
     }
-  }
+  } catch {}
   return "127.0.0.1";
 }
 
@@ -63,9 +65,10 @@ async function askRequired(question, hint) {
 function printHelp() {
   console.log("");
   console.log("用法：");
-  console.log("  npm run init server    部署 Server 的机器上运行");
-  console.log("  npm run init client    Agent 运行的机器上运行");
-  console.log("  npm run init:check     查看当前配置");
+  console.log("  maf-server init        初始化 / 重写 Server 配置");
+  console.log("  node scripts/maf-init.mjs server   部署 Server 的机器上运行");
+  console.log("  node scripts/maf-init.mjs client   Agent 运行的机器上运行");
+  console.log("  node scripts/maf-init.mjs --check  查看当前配置");
   console.log("");
   console.log("说明：");
   console.log("  Server 是中控节点，负责调度和管理所有 Agent");
@@ -82,7 +85,7 @@ if (process.argv.includes("--check")) {
   const cfg = readConfig();
   if (!cfg) {
     console.log("\n  ❌ 未找到配置文件: " + CONFIG_PATH);
-    console.log("     运行 npm run init server 或 npm run init client 进行初始化\n");
+    console.log("     运行 maf-server init 或 node scripts/maf-init.mjs server/client 进行初始化\n");
     process.exit(1);
   }
 
@@ -90,6 +93,9 @@ if (process.argv.includes("--check")) {
   console.log(`  角色: ${cfg.role || "(未设置)"}`);
   console.log(`  Server URL:   ${cfg.server?.url || "(未设置)"}`);
   console.log(`  Server 端口:  ${cfg.server?.port || 3000}`);
+  if (cfg.role === "server" || cfg.server?.runtime) {
+    console.log(`  Server Runtime: ${cfg.server?.runtime || "(未设置)"}`);
+  }
   console.log(`  Daemon 端口:  ${cfg.daemon?.port || 4100}`);
 
   const registryType = cfg.registry?.type || (cfg.feishu?.app_id ? 'feishu' : 'none');
@@ -102,6 +108,7 @@ if (process.argv.includes("--check")) {
 
   const missing = [];
   if (!cfg.server?.url) missing.push("server.url");
+  if (cfg.role === "server" && !cfg.server?.runtime) missing.push("server.runtime");
   if (missing.length > 0) {
     console.log(`\n  ⚠ 缺少必填项: ${missing.join(", ")}`);
   } else {
@@ -204,15 +211,37 @@ if (mode === "server") {
   // --- AI Runtime ---
   console.log("  🤖 AI Runtime 配置\n");
   console.log("     Server Agent 需要一个 AI Runtime 来运行交互界面。");
-  console.log("     支持 opencode 和 Claude Code，自动检测已安装的 Runtime。\n");
+  console.log("     支持 opencode、Claude Code 和 Codex。");
+  console.log("     Runtime 是首次运行必须明确选择的选项，不会默认使用 opencode。\n");
 
+  const detectedRuntimes = [];
   let detectedRuntime = "";
   try { execSync("which opencode", { stdio: "pipe" }); detectedRuntime = "opencode"; } catch {}
-  if (!detectedRuntime) { try { execSync("which claude", { stdio: "pipe" }); detectedRuntime = "claude"; } catch {} }
+  if (detectedRuntime) detectedRuntimes.push(detectedRuntime);
+  try { execSync("which claude", { stdio: "pipe" }); detectedRuntimes.push("claude"); } catch {}
+  try { execSync("which codex", { stdio: "pipe" }); detectedRuntimes.push("codex"); } catch {}
+  if (detectedRuntimes.length > 0) {
+    console.log(`     已检测到: ${detectedRuntimes.join(", ")}（仅作提示，不作为默认值）\n`);
+  } else {
+    console.log("     未检测到已安装 Runtime；仍可先选择，后续再安装对应 CLI。\n");
+  }
 
-  const runtimeDefault = existing?.server?.runtime || detectedRuntime || "opencode";
-  const runtimeAnswer = await ask("  Runtime (opencode/claude)", runtimeDefault);
-  const runtime = ["opencode", "claude"].includes(runtimeAnswer) ? runtimeAnswer : runtimeDefault;
+  const runtimeAliases = {
+    opencode: "opencode",
+    claude: "claude",
+    "claude-code": "claude",
+    cc: "claude",
+    codex: "codex",
+  };
+  const runtimeDefault = runtimeAliases[existing?.server?.runtime] || "";
+  let runtime = "";
+  while (!runtime) {
+    const runtimeAnswer = (await ask("  Runtime (必选: opencode/claude/codex)", runtimeDefault)).toLowerCase();
+    runtime = runtimeAliases[runtimeAnswer] || "";
+    if (!runtime) {
+      console.log("     ⚠ Runtime 为必选项，请输入 opencode、claude 或 codex\n");
+    }
+  }
   console.log(`\n     ✅ Runtime: ${runtime}\n`);
 
   // --- 生成配置 ---
@@ -237,9 +266,9 @@ if (mode === "server") {
   console.log("");
   console.log("  🎉 Server 配置完成！");
   console.log("");
-  console.log("     启动 Server:  npm start");
-  console.log("     查看配置:     npm run init:check");
-  console.log(`     Client 连接:  其他机器运行 npm run init client，输入 ${serverUrl}`);
+  console.log("     启动 Server:  maf-server start");
+  console.log("     查看状态:     maf-server status");
+  console.log(`     Client 连接:  其他机器运行 node scripts/maf-init.mjs client，输入 ${serverUrl}`);
   console.log("");
 }
 
@@ -251,7 +280,7 @@ if (mode === "client") {
   console.log("  📡 连接到 Server\n");
   console.log("     Client 需要知道 Server 的地址才能注册 Agent 和接收任务。");
   console.log("     格式: http://<Server机器的IP>:<端口>，例如 http://192.168.1.100:3000");
-  console.log("     （这个地址在 Server 机器上运行 npm run init server 时会显示）\n");
+  console.log("     （这个地址在 Server 机器上运行 maf-server init 时会显示）\n");
 
   serverUrl = await askRequired("  Server 地址", "例如: http://192.168.1.100:3000");
 
@@ -315,8 +344,8 @@ if (mode === "client") {
   console.log("");
   console.log("  🎉 Client 配置完成！");
   console.log("");
-  console.log("     启动 Agent: opencode --agent <agent名>");
-  console.log("     查看配置:   npm run init:check");
+  console.log("     启动 Agent: opencode --agent <agent名> / claude / codex");
+  console.log("     查看配置:   node scripts/maf-init.mjs --check");
   console.log("");
 }
 

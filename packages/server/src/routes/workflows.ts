@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { workflowEngine } from '../services/workflow-engine';
 import { masRunner } from '../services/mas-runner';
-import type { ExecutionResult, ExecuteScope, ExecuteIntent } from '../types';
+import type { ExecutionResult, ExecuteScope, ExecuteIntent, WorkflowFailurePolicy } from '../types';
 
 const router = Router();
 
@@ -11,12 +11,18 @@ const router = Router();
 
 const VALID_SCOPES: ExecuteScope[] = ['project', 'agent_self'];
 const VALID_INTENTS: ExecuteIntent[] = ['query', 'modify', 'review', 'diagnose', 'execute'];
+const VALID_FAILURE_POLICIES = ['fail_fast', 'all_settled'];
 
 /** POST /api/workflows — 创建并启动工作流（异步，立即返回 workflow_id） */
 router.post('/', async (req: Request, res: Response) => {
-  const { title, nodes } = req.body;
+  const { title, nodes, origin, notify } = req.body;
+  const failure_policy = (req.body.failure_policy || req.body.failurePolicy || 'fail_fast') as WorkflowFailurePolicy;
   if (!title || !Array.isArray(nodes) || nodes.length === 0) {
     res.status(400).json({ error: 'title and nodes[] required' });
+    return;
+  }
+  if (!VALID_FAILURE_POLICIES.includes(failure_policy)) {
+    res.status(400).json({ error: `Invalid failure_policy "${failure_policy}". Must be: ${VALID_FAILURE_POLICIES.join(', ')}` });
     return;
   }
 
@@ -40,8 +46,8 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   try {
-    const { workflow_id } = workflowEngine.startAsync(title, nodes);
-    res.status(202).json({ workflow_id, status: 'running', title });
+    const { workflow_id } = workflowEngine.startAsync(title, nodes, { failure_policy, origin, notify });
+    res.status(202).json({ workflow_id, status: 'running', title, failure_policy });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -103,13 +109,13 @@ router.post('/:wid/nodes/:nid/result', (req: Request, res: Response) => {
 
 /** 提交任务的通用处理 */
 async function handleSubmitTask(req: Request, res: Response): Promise<void> {
-  const { title, description } = req.body;
+  const { title, description, origin, notify } = req.body;
   if (!title) {
     res.status(400).json({ error: 'title required' });
     return;
   }
 
-  const sessionPromise = masRunner.submitTask(title, description || '');
+  const sessionPromise = masRunner.submitTask(title, description || '', { origin, notify });
 
   // 先等第一轮输出，超过 30s 就先返回
   const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000));

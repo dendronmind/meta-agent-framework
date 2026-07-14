@@ -347,10 +347,28 @@ for arg in "$@"; do
 done
 
 maf_exec_args=("$@")
+maf_hook_cwd="$PWD"
+maf_remote="\${MAF_CODEX_APP_SERVER_URL:-}"
+maf_has_remote_arg=0
+maf_session_pid="$$"
+maf_cleanup_enabled=0
+maf_cleanup_done=0
+maf_cleanup() {
+  if [[ "$maf_cleanup_enabled" != "1" || "$maf_cleanup_done" == "1" || ! -f "$HOOK" ]]; then
+    return 0
+  fi
+  maf_cleanup_done=1
+  {
+    printf '%s [codex-wrapper] cleanup cwd=%s hook_cwd=%s remote=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" >> "$LOG"
+    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" MAF_CODEX_SESSION_PID="$maf_session_pid" node "$HOOK" <<JSON
+{"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperEnd","remote":"$maf_remote","sessionPid":$maf_session_pid}
+JSON
+  } >/dev/null 2>>"$LOG" || true
+}
+trap 'maf_status=130; maf_cleanup; exit "$maf_status"' INT
+trap 'maf_status=143; maf_cleanup; exit "$maf_status"' TERM
+
 if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-}" != "1" && -f "$HOOK" ]]; then
-  maf_hook_cwd="$PWD"
-  maf_remote="\${MAF_CODEX_APP_SERVER_URL:-}"
-  maf_has_remote_arg=0
   maf_args=("$@")
   for ((i=0; i<\${#maf_args[@]}; i++)); do
     case "\${maf_args[$i]}" in
@@ -385,14 +403,20 @@ if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-
       maf_exec_args=("--remote" "$maf_remote" "$@")
     fi
     printf '%s [codex-wrapper] start cwd=%s hook_cwd=%s remote=%s args=%q\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" "$*" >> "$LOG"
-    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" node "$HOOK" <<JSON
-{"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperStart","remote":"$maf_remote"}
+    maf_cleanup_enabled=1
+    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" MAF_CODEX_SESSION_PID="$maf_session_pid" node "$HOOK" <<JSON
+{"cwd":"$maf_hook_cwd","launchCwd":"$PWD","eventName":"WrapperStart","remote":"$maf_remote","sessionPid":$maf_session_pid}
 JSON
     printf '%s [codex-wrapper] hook done cwd=%s hook_cwd=%s remote=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" >> "$LOG"
   } >/dev/null 2>>"$LOG" || true
 fi
 
-exec "$REAL_CODEX" "\${maf_exec_args[@]}"
+set +e
+"$REAL_CODEX" "\${maf_exec_args[@]}"
+maf_status=$?
+set -e
+maf_cleanup
+exit "$maf_status"
 `;
   writeFileSync(CODEX_WRAPPER, wrapper);
   try { execSync(`chmod +x "${CODEX_WRAPPER}"`); } catch {}

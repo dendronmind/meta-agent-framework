@@ -6,9 +6,38 @@
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 
 const THREAD_ID = process.env.MOCK_CODEX_THREAD_ID || "mock-thread-1";
+const NO_TURN_COMPLETED = process.env.MOCK_CODEX_NO_TURN_COMPLETED === "1" || process.env.MOCK_CODEX_NO_TURN_COMPLETED === "true";
 let nextTurn = 0;
+const turns = [];
+
+function mockThread() {
+  return {
+    id: THREAD_ID,
+    sessionId: "mock-session-1",
+    forkedFromId: null,
+    parentThreadId: null,
+    preview: "mock codex app-server thread",
+    ephemeral: false,
+    modelProvider: "mock",
+    createdAt: Date.now() / 1000,
+    updatedAt: Date.now() / 1000,
+    recencyAt: Date.now() / 1000,
+    status: { type: turns.some(t => t.status === "inProgress") ? "active" : "idle", activeFlags: [] },
+    path: null,
+    cwd: process.cwd(),
+    cliVersion: "mock",
+    source: "appServer",
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: "mock-thread",
+    turns,
+  };
+}
 
 function responseFor(msg, send) {
   const { id, method, params = {} } = msg;
@@ -21,15 +50,34 @@ function responseFor(msg, send) {
     send({ id, result: { data: [THREAD_ID], nextCursor: null } });
     return;
   }
+  if (method === "thread/read") {
+    send({ id, result: { thread: mockThread() } });
+    return;
+  }
   if (method === "turn/start") {
     const turnId = `mock-turn-${++nextTurn}`;
     const prompt = (params.input || []).map(i => i.text || "").join("\n");
+    if (process.env.MOCK_CODEX_TURN_LOG) {
+      try {
+        appendFileSync(process.env.MOCK_CODEX_TURN_LOG, `--- turn ${turnId} ---\n${prompt}\n`);
+      } catch {}
+    }
     const match = prompt.match(/Codex attached e2e task:[^\n]*/i);
-    const text = `mock attached codex completed: ${match ? match[0] : "no prompt match"}`;
-    send({ id, result: { turn: { id: turnId, items: [], itemsView: "all", status: "inProgress", error: null, startedAt: Date.now() / 1000, completedAt: null, durationMs: null } } });
+    const notice = prompt.match(/\[(?:MAF 任务回报完成|MAF 后台任务结果通知)\][\s\S]*/);
+    const text = notice ? notice[0] : `mock attached codex completed: ${match ? match[0] : "no prompt match"}`;
+    const startedAt = Date.now() / 1000;
+    const turn = { id: turnId, items: [], itemsView: "all", status: "inProgress", error: null, startedAt, completedAt: null, durationMs: null };
+    turns.push(turn);
+    send({ id, result: { turn: { ...turn } } });
     setTimeout(() => {
+      turn.items = [{ type: "agentMessage", id: "agent-1", text, phase: null, memoryCitation: null }];
+      turn.status = "completed";
+      turn.completedAt = Date.now() / 1000;
+      turn.durationMs = 10;
       send({ method: "item/agentMessage/delta", params: { threadId: THREAD_ID, turnId, itemId: "agent-1", delta: text } });
-      send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { id: turnId, items: [{ type: "agentMessage", id: "agent-1", text, phase: null, memoryCitation: null }], itemsView: "all", status: "completed", error: null, startedAt: Date.now() / 1000, completedAt: Date.now() / 1000, durationMs: 10 } } });
+      if (!NO_TURN_COMPLETED) {
+        send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { ...turn, items: [...turn.items] } } });
+      }
     }, 50);
     return;
   }

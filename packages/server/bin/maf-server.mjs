@@ -96,7 +96,7 @@ function syncNoClobber(srcDir, dstDir) {
  * 同步工作区文件到 MAF_HOME。
  * - 代码/脚本：每次覆盖（确保升级后新版本生效）
  * - Agent 定义/规则(.opencode)：只创建不覆盖（保护用户积累的修改）
- * 同时同步 opencode Plugin 到 ~/.config/opencode/plugins/。
+ * 同时同步已安装的 opencode / Claude Code / Codex Plugin 代码。
  */
 function syncWorkspace() {
   mkdirSync(join(MAF_HOME, "scripts"), { recursive: true });
@@ -138,6 +138,13 @@ function syncWorkspace() {
   const ccPluginDst = join(homedir(), ".claude", "plugins", "marketplaces", "maf-plugins", "claude-code-plugin-maf");
   if (existsSync(ccPluginSrc) && existsSync(ccPluginDst)) {
     try { cpSync(ccPluginSrc, ccPluginDst, { recursive: true, force: true }); } catch {}
+  }
+
+  // 同步 Codex Plugin（仅当用户已安装 MAF Codex plugin source 时覆盖更新代码）
+  const codexPluginSrc = join(PACKAGE_ROOT, "plugins", "codex");
+  const codexPluginDst = join(homedir(), "plugins", "maf");
+  if (existsSync(codexPluginSrc) && existsSync(codexPluginDst)) {
+    try { cpSync(codexPluginSrc, codexPluginDst, { recursive: true, force: true }); } catch {}
   }
 }
 
@@ -221,15 +228,25 @@ async function cmdStart() {
     return;
   }
 
-  // 首次运行：检测不到配置 → 自动进入 init 流程
-  const cfg = readConfig();
+  // 首次运行：检测不到配置 → 自动进入 init 流程。
+  // 旧配置若没有 server.runtime，也必须补选；不再默认 opencode。
+  let cfg = readConfig();
   if (!cfg || !cfg.server?.url) {
     console.log("🔧 首次运行，进入配置流程...\n");
     await cmdInit();
     // init 完成后重新读取配置
-    const newCfg = readConfig();
-    if (!newCfg || !newCfg.server?.url) {
+    cfg = readConfig();
+    if (!cfg || !cfg.server?.url) {
       console.log("❌ 配置未完成，无法启动");
+      process.exit(1);
+    }
+  }
+  if (!normalizeRuntime(cfg?.server?.runtime)) {
+    console.log("🔧 Server Runtime 未配置，请先选择 Runtime...\n");
+    await cmdInit();
+    cfg = readConfig();
+    if (!normalizeRuntime(cfg?.server?.runtime)) {
+      console.log("❌ Runtime 未配置，无法启动 TUI");
       process.exit(1);
     }
   }
@@ -390,7 +407,8 @@ function normalizeRuntime(runtime) {
 }
 
 function detectRuntime() {
-  // 优先级：命令行参数（opencode/claude/codex）> 配置文件 > 默认 opencode
+  // 优先级：命令行参数（opencode/claude/codex）> 配置文件。
+  // 不再根据已安装 CLI 自动选择，也不默认 opencode；首次运行必须显式选择。
   const argRuntime = normalizeRuntime(process.argv[3]);
   if (argRuntime) {
     saveRuntime(argRuntime);
@@ -401,10 +419,19 @@ function detectRuntime() {
   const cfgRuntime = normalizeRuntime(cfg?.server?.runtime);
   if (cfgRuntime) return cfgRuntime;
 
-  if (hasCommand("opencode")) return "opencode";
-  if (hasCommand("claude")) return "claude";
-  if (hasCommand("codex")) return "codex";
-  return "opencode";
+  return "";
+}
+
+function printRuntimeRequiredError() {
+  console.error("❌ Server Runtime 未配置。");
+  console.error("   Runtime 是首次运行必须明确选择的选项，不会默认使用 opencode。");
+  console.error("");
+  console.error("   请选择一种方式配置：");
+  console.error("     maf-server init");
+  console.error("     maf-server tui opencode");
+  console.error("     maf-server tui claude");
+  console.error("     maf-server tui codex");
+  console.error("");
 }
 
 /** 获取 tui/resume 命令后面的额外参数（排除 runtime 参数） */
@@ -423,6 +450,17 @@ function saveRuntime(runtime) {
     cfg.server.runtime = runtime;
     writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + "\n");
   } catch {}
+}
+
+function codexMetaServerEnv() {
+  return {
+    ...process.env,
+    MAF_AGENT_NAME: "Meta-Agent-Server",
+    MAF_RUNTIME: "codex",
+    MAF_DIRECTORY: MAF_HOME,
+    CODEX_CWD: MAF_HOME,
+    META_AGENT_SERVER: process.env.META_AGENT_SERVER || `http://127.0.0.1:${getPort()}`,
+  };
 }
 
 /**
@@ -453,7 +491,7 @@ function findLastSession(agent, directory) {
 }
 
 function cmdTui() {
-  // 在包目录下启动 TUI agent（支持 opencode 和 claude）
+  // 在包目录下启动 TUI agent（支持 opencode / claude / codex）
   if (!isServerRunning()) {
     console.log("⚠️  Server 未运行，先启动...");
     execSync(`node "${join(PACKAGE_ROOT, "bin", "maf-server.mjs")}" start`, { stdio: "inherit" });
@@ -461,10 +499,7 @@ function cmdTui() {
 
   const runtime = detectRuntime();
   if (!runtime) {
-    console.error("❌ 未检测到 opencode / claude / codex，请先安装其中之一：");
-    console.error("   opencode: https://opencode.ai");
-    console.error("   claude:   npm install -g @anthropic-ai/claude-code");
-    console.error("   codex:    npm install -g @openai/codex");
+    printRuntimeRequiredError();
     process.exit(1);
   }
 
@@ -482,7 +517,7 @@ function cmdTui() {
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
     } else if (runtime === "codex") {
       const cmd = `codex -C "${MAF_HOME}" ${extraArgs}`.trim();
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: codexMetaServerEnv() });
     } else {
       const cmd = `claude ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
@@ -503,7 +538,7 @@ function cmdResume() {
 
   const runtime = detectRuntime();
   if (!runtime) {
-    console.error("❌ 未检测到 opencode / claude / codex");
+    printRuntimeRequiredError();
     process.exit(1);
   }
 
@@ -557,7 +592,7 @@ function cmdResume() {
     console.log(`\n  🔄 恢复 Codex session (--last --all)\n`);
     const cmd = `codex resume --last --all -C "${MAF_HOME}" ${extraArgs}`.trim();
     try {
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: codexMetaServerEnv() });
     } catch {
       // 用户退出
     }
@@ -614,6 +649,7 @@ Meta-Agent-Framework Server
 用法: maf-server <command> [runtime]
 
 命令:
+  init          交互式初始化 / 重写 Server 配置
   start         启动 Server（首次自动配置）
   stop          停止 Server
   restart       重启 Server
@@ -628,11 +664,12 @@ Meta-Agent-Framework Server
 数据目录: ${MAF_HOME}
 
 快速开始:
-  1. maf-server start         # 首次自动配置 + 启动
-  2. maf-server resume        # 恢复上次对话（最常用！）
-  3. maf-server tui           # 启动全新会话
-  4. maf-server tui claude    # 用 Claude Code 启动新会话
-  5. maf-server tui codex     # 用 Codex 启动新会话
+  1. maf-server init          # 交互式初始化 / 修改配置（首次必须选择 Runtime）
+  2. maf-server start         # 启动 Server（未配置时会自动 init）
+  3. maf-server resume        # 恢复上次对话（最常用！）
+  4. maf-server tui           # 启动全新会话
+  5. maf-server tui claude    # 用 Claude Code 启动新会话
+  6. maf-server tui codex     # 用 Codex 启动新会话
 `);
 }
 

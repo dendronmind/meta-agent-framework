@@ -37,6 +37,8 @@
 #   36 Codex attached 默认不伪装 online
 #   37 Codex attached receiver app-server bridge
 #   38 Codex wrapper auto-remote attached receiver
+#   39 Codex attached receiver thread/read fallback
+#   40 Workflow all_settled waits for parallel branches
 #
 set -uo pipefail
 
@@ -64,7 +66,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -164,13 +166,13 @@ cleanup() {
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14938; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14937 14938 14940; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project
 }
 trap cleanup EXIT
 
@@ -198,7 +200,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14938; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14937 14938 14940; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -206,6 +208,11 @@ sleep 1
 rm -f "$E2E_DB_PATH"
 rm -rf "$E2E_STATE_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN"
 mkdir -p "$E2E_STATE_DIR" "$E2E_MAF_HOME/state" "$E2E_MAF_HOME/data" "$E2E_USER_HOME/.meta-agent-framework"
+# GNU screen 在部分 CI/PTY 沙箱中默认 /run/screen 会静默创建失败；e2e 使用隔离 SCREENDIR，
+# 并让 Daemon/子进程继承，避免按需拉起 screen 用例受宿主机 /run 权限影响。
+export SCREENDIR="$E2E_STATE_DIR/screen"
+mkdir -p "$SCREENDIR"
+chmod 700 "$SCREENDIR" 2>/dev/null || true
 cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$E2E_USER_HOME/.meta-agent-framework/daemon.mjs"
 cat > "$E2E_USER_HOME/.meta-agent-framework/package.json" << PKGJSON
 {"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
@@ -327,6 +334,9 @@ else
     exit 3
   fi
 fi
+if [[ -n "${MOCK_CODEX_SLEEP_SECONDS:-}" ]]; then
+  sleep "$MOCK_CODEX_SLEEP_SECONDS"
+fi
 echo "mock codex stdout"
 CODEXMOCK
   chmod +x "$E2E_BIN/codex"
@@ -335,7 +345,7 @@ fi
 
 # 启动 Server（所有 case 都需要）
 if $NEED_SERVER; then
-  MAF_HOME="$E2E_MAF_HOME" PORT=$E2E_SERVER_PORT DB_PATH="$E2E_DB_PATH" FEISHU_SYNC_DISABLED=1 ./node_modules/.bin/tsx src/index.ts &>/dev/null &
+  MAF_HOME="$E2E_MAF_HOME" PORT=$E2E_SERVER_PORT DB_PATH="$E2E_DB_PATH" FEISHU_SYNC_DISABLED=1 node --import tsx src/index.ts &>/dev/null &
   SERVER_PID=$!
   disown $SERVER_PID
   sleep 3
@@ -1262,6 +1272,24 @@ assert "isRelevant 只认 Meta-Agent-Server" "Meta-Agent-Server" "$RELEVANT_LINE
 NODES_SOME=$(grep "nodes.*some.*activeAgent" "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js" 2>/dev/null || echo "not_found")
 assert "不再有 nodes.some 旧逻辑" "not_found" "$NODES_SOME"
 
+# 验证 Codex maf-server 能被 receiver 识别为 Meta-Agent-Server
+assert "Server Codex AGENTS marker" "Codex project agent: Meta-Agent-Server" "$(head -n 1 "$SCRIPT_DIR/AGENTS.md" 2>/dev/null || true)"
+assert "maf-server codex env agent" "MAF_AGENT_NAME: \"Meta-Agent-Server\"" "$(grep 'MAF_AGENT_NAME: \"Meta-Agent-Server\"' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Server Codex plugin source" '"name": "maf"' "$(cat "$SCRIPT_DIR/plugins/codex/.codex-plugin/plugin.json" 2>/dev/null || true)"
+assert "Server Codex installer source" "Server-served Codex client installer" "$(head -n 8 "$SCRIPT_DIR/plugins/codex-install.mjs" 2>/dev/null || true)"
+assert "Server install.sh detects Codex" "HAS_CODEX" "$(grep 'HAS_CODEX' "$SCRIPT_DIR/plugins/install.sh" 2>/dev/null || true)"
+assert "sync-client-pkg syncs Codex" 'cp -r "$SRC/codex" "$DST/codex"' "$(grep 'SRC/codex' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
+assert "Codex ACK notification default off" 'MAF_CODEX_NOTIFY_ACK === "1"' "$(grep 'MAF_CODEX_NOTIFY_ACK' "$ROOT_DIR/packages/client/codex/scripts/maf-codex-attached-receiver.mjs" 2>/dev/null || true)"
+assert "Server Codex installer route" "Server-served Codex client installer" "$(curl -s "$E2E_SERVER/codex-install.mjs" 2>/dev/null || true)"
+assert "Server Codex plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/codex-plugins/.codex-plugin/plugin.json" 2>/dev/null || true)"
+assert "Server Claude dotfile plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/cc-plugins/.claude-plugin/plugin.json" 2>/dev/null || true)"
+
+# 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据
+DISPATCH_DOC="$(cat "$SCRIPT_DIR/.opencode/agents/Meta-Agent-Server.md" "$SCRIPT_DIR/.opencode/rules/dispatch-flow.md" 2>/dev/null || true)"
+assert "Meta-Agent-Server dispatch origin" '"origin"' "$DISPATCH_DOC"
+assert "Meta-Agent-Server dispatch notify" '"notify"' "$DISPATCH_DOC"
+assert "Meta-Agent-Server dispatch origin agent" '"agent_name": "Meta-Agent-Server"' "$DISPATCH_DOC"
+
 fi
 
 # ============================================================
@@ -1428,6 +1456,7 @@ assert "Codex wrapper points to mock" "$E2E_BIN/codex" "$(grep 'REAL_CODEX=' "$C
 
 (cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
+  MAF_CODEX_WRAPPER_DISABLE="" \
   timeout 5s codex --no-alt-screen >/tmp/e2e-codex-wrapper-misc-run.log 2>&1 || true)
 
 wait_until 10 "curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null" '"ok":true' || true
@@ -1437,6 +1466,7 @@ assert "Codex wrapper arbitrary-dir log" "daemon ready without explicit" "$(cat 
 
 (cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
+  MAF_CODEX_WRAPPER_DISABLE="" \
   timeout 5s codex -C "$CODEX_WRAP_PROJECT" --no-alt-screen >/tmp/e2e-codex-wrapper-run.log 2>&1 || true)
 
 wait_until 10 "curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null" "$CODEX_WRAP_AGENT" || true
@@ -1513,7 +1543,9 @@ CODEX_RECV_HOME="/tmp/e2e-codex-receiver-home"
 CODEX_RECV_PROJECT="/tmp/e2e-codex-receiver-project"
 CODEX_RECV_PORT=14137
 CODEX_RECV_DAEMON="http://127.0.0.1:${CODEX_RECV_PORT}"
+CODEX_RECV_TURN_LOG="/tmp/e2e-codex-receiver-turns.log"
 rm -rf "$CODEX_RECV_HOME" "$CODEX_RECV_PROJECT"
+rm -f "$CODEX_RECV_TURN_LOG"
 mkdir -p "$CODEX_RECV_HOME/.meta-agent-framework" "$CODEX_RECV_PROJECT"
 cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$CODEX_RECV_HOME/.meta-agent-framework/daemon.mjs"
 cat > "$CODEX_RECV_HOME/.meta-agent-framework/package.json" << PKGJSON
@@ -1537,6 +1569,8 @@ assert "Codex receiver daemon running" '"ok":true' "$(curl -s $CODEX_RECV_DAEMON
 HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
   MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MOCK_CODEX_TURN_LOG="$CODEX_RECV_TURN_LOG" \
+  MAF_CODEX_NOTIFY_ACK=1 \
   MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
   node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-hook.log 2>&1
 {"cwd":"$CODEX_RECV_PROJECT","eventName":"SessionStart"}
@@ -1564,8 +1598,55 @@ assert "Codex attached workflow completed" "completed" "$RECV_STATUS"
 RECV_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$RECV_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
 assert "Codex attached result from mock" "mock attached codex completed" "$RECV_RESULT"
 assert "Codex attached did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
+wait_until 10 "cat '$CODEX_RECV_TURN_LOG' 2>/dev/null" "\\[MAF 任务回报完成\\]" || true
+assert "Codex attached ACK injected" "\\[MAF 任务回报完成\\]" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
+assert "Codex attached ACK confirms workflow reported" "workflow_reported: true" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
+assert "Codex attached ACK prompt concise" "MAF 通知，请原样回显" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
+assert "Codex attached ACK prompt no verbose instruction" "true" "$(! grep -q '请只输出下面这段 MAF 通知原文' "$CODEX_RECV_TURN_LOG" 2>/dev/null && echo true || echo false)"
 
-kill -9 "$CODEX_RECV_PID" "$CODEX_RECV_DAEMON_PID" 2>/dev/null || true
+CODEX_NOTIFY_PORT=14937
+CODEX_NOTIFY_ENDPOINT="http://127.0.0.1:${CODEX_NOTIFY_PORT}"
+CODEX_NOTIFY_AGENT="codex-notify-worker-$$"
+CODEX_NOTIFY_PORT="$CODEX_NOTIFY_PORT" node -e '
+const http = require("http");
+const server = http.createServer((req, res) => {
+  if (req.url === "/execute" && req.method === "POST") {
+    req.resume();
+    res.writeHead(202, {"content-type":"application/json"});
+    res.end(JSON.stringify({accepted:true}));
+    return;
+  }
+  res.writeHead(req.url === "/health" ? 200 : 404, {"content-type":"application/json"});
+  res.end(JSON.stringify({ok:req.url === "/health"}));
+});
+server.listen(process.env.CODEX_NOTIFY_PORT, "127.0.0.1");
+' >/tmp/e2e-codex-notify-endpoint.log 2>&1 &
+CODEX_NOTIFY_ENDPOINT_PID=$!
+disown $CODEX_NOTIFY_ENDPOINT_PID
+wait_until 10 "curl -s $CODEX_NOTIFY_ENDPOINT/health 2>/dev/null" '"ok":true' || true
+
+curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"codex-notify-e2e\",\"host_user\":\"local\",\"client_endpoint\":\"$CODEX_NOTIFY_ENDPOINT\",\"agents\":[{\"agent_name\":\"$CODEX_NOTIFY_AGENT\",\"project_path\":\"/tmp\",\"capabilities\":\"codex notify worker\",\"runtime\":\"opencode\"}]}" >/dev/null
+wait_until 10 "get_agent_field status $CODEX_NOTIFY_AGENT" "online" || true
+
+NOTIFY_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\":\"Codex origin notification e2e\",\"origin\":{\"agent_name\":\"$CODEX_RECV_AGENT\",\"runtime\":\"codex\",\"thread_id\":\"mock-thread-1\"},\"notify\":{\"mode\":\"originator\",\"include_result\":true},\"nodes\":[{\"id\":\"notify-1\",\"agent_name\":\"$CODEX_NOTIFY_AGENT\",\"prompt\":\"notify current Codex origin\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+NOTIFY_WF_ID=$(echo "$NOTIFY_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
+assert "Codex origin notify workflow 创建" "true" "$([ -n "$NOTIFY_WF_ID" ] && echo true || echo false)"
+sleep 1
+curl -s -X POST "$E2E_SERVER/api/workflows/$NOTIFY_WF_ID/nodes/notify-1/result" \
+  -H 'Content-Type: application/json' \
+  -d '{"execution_id":"codex-notify-manual","status":"completed","result":"codex origin notification result"}' >/dev/null
+wait_until 10 "cat '$CODEX_RECV_TURN_LOG' 2>/dev/null" "\\[MAF 后台任务结果通知\\]" || true
+assert "Codex origin workflow notification injected" "\\[MAF 后台任务结果通知\\]" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
+assert "Codex origin workflow notification result" "codex origin notification result" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
+
+kill -TERM "$CODEX_RECV_PID" 2>/dev/null || true
+wait_until 10 "get_agent_field status $CODEX_RECV_AGENT" "offline" || true
+assert "Codex attached receiver disconnect offline" "offline" "$(get_agent_field status $CODEX_RECV_AGENT)"
+
+kill -9 "$CODEX_RECV_PID" "$CODEX_RECV_DAEMON_PID" "$CODEX_NOTIFY_ENDPOINT_PID" 2>/dev/null || true
 
 fi
 
@@ -1598,7 +1679,8 @@ PATH="$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_H
 assert "Codex auto-remote wrapper installed" "true" "$([ -x "$CODEX_REMOTE_HOME/.local/bin/codex" ] && echo true || echo false)"
 assert "Codex auto-remote helper installed" "true" "$([ -x "$CODEX_REMOTE_HOME/plugins/maf/scripts/maf-codex-app-server.mjs" ] && echo true || echo false)"
 
-(cd "$CODEX_REMOTE_MISC" && PATH="$CODEX_REMOTE_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_HOME/.config"   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_REMOTE_PORT"   MAF_CODEX_APP_SERVER_PORT="$CODEX_REMOTE_APP_PORT" MAF_CODEX_THREAD_WAIT_MS=5000   MOCK_CODEX_APP_SERVER_SCRIPT="$ROOT_DIR/scripts/mock-codex-app-server.mjs" MOCK_CODEX_ARGS_LOG="$CODEX_REMOTE_ARGS_LOG"   timeout 5s codex -C "$CODEX_REMOTE_PROJECT" resume --last --all >/tmp/e2e-codex-auto-remote-run.log 2>&1 || true)
+(cd "$CODEX_REMOTE_MISC" && PATH="$CODEX_REMOTE_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_HOME/.config"   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_REMOTE_PORT"   MAF_CODEX_APP_SERVER_PORT="$CODEX_REMOTE_APP_PORT" MAF_CODEX_THREAD_WAIT_MS=5000 MAF_CODEX_WRAPPER_DISABLE=""   MOCK_CODEX_APP_SERVER_SCRIPT="$ROOT_DIR/scripts/mock-codex-app-server.mjs" MOCK_CODEX_ARGS_LOG="$CODEX_REMOTE_ARGS_LOG" MOCK_CODEX_SLEEP_SECONDS=10   "$CODEX_REMOTE_HOME/.local/bin/codex" -C "$CODEX_REMOTE_PROJECT" resume --last --all >/tmp/e2e-codex-auto-remote-run.log 2>&1) &
+CODEX_REMOTE_WRAPPER_PID=$!
 
 wait_until 10 "curl -s $CODEX_REMOTE_DAEMON/health 2>/dev/null" '"ok":true' || true
 assert "Codex auto-remote daemon running" '"ok":true' "$(curl -s $CODEX_REMOTE_DAEMON/health 2>/dev/null)"
@@ -1626,10 +1708,159 @@ REMOTE_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$REMOTE_WF_ID" 2>/dev/null | 
 assert "Codex auto-remote result from mock" "mock attached codex completed" "$REMOTE_RESULT"
 assert "Codex auto-remote did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
 
+wait "$CODEX_REMOTE_WRAPPER_PID" 2>/dev/null || true
+wait_until 10 "get_agent_field status $CODEX_REMOTE_AGENT" "offline" || true
+assert "Codex auto-remote wrapper exit offline" "offline" "$(get_agent_field status $CODEX_REMOTE_AGENT)"
+
 CODEX_REMOTE_APP_PID=$(python3 -c "import json,sys,pathlib; p=pathlib.Path('$CODEX_REMOTE_HOME/.meta-agent-framework/state/codex-app-server-${CODEX_REMOTE_AGENT}.json'); print(json.loads(p.read_text()).get('pid','') if p.exists() else '')" 2>/dev/null || true)
 CODEX_REMOTE_RECV_PID=$(cat "$CODEX_REMOTE_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_REMOTE_AGENT}.pid" 2>/dev/null || true)
 CODEX_REMOTE_DAEMON_PID=$(ss -tlnp 2>/dev/null | grep ":${CODEX_REMOTE_PORT} " | grep -oP 'pid=\K\d+' | head -1)
-kill -9 "$CODEX_REMOTE_APP_PID" "$CODEX_REMOTE_RECV_PID" "$CODEX_REMOTE_DAEMON_PID" 2>/dev/null || true
+kill -9 "$CODEX_REMOTE_APP_PID" "$CODEX_REMOTE_RECV_PID" "$CODEX_REMOTE_DAEMON_PID" "$CODEX_REMOTE_WRAPPER_PID" 2>/dev/null || true
+
+fi
+
+# ============================================================
+# Case 39: Codex attached receiver thread/read fallback
+# ============================================================
+if should_run 39; then
+echo -e "
+${YELLOW}Case 39: Codex attached receiver thread/read fallback${NC}"
+
+CODEX_POLL_AGENT="codex-poll-agent"
+CODEX_POLL_HOME="/tmp/e2e-codex-poll-home"
+CODEX_POLL_PROJECT="/tmp/e2e-codex-poll-project"
+CODEX_POLL_PORT=14139
+CODEX_POLL_DAEMON="http://127.0.0.1:${CODEX_POLL_PORT}"
+rm -rf "$CODEX_POLL_HOME" "$CODEX_POLL_PROJECT"
+mkdir -p "$CODEX_POLL_HOME/.meta-agent-framework" "$CODEX_POLL_PROJECT"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$CODEX_POLL_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$CODEX_POLL_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+cat > "$CODEX_POLL_PROJECT/AGENTS.md" << AGENTEOF
+# Codex project agent: ${CODEX_POLL_AGENT}
+
+E2E Codex attached receiver polling fallback project.
+AGENTEOF
+
+HOME="$CODEX_POLL_HOME" XDG_CONFIG_HOME="$CODEX_POLL_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_POLL_PORT" MAF_DIRECTORY="$CODEX_POLL_PROJECT" \
+  node "$CODEX_POLL_HOME/.meta-agent-framework/daemon.mjs" >/tmp/e2e-codex-poll-daemon.log 2>&1 &
+CODEX_POLL_DAEMON_PID=$!
+disown $CODEX_POLL_DAEMON_PID
+
+wait_until 10 "curl -s $CODEX_POLL_DAEMON/health 2>/dev/null" '"ok":true' || true
+assert "Codex poll daemon running" '"ok":true' "$(curl -s $CODEX_POLL_DAEMON/health 2>/dev/null)"
+
+HOME="$CODEX_POLL_HOME" XDG_CONFIG_HOME="$CODEX_POLL_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_POLL_PORT" \
+  MAF_AGENT_NAME="$CODEX_POLL_AGENT" MAF_DIRECTORY="$CODEX_POLL_PROJECT" \
+  MAF_CODEX_TURN_POLL_MS=100 \
+  MAF_CODEX_APP_SERVER_CMD="MOCK_CODEX_NO_TURN_COMPLETED=1 node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-poll-hook.log 2>&1
+{"cwd":"$CODEX_POLL_PROJECT","eventName":"SessionStart"}
+HOOKJSON
+CODEX_POLL_PID_FILE="$CODEX_POLL_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_POLL_AGENT}.pid"
+CODEX_POLL_PID="$(cat "$CODEX_POLL_PID_FILE" 2>/dev/null || true)"
+assert "Codex poll receiver spawned by hook" "true" "$([[ -n "$CODEX_POLL_PID" ]] && kill -0 "$CODEX_POLL_PID" 2>/dev/null && echo true || echo false)"
+
+wait_until 10 "get_agent_field status $CODEX_POLL_AGENT" "online" || true
+assert "Codex poll receiver online" "online" "$(get_agent_field status $CODEX_POLL_AGENT)"
+assert "Codex poll receiver runtime" "codex" "$(get_agent_field runtime $CODEX_POLL_AGENT)"
+
+POLL_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\":\"Codex attached receiver poll fallback e2e\",\"nodes\":[{\"id\":\"poll-1\",\"agent_name\":\"$CODEX_POLL_AGENT\",\"prompt\":\"Codex attached e2e task: complete via thread read polling\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+POLL_WF_ID=$(echo "$POLL_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
+assert "Codex poll workflow 创建" "true" "$([ -n "$POLL_WF_ID" ] && echo true || echo false)"
+
+for i in $(seq 1 20); do
+  POLL_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$POLL_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status',''))" 2>/dev/null)
+  [[ "$POLL_STATUS" == "completed" ]] && break
+  sleep 1
+done
+assert "Codex poll workflow completed" "completed" "$POLL_STATUS"
+POLL_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$POLL_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
+assert "Codex poll result from mock" "mock attached codex completed" "$POLL_RESULT"
+assert "Codex poll used thread/read fallback" "turn poll completed" "$(cat "$CODEX_POLL_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
+assert "Codex poll did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
+
+kill -9 "$CODEX_POLL_PID" "$CODEX_POLL_DAEMON_PID" 2>/dev/null || true
+
+fi
+
+# ============================================================
+# Case 40: Workflow all_settled 等待并行分支完成/失败后再汇总
+# ============================================================
+if should_run 40; then
+echo -e "
+${YELLOW}Case 40: Workflow all_settled waits for parallel branches${NC}"
+
+SETTLED_PORT=14940
+SETTLED_ENDPOINT="http://127.0.0.1:${SETTLED_PORT}"
+SETTLED_AGENT_A="settled-agent-a-$$"
+SETTLED_AGENT_B="settled-agent-b-$$"
+
+SETTLED_PORT="$SETTLED_PORT" node -e '
+const http = require("http");
+const server = http.createServer((req, res) => {
+  if (req.url === "/execute" && req.method === "POST") {
+    req.resume();
+    res.writeHead(202, {"content-type":"application/json"});
+    res.end(JSON.stringify({accepted:true}));
+    return;
+  }
+  res.writeHead(req.url === "/health" ? 200 : 404, {"content-type":"application/json"});
+  res.end(JSON.stringify({ok:req.url === "/health"}));
+});
+server.listen(process.env.SETTLED_PORT, "127.0.0.1");
+' >/tmp/e2e-all-settled-endpoint.log 2>&1 &
+SETTLED_ENDPOINT_PID=$!
+disown $SETTLED_ENDPOINT_PID
+
+wait_until 10 "curl -s $SETTLED_ENDPOINT/health 2>/dev/null" '"ok":true' || true
+assert "all_settled fake endpoint running" '"ok":true' "$(curl -s $SETTLED_ENDPOINT/health 2>/dev/null)"
+
+curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"all-settled-e2e\",\"host_user\":\"local\",\"client_endpoint\":\"$SETTLED_ENDPOINT\",\"agents\":[{\"agent_name\":\"$SETTLED_AGENT_A\",\"project_path\":\"/tmp\",\"capabilities\":\"all settled A\",\"runtime\":\"opencode\"},{\"agent_name\":\"$SETTLED_AGENT_B\",\"project_path\":\"/tmp\",\"capabilities\":\"all settled B\",\"runtime\":\"opencode\"}]}" >/dev/null
+
+wait_until 10 "get_agent_field status $SETTLED_AGENT_A" "online" || true
+assert "all_settled agent A online" "online" "$(get_agent_field status $SETTLED_AGENT_A)"
+assert "all_settled agent B online" "online" "$(get_agent_field status $SETTLED_AGENT_B)"
+
+SETTLED_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\":\"all_settled e2e\",\"failure_policy\":\"all_settled\",\"nodes\":[{\"id\":\"a\",\"agent_name\":\"$SETTLED_AGENT_A\",\"prompt\":\"branch A fails\",\"scope\":\"project\",\"intent\":\"query\"},{\"id\":\"b\",\"agent_name\":\"$SETTLED_AGENT_B\",\"prompt\":\"branch B completes\",\"scope\":\"project\",\"intent\":\"query\"},{\"id\":\"c\",\"agent_name\":\"$SETTLED_AGENT_A\",\"prompt\":\"depends on A and should skip\",\"depends_on\":[\"a\"],\"scope\":\"project\",\"intent\":\"query\"}]}")
+SETTLED_WF_ID=$(echo "$SETTLED_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
+assert "all_settled workflow 创建" "true" "$([ -n "$SETTLED_WF_ID" ] && echo true || echo false)"
+
+sleep 1
+curl -s -X POST "$E2E_SERVER/api/workflows/$SETTLED_WF_ID/nodes/a/result" \
+  -H 'Content-Type: application/json' \
+  -d '{"execution_id":"manual-a","status":"failed","result":"branch A failed intentionally"}' >/dev/null
+
+sleep 1
+SETTLED_STATUS_AFTER_A=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+assert "all_settled still running after one failure" "running" "$SETTLED_STATUS_AFTER_A"
+SETTLED_NODE_C_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(n.get('status','') for n in d.get('nodes',[]) if n.get('id')=='c'))" 2>/dev/null)
+assert "all_settled blocked dependent skipped" "skipped" "$SETTLED_NODE_C_STATUS"
+
+curl -s -X POST "$E2E_SERVER/api/workflows/$SETTLED_WF_ID/nodes/b/result" \
+  -H 'Content-Type: application/json' \
+  -d '{"execution_id":"manual-b","status":"completed","result":"branch B completed"}' >/dev/null
+
+for i in $(seq 1 10); do
+  SETTLED_FINAL_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+  [[ "$SETTLED_FINAL_STATUS" == "failed" ]] && break
+  sleep 1
+done
+assert "all_settled final workflow failed after all branches settled" "failed" "$SETTLED_FINAL_STATUS"
+SETTLED_NODE_STATUSES=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(','.join(f\"{n.get('id')}:{n.get('status')}\" for n in d.get('nodes',[])))" 2>/dev/null)
+assert "all_settled keeps completed branch result" "b:completed" "$SETTLED_NODE_STATUSES"
+assert "all_settled keeps failed branch result" "a:failed" "$SETTLED_NODE_STATUSES"
+assert "all_settled keeps skipped dependent" "c:skipped" "$SETTLED_NODE_STATUSES"
+
+kill -9 "$SETTLED_ENDPOINT_PID" 2>/dev/null || true
 
 fi
 

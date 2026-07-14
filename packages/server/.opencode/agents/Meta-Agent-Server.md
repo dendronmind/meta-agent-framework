@@ -67,7 +67,23 @@ Agent 注册信息来源取决于 `~/.meta-agent-framework/maf.config.json` 中 
 # Step 1 — 派发
 curl -s -X POST http://localhost:3000/api/workflows \
   -H "Content-Type: application/json" \
-  -d '{"title":"<概述>","nodes":[{"id":"step-1","agent_name":"<agent名>","prompt":"<目标>","scope":"project|agent_self","intent":"query|modify|review|diagnose|execute"}]}'
+  -d '{
+    "title": "<概述>",
+    "origin": {
+      "agent_name": "Meta-Agent-Server"
+    },
+    "notify": {
+      "mode": "originator",
+      "include_result": true
+    },
+    "nodes": [{
+      "id": "step-1",
+      "agent_name": "<agent名>",
+      "prompt": "<目标>",
+      "scope": "project|agent_self",
+      "intent": "query|modify|review|diagnose|execute"
+    }]
+  }'
 ```
 
 ```bash
@@ -76,6 +92,8 @@ curl -s -X POST http://localhost:3000/api/workflows \
 回复用户："已派发给 xxx，结果会自动回来。"然后继续处理其他对话。
 
 当远端 agent 完成后，**系统会自动在你空闲时推送一条 `[MAF 后台任务结果通知]` 消息**，届时你整理结果汇报用户即可。
+
+> 注意：异步派发必须带 `origin.agent_name="Meta-Agent-Server"` 和 `notify.mode="originator"`。这两个字段不影响 opencode/Claude/Codex 任务执行，只用于 Server 完成后把结果注入回发起方 TUI。不要在通用模板里硬编码 runtime；若你明确知道当前 runtime，可额外写 `origin.runtime` 为 `opencode` / `claude` / `codex`。
 
 ### 模式 B：同步等待（需要立即得到结果时）
 

@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import type {
-  Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult,
+  Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult, WorkflowFailurePolicy,
 } from '../types';
 
 // ============================================================
@@ -41,13 +41,29 @@ const workflowAgentSessions = new Map<string, Record<string, string>>();
  */
 const nodeTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** 默认节点超时：5 分钟（Client 侧 spawn 300s + 网络裕量） */
-const NODE_TIMEOUT_MS = parseInt(process.env.NODE_TIMEOUT_MS || '360000', 10);
+/**
+ * 默认节点超时：12 分钟。
+ *
+ * 该值需要大于各 Client/Receiver 自身的任务超时，避免 Client 仍在等待最终
+ * assistant 回答时，Server 先把 workflow 节点标记为 failed。当前 Codex attached
+ * receiver 默认任务超时为 10 分钟，这里保留 2 分钟网络/回报裕量。
+ */
+const NODE_TIMEOUT_MS = parseInt(process.env.NODE_TIMEOUT_MS || '720000', 10);
 
 export interface WorkflowSummary {
   workflow_id: string;
+  title?: string;
   status: 'completed' | 'failed';
+  failure_policy?: WorkflowFailurePolicy;
+  origin?: Record<string, unknown>;
+  notify?: Record<string, unknown>;
   nodes: { id: string; agent_name: string; status: string; result?: string }[];
+}
+
+interface WorkflowStartOptions {
+  failure_policy?: WorkflowFailurePolicy;
+  origin?: Record<string, unknown>;
+  notify?: Record<string, unknown>;
 }
 
 // ============================================================
@@ -60,8 +76,8 @@ export class WorkflowEngine {
    * 创建并启动工作流
    * 返回一个 Promise，工作流全部完成后 resolve（阻塞式，用于 MAS Runner）
    */
-  async run(title: string, nodes: Omit<WorkflowNode, 'status'>[]): Promise<WorkflowSummary> {
-    const { workflow_id, promise } = this.startWorkflow(title, nodes);
+  async run(title: string, nodes: Omit<WorkflowNode, 'status'>[], options: WorkflowStartOptions = {}): Promise<WorkflowSummary> {
+    const { workflow_id, promise } = this.startWorkflow(title, nodes, options);
     return promise;
   }
 
@@ -69,28 +85,32 @@ export class WorkflowEngine {
    * 创建并启动工作流（非阻塞式，用于 REST API）
    * 立即返回 workflow_id，不等完成
    */
-  startAsync(title: string, nodes: Omit<WorkflowNode, 'status'>[]): { workflow_id: string } {
-    const { workflow_id } = this.startWorkflow(title, nodes);
+  startAsync(title: string, nodes: Omit<WorkflowNode, 'status'>[], options: WorkflowStartOptions = {}): { workflow_id: string } {
+    const { workflow_id } = this.startWorkflow(title, nodes, options);
     return { workflow_id };
   }
 
   /**
    * 内部：创建工作流 + 设置回调 + 触发首批节点
    */
-  private startWorkflow(title: string, nodes: Omit<WorkflowNode, 'status'>[]): {
+  private startWorkflow(title: string, nodes: Omit<WorkflowNode, 'status'>[], options: WorkflowStartOptions = {}): {
     workflow_id: string;
     promise: Promise<WorkflowSummary>;
   } {
+    const failurePolicy = this.normalizeFailurePolicy(options.failure_policy);
     const workflow: Workflow = {
       id: uuidv4(),
       title,
       nodes: nodes.map(n => ({ ...n, status: 'pending' as const })),
       status: 'running',
+      failure_policy: failurePolicy,
+      origin: options.origin,
+      notify: options.notify,
       created_at: new Date().toISOString(),
     };
 
     workflows.set(workflow.id, workflow);
-    console.log(`[Workflow] 🚀 "${title}" (${workflow.id}) — ${nodes.length} 节点`);
+    console.log(`[Workflow] 🚀 "${title}" (${workflow.id}) — ${nodes.length} 节点, failure_policy=${failurePolicy}`);
     for (const n of workflow.nodes) {
       const deps = n.depends_on?.length ? ` (依赖: ${n.depends_on.join(', ')})` : '';
       console.log(`  [${n.id}] ${n.agent_name}${deps}`);
@@ -176,16 +196,9 @@ export class WorkflowEngine {
       if (a.status === 'busy') agentRegistry.updateStatus(a.id, 'online');
     }
 
-    // 检查工作流是否完成
-    if (this.isWorkflowDone(workflow)) {
-      this.completeWorkflow(workflow);
-    } else if (result.status === 'failed') {
-      // 一个节点失败 → 整个工作流失败
-      this.failWorkflow(workflow, `节点 [${node.id}] ${node.agent_name} 执行失败`);
-    } else {
-      // 触发后续可执行节点
-      this.scheduleReady(workflow);
-    }
+    this.advanceAfterNodeTerminal(workflow, result.status === 'failed'
+      ? `节点 [${node.id}] ${node.agent_name} 执行失败`
+      : undefined);
   }
 
   /** 获取工作流 */
@@ -201,6 +214,7 @@ export class WorkflowEngine {
       return Promise.resolve({
         workflow_id: wf.id,
         status: wf.status as 'completed' | 'failed',
+        failure_policy: wf.failure_policy,
         nodes: wf.nodes.map(n => ({ id: n.id, agent_name: n.agent_name, status: n.status, result: n.result })),
       });
     }
@@ -231,6 +245,81 @@ export class WorkflowEngine {
   // ============================================================
   // 内部逻辑
   // ============================================================
+
+  private normalizeFailurePolicy(policy?: string): WorkflowFailurePolicy {
+    return policy === 'all_settled' ? 'all_settled' : 'fail_fast';
+  }
+
+  private isAllSettled(workflow: Workflow): boolean {
+    return workflow.failure_policy === 'all_settled';
+  }
+
+  private isNodeTerminal(node: WorkflowNode): boolean {
+    return node.status === 'completed' || node.status === 'failed' || node.status === 'skipped';
+  }
+
+  private isWorkflowSettled(workflow: Workflow): boolean {
+    return workflow.nodes.every(n => this.isNodeTerminal(n));
+  }
+
+  private hasFailedNodes(workflow: Workflow): boolean {
+    return workflow.nodes.some(n => n.status === 'failed');
+  }
+
+  /**
+   * all_settled 策略下，如果某个依赖失败/跳过，则其后继节点不可能再执行；
+   * 这些节点需要显式标记 skipped，否则 workflow 会永久停在 pending。
+   */
+  private skipBlockedPendingNodes(workflow: Workflow): number {
+    let skipped = 0;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of workflow.nodes) {
+        if (node.status !== 'pending') continue;
+        const blockedDep = (node.depends_on || [])
+          .map(depId => workflow.nodes.find(n => n.id === depId))
+          .find(dep => dep?.status === 'failed' || dep?.status === 'skipped');
+        if (!blockedDep) continue;
+
+        node.status = 'skipped';
+        node.result = `Skipped: dependency [${blockedDep.id}] ${blockedDep.agent_name} is ${blockedDep.status}`;
+        node.completed_at = new Date().toISOString();
+        skipped++;
+        changed = true;
+        console.warn(`[Workflow] ⏭️ [${node.id}] ${node.agent_name} — skipped (${node.result})`);
+      }
+    }
+    return skipped;
+  }
+
+  private advanceAfterNodeTerminal(workflow: Workflow, failureReason?: string): void {
+    if (workflow.status !== 'running') return;
+
+    if (!this.isAllSettled(workflow)) {
+      if (this.isWorkflowDone(workflow)) {
+        this.completeWorkflow(workflow);
+      } else if (failureReason) {
+        // fail_fast：一个节点失败 → 整个工作流失败
+        this.failWorkflow(workflow, failureReason);
+      } else {
+        // 触发后续可执行节点
+        this.scheduleReady(workflow);
+      }
+      return;
+    }
+
+    // all_settled：失败不立即结束；跳过被失败依赖阻塞的后继，继续等待其它并行分支。
+    if (failureReason) this.skipBlockedPendingNodes(workflow);
+    this.scheduleReady(workflow);
+    if (this.isWorkflowSettled(workflow)) {
+      if (this.hasFailedNodes(workflow)) {
+        this.failWorkflow(workflow, failureReason || '一个或多个节点执行失败');
+      } else {
+        this.completeWorkflow(workflow);
+      }
+    }
+  }
 
   /** 找到所有前置依赖已完成且状态为 pending 的节点，派发执行 */
   private scheduleReady(workflow: Workflow): void {
@@ -274,7 +363,8 @@ export class WorkflowEngine {
       console.error(`[Workflow] ❌ [${node.id}] ${msg}`);
       node.status = 'failed';
       node.result = msg;
-      this.failWorkflow(workflow, msg);
+      node.completed_at = new Date().toISOString();
+      this.advanceAfterNodeTerminal(workflow, msg);
       return;
     }
 
@@ -339,7 +429,7 @@ export class WorkflowEngine {
             timestamp: new Date().toISOString(),
           });
 
-          this.failWorkflow(workflow, `节点 [${node.id}] ${node.agent_name} 执行超时`);
+          this.advanceAfterNodeTerminal(workflow, `节点 [${node.id}] ${node.agent_name} 执行超时`);
         }
       }, NODE_TIMEOUT_MS);
       nodeTimeouts.set(nodeKey, timer);
@@ -347,8 +437,9 @@ export class WorkflowEngine {
       console.error(`[Workflow] ❌ [${node.id}] 推送失败 → ${agent.user_id}@${agent.host_user}: ${err.message}`);
       node.status = 'failed';
       node.result = `推送失败: ${err.message}`;
+      node.completed_at = new Date().toISOString();
       agentRegistry.updateStatus(agent.id, 'online');
-      this.failWorkflow(workflow, node.result);
+      this.advanceAfterNodeTerminal(workflow, node.result);
     }
   }
 
@@ -564,7 +655,11 @@ export class WorkflowEngine {
 
     const summary: WorkflowSummary = {
       workflow_id: workflow.id,
+      title: workflow.title,
       status: 'completed',
+      failure_policy: workflow.failure_policy,
+      origin: workflow.origin,
+      notify: workflow.notify,
       nodes: workflow.nodes.map(n => ({
         id: n.id, agent_name: n.agent_name, status: n.status, result: n.result,
       })),
@@ -595,7 +690,11 @@ export class WorkflowEngine {
 
     const summary: WorkflowSummary = {
       workflow_id: workflow.id,
+      title: workflow.title,
       status: 'failed',
+      failure_policy: workflow.failure_policy,
+      origin: workflow.origin,
+      notify: workflow.notify,
       nodes: workflow.nodes.map(n => ({
         id: n.id, agent_name: n.agent_name, status: n.status, result: n.result,
       })),
@@ -603,7 +702,7 @@ export class WorkflowEngine {
 
     eventBus.emit({
       type: 'workflow_failed',
-      data: { workflow_id: summary.workflow_id, status: summary.status, reason },
+      data: { ...summary, reason },
       timestamp: new Date().toISOString(),
     });
 

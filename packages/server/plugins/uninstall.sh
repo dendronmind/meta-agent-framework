@@ -20,6 +20,7 @@ echo "🔧 停止后台进程..."
 pkill -f "MAF_Node_Daemon" 2>/dev/null && echo "  ✅ 停止 Node Daemon" || echo "  - Node Daemon 未运行"
 pkill -f "MAF_Client_Daemon" 2>/dev/null && echo "  ✅ 停止旧版 Daemon" || true
 pkill -f "maf-agent.mjs" 2>/dev/null && echo "  ✅ 停止 Claude Code hooks" || true
+pkill -f "maf-codex-attached-receiver.mjs" 2>/dev/null && echo "  ✅ 停止 Codex receiver" || true
 
 # ---- 卸载 opencode Plugin ----
 OC_PLUGIN_DIR="${HOME}/.config/opencode/plugins/opencode-plugin-meta-agent-framework"
@@ -49,6 +50,21 @@ if [ -d "$CC_MARKETPLACE" ]; then
   rm -rf "$CC_MARKETPLACE" && echo "  ✅ 清理 marketplace 缓存"
 fi
 
+# ---- 卸载 Codex Plugin ----
+CODEX_PLUGIN_DIR="${HOME}/plugins/maf"
+CODEX_WRAPPER="${HOME}/.local/bin/codex"
+if command -v codex &>/dev/null; then
+  echo ""
+  echo "🗑  卸载 Codex Plugin..."
+  codex plugin remove maf@personal 2>/dev/null && echo "  ✅ 卸载 maf@personal" || true
+fi
+if [ -d "$CODEX_PLUGIN_DIR" ]; then
+  rm -rf "$CODEX_PLUGIN_DIR" && echo "  ✅ 删除 Codex plugin source"
+fi
+if [ -f "$CODEX_WRAPPER" ] && grep -q "Meta-Agent Framework Codex launcher wrapper" "$CODEX_WRAPPER" 2>/dev/null; then
+  rm -f "$CODEX_WRAPPER" && echo "  ✅ 删除 Codex launcher wrapper"
+fi
+
 # ---- 清理状态文件 ----
 echo ""
 echo "🗑  清理状态文件..."
@@ -57,6 +73,9 @@ rm -f "${STATE_DIR}"/daemon-port* 2>/dev/null
 rm -f "${STATE_DIR}"/daemon-instances.json 2>/dev/null
 rm -f "${STATE_DIR}"/session-*.json 2>/dev/null
 rm -f "${STATE_DIR}"/last-instance.json 2>/dev/null
+rm -f "${STATE_DIR}"/codex-attached-receiver-*.pid 2>/dev/null
+rm -f "${STATE_DIR}"/codex-attached-receiver-*.json 2>/dev/null
+rm -f "${STATE_DIR}"/state/codex-app-server-*.json 2>/dev/null
 echo "  ✅ 端口文件和会话文件已清理"
 echo "  ℹ  日志文件保留在 ${STATE_DIR}/ （可手动删除）"
 

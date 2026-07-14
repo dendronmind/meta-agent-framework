@@ -17,6 +17,13 @@ curl -s -X POST http://localhost:3000/api/workflows \
   -H "Content-Type: application/json" \
   -d '{
     "title": "<一句话概述>",
+    "origin": {
+      "agent_name": "Meta-Agent-Server"
+    },
+    "notify": {
+      "mode": "originator",
+      "include_result": true
+    },
     "nodes": [{
       "id": "step-1",
       "agent_name": "<agent名>",
@@ -24,9 +31,11 @@ curl -s -X POST http://localhost:3000/api/workflows \
       "scope": "<project|agent_self>",
       "intent": "<query|modify|review|diagnose|execute>"
     }]
-  }'
+}'
 ```
 从返回中提取 `workflow_id`。
+
+`origin` / `notify` 是后台结果回到当前/发起方 TUI 的路由元数据，不参与任务执行，也不会改变目标 agent runtime。异步派发不要省略它们；至少必须保留 `origin.agent_name="Meta-Agent-Server"` 和 `notify.mode="originator"`。通用模板不要硬编码 `origin.runtime`，只有明确当前 runtime 时才额外填写。
 
 ### Step 3 — 轮询（用脚本，不要手动 curl）
 ```bash

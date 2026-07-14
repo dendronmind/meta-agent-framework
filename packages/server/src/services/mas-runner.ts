@@ -36,6 +36,11 @@ const MAX_ROUNDS = parseInt(process.env.MAS_MAX_ROUNDS || '5');
 
 const sessions = new Map<string, MASSession>();
 
+interface MASSubmitOptions {
+  origin?: Record<string, unknown>;
+  notify?: Record<string, unknown>;
+}
+
 // ============================================================
 // 核心
 // ============================================================
@@ -45,7 +50,7 @@ export class MASRunner {
   /**
    * 提交任务 → 创建会话 → 开始第一轮
    */
-  async submitTask(taskTitle: string, taskDescription: string): Promise<MASSession> {
+  async submitTask(taskTitle: string, taskDescription: string, options: MASSubmitOptions = {}): Promise<MASSession> {
     const session: MASSession = {
       id: uuidv4(),
       title: taskTitle,
@@ -53,6 +58,8 @@ export class MASRunner {
       status: 'active',
       rounds: [],
       max_rounds: MAX_ROUNDS,
+      origin: options.origin,
+      notify: options.notify,
       created_at: new Date().toISOString(),
     };
 
@@ -129,7 +136,11 @@ export class MASRunner {
     session.status = 'waiting';  // 等待工作流执行
 
     try {
-      const summary = await workflowEngine.run(workflowJson.title, workflowJson.nodes);
+      const summary = await workflowEngine.run(workflowJson.title, workflowJson.nodes, {
+        failure_policy: workflowJson.failure_policy,
+        origin: session.origin || workflowJson.origin,
+        notify: session.notify || workflowJson.notify,
+      });
       round.workflow_id = summary.workflow_id;
       round.workflow_result = this.formatWorkflowResult(summary);
 
@@ -206,10 +217,15 @@ ${agentList}
     "nodes": [
       {"id": "step-1", "agent_name": "agent名", "prompt": "给agent的指令"},
       {"id": "step-2", "agent_name": "agent名", "prompt": "指令", "depends_on": ["step-1"]}
-    ]
+    ],
+    "failure_policy": "all_settled"
   }
 }
 \`\`\`
+
+failure_policy 可选：
+- "all_settled"：推荐用于多 agent 并行任务；等待所有已派发/可达分支完成、失败或超时后统一汇总。
+- "fail_fast"：任一节点失败即终止整个工作流。
 
 如果任务简单到你自己就能回答，直接输出结果（不要输出 workflow JSON）。
 `;
@@ -221,7 +237,13 @@ ${agentList}
   /**
    * 从 Meta-Agent-Server 输出中提取工作流 JSON
    */
-  private extractWorkflowJson(output: string): { title: string; nodes: any[] } | null {
+  private extractWorkflowJson(output: string): {
+    title: string;
+    nodes: any[];
+    failure_policy?: 'fail_fast' | 'all_settled';
+    origin?: Record<string, unknown>;
+    notify?: Record<string, unknown>;
+  } | null {
     // 尝试从 ```json ... ``` 中提取
     const jsonMatch = output.match(/```json\s*([\s\S]*?)```/);
     if (jsonMatch) {
@@ -315,9 +337,11 @@ ${agentList}
   async submitWorkflow(
     title: string,
     nodes: { id: string; agent_name: string; prompt: string; depends_on?: string[] }[],
+    failure_policy: 'fail_fast' | 'all_settled' = 'all_settled',
+    options: MASSubmitOptions = {},
   ) {
     console.log(`[MAS] 🔄 手动工作流: "${title}" (${nodes.length} 步)`);
-    return workflowEngine.run(title, nodes);
+    return workflowEngine.run(title, nodes, { failure_policy, origin: options.origin, notify: options.notify });
   }
 }
 

@@ -190,8 +190,13 @@ export class AgentRegistry {
             UPDATE agents SET status = ? WHERE user_id = ? AND host_user = ? AND agent_name = ?
           `).run(status, userId, hostUser, agentName);
           console.log(`[Registry] ${agentName}: ${oldStatus} → ${status}`);
+          const eventType = status === 'offline'
+            ? 'client_offline'
+            : status === 'dead'
+              ? 'client_dead'
+              : 'client_revived';
           eventBus.emit({
-            type: 'client_revived',
+            type: eventType,
             data: { user_id: userId, host_user: hostUser, agent_name: agentName },
             timestamp: now,
           });
