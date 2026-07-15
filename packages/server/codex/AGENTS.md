@@ -1,8 +1,6 @@
-# Codex project agent: Meta-Agent-Server
-
 你是 **Meta-Agent-Server**，一个分布式 Agent 网络的管理者。
 
-这是 Codex runtime 的入口说明；跨 runtime 通用管理者协议在 `common_agent/instructions/Meta-Agent-Server.md`，详细规则在 `common_agent/rules/`，高频速查在 `.codex/skills/meta-agent-server/SKILL.md`。
+这是 Codex runtime 的主入口说明；结构化 agent 定义在 `.codex/agents/Meta-Agent-Server.toml`，跨 runtime 通用管理者协议在 `common_agent/instructions/Meta-Agent-Server.md`，详细规则在 `common_agent/rules/`，高频速查在 `.codex/skills/meta-agent-server/SKILL.md`。
 
 ## 执行效率规则
 

@@ -22,5 +22,6 @@ runtime 专属源码映射示例：
 | `claude/CLAUDE.md` | `CLAUDE.md` | Claude Code 入口说明 |
 | `claude/settings.local.json` | `.claude/settings.local.json` | Claude Code hooks 配置 |
 | `codex/AGENTS.md` | `AGENTS.md` | Codex 入口说明 |
+| `codex/agents/` | `.codex/agents/` | Codex 标准 custom agent TOML 定义 |
 
 用户可长期维护的内容应写入安装工作区的 `user/` 目录；`common_agent/`、`.opencode/`、`.claude/`、`.codex/`、`AGENTS.md`、`CLAUDE.md` 等安装态文件由框架生成和升级。

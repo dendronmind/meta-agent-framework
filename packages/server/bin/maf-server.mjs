@@ -64,6 +64,7 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 //   claude/settings.local.json  -> $MAF_HOME/.claude/settings.local.json
 //   claude/CLAUDE.md            -> $MAF_HOME/CLAUDE.md
 //   codex/AGENTS.md             -> $MAF_HOME/AGENTS.md
+//   codex/agents                -> $MAF_HOME/.codex/agents
 // ============================================================
 
 /** 需要覆盖同步的文件/目录（框架管理资产，升级必须用新版；用户内容放 user/） */
@@ -79,6 +80,7 @@ const SYNC_MANAGED = [
   ["claude/settings.local.json", ".claude/settings.local.json"], // claude hooks 配置
   ["claude/CLAUDE.md", "CLAUDE.md"],                           // claude system prompt
   ["codex/AGENTS.md", "AGENTS.md"],                            // codex project instructions
+  ["codex/agents", ".codex/agents"],                           // Codex standard custom agents
   ["scripts/maf-server-hook.mjs", "scripts/maf-server-hook.mjs"],   // claude asyncRewake hook
   ["scripts/check-write-path.mjs", "scripts/check-write-path.mjs"], // 文件写入保护 hook
   ["scripts/poll-workflow.sh", "scripts/poll-workflow.sh"],         // 工作流轮询脚本

@@ -1078,7 +1078,7 @@ console.log("");
 console.log("  下一步:");
 if (env.hasOpencode) console.log("  [opencode] cd 项目目录 → 创建 .opencode/agents/<name>.md → opencode");
 if (env.hasClaude) console.log("  [claude]   cd 项目目录 → 创建 .claude/agents/<name>.md → claude");
-if (env.hasCodex) console.log("  [codex]    cd 项目目录 → 创建 AGENTS.md/.codex/agents/<name>.md → codex（wrapper 先拉起 MAF，SessionStart hook 作为补充）");
+if (env.hasCodex) console.log("  [codex]    cd 项目目录 → 可创建 .codex/agents/<name>.toml；否则使用项目目录名 → codex（wrapper 先拉起 MAF，SessionStart hook 作为补充）");
 console.log("");
 console.log("  Agent 启动后自动拉起 Node Daemon → 注册到 Server");
 console.log("");

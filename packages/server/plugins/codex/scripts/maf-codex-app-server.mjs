@@ -9,7 +9,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, openSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, parse as parsePath } from "node:path";
+import { basename, dirname, join, resolve, parse as parsePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
@@ -98,37 +98,110 @@ function parentDirs(start) {
   return dirs;
 }
 
-function parseAgentFromAgentsMd(projectDir) {
-  const file = join(projectDir, "AGENTS.md");
-  if (!isFile(file)) return "";
-  try {
-    const raw = readFileSync(file, "utf-8");
-    const m = raw.match(/^#\s*Codex project agent:\s*([A-Za-z0-9_.-]+)\s*$/mi);
-    if (m && validAgentName(m[1])) return m[1];
-  } catch {}
+function isHomeDir(dir) {
+  return resolve(dir) === resolve(HOME);
+}
+
+function isGitRoot(dir) {
+  const dotGit = join(dir, ".git");
+  if (isDir(dotGit)) return isFile(join(dotGit, "HEAD"));
+  if (!isFile(dotGit)) return false;
+  try { return /^gitdir:\s*.+/i.test(readFileSync(dotGit, "utf-8")); } catch { return false; }
+}
+
+function findGitRoot(startDir) {
+  for (const dir of parentDirs(startDir)) {
+    if (isHomeDir(dir)) break;
+    if (isGitRoot(dir)) return dir;
+  }
   return "";
 }
 
-function singleAgentFileName(dir) {
-  try {
-    if (!isDir(dir)) return "";
-    const files = readdirSync(dir).filter(f => f.endsWith(".md") && validAgentName(f.slice(0, -3)));
-    if (files.length === 1) return files[0].slice(0, -3);
-  } catch {}
+function findCodexAgentRoot(startDir) {
+  for (const dir of parentDirs(startDir)) {
+    if (isHomeDir(dir)) break;
+    if (isDir(join(dir, ".codex", "agents"))) return dir;
+  }
   return "";
+}
+
+function inferProjectRoot(startDir) {
+  const codexRoot = findCodexAgentRoot(startDir);
+  if (codexRoot) return codexRoot;
+  const gitRoot = findGitRoot(startDir);
+  if (gitRoot) return gitRoot;
+  return resolve(startDir);
+}
+
+function unescapeTomlBasicString(value) {
+  try { return JSON.parse(`"${value}"`); } catch { return value.replace(/\\"/g, '"').replace(/\\\\/g, "\\"); }
+}
+
+function parseTomlString(raw, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^\\s*${escaped}\\s*=\\s*(?:\"\"\"([\\s\\S]*?)\"\"\"|'''([\\s\\S]*?)'''|\"((?:\\\\.|[^\"\\\\])*)\"|'([^']*)'|([^\\n#]+))`, "m");
+  const m = raw.match(re);
+  if (!m) return "";
+  if (m[1] != null) return m[1].replace(/^\n/, "").trim();
+  if (m[2] != null) return m[2].replace(/^\n/, "").trim();
+  if (m[3] != null) return unescapeTomlBasicString(m[3]).trim();
+  if (m[4] != null) return m[4].trim();
+  return String(m[5] || "").trim().replace(/\s+#.*$/, "");
+}
+
+function readCodexAgentToml(file) {
+  try {
+    const raw = readFileSync(file, "utf-8");
+    const fileName = basename(file, ".toml");
+    const name = parseTomlString(raw, "name");
+    const description = parseTomlString(raw, "description");
+    return {
+      path: file,
+      fileName,
+      name: validAgentName(name) ? name : "",
+      description,
+    };
+  } catch {}
+  return null;
+}
+
+function listProjectCodexAgents(projectRoot) {
+  const dir = join(projectRoot, ".codex", "agents");
+  try {
+    if (!isDir(dir)) return [];
+    return readdirSync(dir)
+      .filter(f => f.endsWith(".toml") && !f.startsWith("."))
+      .sort()
+      .map(f => readCodexAgentToml(join(dir, f)))
+      .filter(Boolean);
+  } catch {}
+  return [];
+}
+
+function pickCodexAgent(projectRoot) {
+  const projectName = basename(projectRoot);
+  const agents = listProjectCodexAgents(projectRoot);
+
+  const matching = agents.find(a => a.fileName === projectName || a.name === projectName);
+  if (matching) return matching.name || (validAgentName(matching.fileName) ? matching.fileName : "");
+
+  if (agents.length === 1) {
+    const only = agents[0];
+    return only.name || (validAgentName(only.fileName) ? only.fileName : "");
+  }
+
+  return validAgentName(projectName) ? projectName : "";
 }
 
 function inferAgent(startDir) {
+  const projectRoot = inferProjectRoot(startDir);
+  if (isHomeDir(projectRoot)) return { agentName: "", projectPath: projectRoot };
+
   if (validAgentName(process.env.MAF_AGENT_NAME)) {
-    return { agentName: process.env.MAF_AGENT_NAME, projectPath: resolve(startDir) };
+    return { agentName: process.env.MAF_AGENT_NAME, projectPath: projectRoot };
   }
-  for (const dir of parentDirs(startDir)) {
-    const codexAgent = singleAgentFileName(join(dir, ".codex", "agents"));
-    if (codexAgent) return { agentName: codexAgent, projectPath: dir };
-    const agentsMdAgent = parseAgentFromAgentsMd(dir);
-    if (agentsMdAgent) return { agentName: agentsMdAgent, projectPath: dir };
-  }
-  return { agentName: "", projectPath: resolve(startDir) };
+
+  return { agentName: pickCodexAgent(projectRoot), projectPath: projectRoot };
 }
 
 function safeName(name) { return String(name || "codex").replace(/[^A-Za-z0-9_.-]/g, "_"); }
@@ -277,7 +350,7 @@ async function main() {
 
   const inferred = inferAgent(cwd);
   if (!validAgentName(inferred.agentName)) {
-    log(`auto remote skipped: no MAF Codex agent metadata for ${cwd}`);
+    log(`auto remote skipped: no valid MAF Codex agent for ${cwd}`);
     return;
   }
 

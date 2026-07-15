@@ -586,9 +586,33 @@ function inventoryFP(skills, mcps) {
 // ============================================================
 // Agent 定义读取
 // ============================================================
+function unescapeTomlBasicString(value) {
+  try { return JSON.parse(`"${value}"`); } catch { return value.replace(/\\"/g, '"').replace(/\\\\/g, "\\"); }
+}
+
+function parseTomlString(raw, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^\\s*${escaped}\\s*=\\s*(?:\"\"\"([\\s\\S]*?)\"\"\"|'''([\\s\\S]*?)'''|\"((?:\\\\.|[^\"\\\\])*)\"|'([^']*)'|([^\\n#]+))`, "m");
+  const m = raw.match(re);
+  if (!m) return "";
+  if (m[1] != null) return m[1].replace(/^\n/, "").trim();
+  if (m[2] != null) return m[2].replace(/^\n/, "").trim();
+  if (m[3] != null) return unescapeTomlBasicString(m[3]).trim();
+  if (m[4] != null) return m[4].trim();
+  return String(m[5] || "").trim().replace(/\s+#.*$/, "");
+}
+
 function readAgentMeta(filePath) {
   try {
     const raw = readFileSync(filePath, "utf-8");
+    if (filePath.endsWith(".toml")) {
+      return {
+        capabilities: parseTomlString(raw, "description") || "",
+        mode: "subagent",
+        runtime: "codex",
+      };
+    }
+
     const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
     if (!fmMatch) return null;
     const meta = {};
@@ -600,11 +624,29 @@ function readAgentMeta(filePath) {
   } catch { return null; }
 }
 
-function agentDefPaths(name, agentDirectory) {
+function codexAgentDefPaths(name, agentDirectory) {
   const dir = agentDirectory || DIRECTORY;
+  const agentsDir = join(dir, ".codex", "agents");
+  const exact = join(agentsDir, `${name}.toml`);
+  const paths = [];
+  if (existsSync(exact)) paths.push(exact);
+  try {
+    for (const file of readdirSync(agentsDir).filter(f => f.endsWith(".toml") && !f.startsWith(".")).sort()) {
+      const path = join(agentsDir, file);
+      if (path === exact) continue;
+      const raw = readFileSync(path, "utf-8");
+      if (parseTomlString(raw, "name") === name) paths.push(path);
+    }
+  } catch {}
+  return paths;
+}
+
+function agentDefPaths(name, runtime, agentDirectory) {
+  const dir = agentDirectory || DIRECTORY;
+  if (runtime === "codex") {
+    return codexAgentDefPaths(name, dir);
+  }
   return [
-    join(dir, ".codex", "agents", `${name}.md`),
-    join(homedir(), ".codex", "agents", `${name}.md`),
     join(dir, ".opencode", "agents", `${name}.md`),
     join(homedir(), ".config", "opencode", "agents", `${name}.md`),
     join(dir, ".claude", "agents", `${name}.md`),
@@ -616,7 +658,7 @@ function findAgentDef(name, runtime, agentDirectory) {
   // agentDirectory: 该 agent 自己的项目目录（来自 /agents/connect 传入）
   const dir = agentDirectory || DIRECTORY;
   let base = { agent_name: name, project_path: dir, capabilities: "", mode: "subagent", runtime: runtime || "opencode" };
-  for (const p of agentDefPaths(name, dir)) {
+  for (const p of agentDefPaths(name, runtime, dir)) {
     if (existsSync(p)) {
       const meta = readAgentMeta(p);
       if (meta) { base = { ...base, ...meta, runtime: runtime || meta.runtime || "opencode" }; break; }
@@ -629,9 +671,7 @@ function findAgentDef(name, runtime, agentDirectory) {
 
 function readAgentInstruction(name, runtime, agentDirectory) {
   const dir = agentDirectory || DIRECTORY;
-  const paths = runtime === "codex"
-    ? agentDefPaths(name, dir)
-    : agentDefPaths(name, dir).filter(p => !p.includes("/.codex/"));
+  const paths = agentDefPaths(name, runtime, dir);
   for (const p of paths) {
     if (existsSync(p)) {
       try { return { path: p, content: readFileSync(p, "utf-8") }; } catch {}

@@ -133,6 +133,21 @@ get_agent_field() {
     python3 -c "import json,sys;[print(a.get('$field','')) for a in json.load(sys.stdin) if a['agent_name']=='$name']" 2>/dev/null
 }
 
+create_codex_agent_toml() {
+  local project=$1 agent=$2 description=${3:-"Codex E2E test agent"}
+  mkdir -p "$project/.codex/agents"
+  cat > "$project/.codex/agents/${agent}.toml" << TOMLEOF
+name = "${agent}"
+description = "${description}"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+You are ${agent}, a Codex runtime agent used by the MAF e2e suite.
+Respond briefly and follow the MAF task instructions.
+"""
+TOMLEOF
+}
+
 CC_AGENT="cc-e2e-agent"
 
 start_cc_agent() {
@@ -307,11 +322,13 @@ CFG
 fi
 out=""
 prompt=""
+has_remote=0
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output-last-message) out="$2"; shift 2;;
-    -C|--cd|-s|--sandbox|-p|--profile|-m|--model|-a|--ask-for-approval|--color|--remote) shift 2;;
+    --remote) has_remote=1; shift 2;;
+    -C|--cd|-s|--sandbox|-p|--profile|-m|--model|-a|--ask-for-approval|--color) shift 2;;
     exec|--skip-git-repo-check) shift;;
     --dangerously-bypass-approvals-and-sandbox) shift;;
     -) prompt="$(cat)"; shift;;
@@ -330,6 +347,8 @@ else
   printf '%s\n' "$summary" > "$result_file"
   if [[ -n "$report_script" ]]; then
     node "$report_script" completed "$result_file"
+  elif [[ "$has_remote" == "1" ]]; then
+    :
   else
     echo "missing report script" >&2
     exit 3
@@ -1241,6 +1260,8 @@ echo "old opencode server skill" > "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-ag
 echo "old claude server skill" > "$SYNC_TEST_MAF_HOME/.claude/skills/meta-agent-server/SKILL.md"
 echo "old codex server skill" > "$SYNC_TEST_MAF_HOME/.codex/skills/meta-agent-server/SKILL.md"
 echo "old codex agents" > "$SYNC_TEST_MAF_HOME/AGENTS.md"
+mkdir -p "$SYNC_TEST_MAF_HOME/.codex/agents"
+echo "old codex agent toml" > "$SYNC_TEST_MAF_HOME/.codex/agents/Meta-Agent-Server.toml"
 
 HOME="$SYNC_TEST_HOME" MAF_HOME="$SYNC_TEST_MAF_HOME" \
   node "$SCRIPT_DIR/bin/maf-server.mjs" sync-plugins
@@ -1257,7 +1278,8 @@ assert "client skill 被覆盖" "Meta-Agent Client Protocol" "$(cat "$SYNC_TEST_
 assert "opencode 配置同步" "instructions" "$(cat "$SYNC_TEST_MAF_HOME/opencode.json" 2>/dev/null || true)"
 assert "Claude settings 同步" "SessionStart" "$(cat "$SYNC_TEST_MAF_HOME/.claude/settings.local.json" 2>/dev/null || true)"
 assert "Claude 入口同步" "Meta-Agent-Server" "$(cat "$SYNC_TEST_MAF_HOME/CLAUDE.md" 2>/dev/null || true)"
-assert "Codex 入口被覆盖" "Codex project agent: Meta-Agent-Server" "$(cat "$SYNC_TEST_MAF_HOME/AGENTS.md" 2>/dev/null || true)"
+assert "Codex 入口被覆盖" "结构化 agent 定义" "$(cat "$SYNC_TEST_MAF_HOME/AGENTS.md" 2>/dev/null || true)"
+assert "Codex standard agent 同步" "name = \"Meta-Agent-Server\"" "$(cat "$SYNC_TEST_MAF_HOME/.codex/agents/Meta-Agent-Server.toml" 2>/dev/null || true)"
 
 rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
 fi
@@ -1290,7 +1312,8 @@ NODES_SOME=$(grep "nodes.*some.*activeAgent" "$SCRIPT_DIR/plugins/opencode-plugi
 assert "不再有 nodes.some 旧逻辑" "not_found" "$NODES_SOME"
 
 # 验证 Codex maf-server 能被 receiver 识别为 Meta-Agent-Server
-assert "Server Codex AGENTS marker" "Codex project agent: Meta-Agent-Server" "$(head -n 1 "$SCRIPT_DIR/codex/AGENTS.md" 2>/dev/null || true)"
+assert "Server Codex AGENTS entry" "Meta-Agent-Server" "$(head -n 1 "$SCRIPT_DIR/codex/AGENTS.md" 2>/dev/null || true)"
+assert "Server Codex standard agent source" "name = \"Meta-Agent-Server\"" "$(cat "$SCRIPT_DIR/codex/agents/Meta-Agent-Server.toml" 2>/dev/null || true)"
 assert "maf-server codex env agent" "MAF_AGENT_NAME: \"Meta-Agent-Server\"" "$(grep 'MAF_AGENT_NAME: \"Meta-Agent-Server\"' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server Codex plugin source" '"name": "maf"' "$(cat "$SCRIPT_DIR/plugins/codex/.codex-plugin/plugin.json" 2>/dev/null || true)"
 assert "Server Codex installer source" "Server-served Codex client installer" "$(head -n 8 "$SCRIPT_DIR/plugins/codex-install.mjs" 2>/dev/null || true)"
@@ -1308,6 +1331,7 @@ assert "Server sync maps common instructions" "common_agent/instructions" "$(gre
 assert "Server sync maps server skills" "common_agent/server_skills" "$(grep 'common_agent/server_skills' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server sync maps opencode agents" "opencode/agents" "$(grep 'opencode/agents' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server sync maps codex AGENTS" "codex/AGENTS.md" "$(grep 'codex/AGENTS.md' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Server sync maps codex standard agents" "codex/agents" "$(grep 'codex/agents' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Opencode write guard protects .codex" "/.codex/" "$(grep '/.codex/' "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js" 2>/dev/null || true)"
 
 # 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据，且明确点名任务走 fast path
@@ -1368,23 +1392,13 @@ echo -e "\n${YELLOW}Case 33: Codex runtime screen+TUI 链路${NC}"
 
 CODEX_AGENT="codex-e2e-agent"
 CODEX_PROJECT="/tmp/e2e-codex-project"
-mkdir -p "$CODEX_PROJECT/.codex/agents"
+mkdir -p "$CODEX_PROJECT"
 cat > "$CODEX_PROJECT/AGENTS.md" << 'AGENTSEOF'
 # E2E Codex Project
 
 Respond briefly for tests.
 AGENTSEOF
-cat > "$CODEX_PROJECT/.codex/agents/${CODEX_AGENT}.md" << 'CODEXAGENT'
----
-description: Codex E2E test agent
-mode: subagent
-runtime: codex
----
-
-# Codex E2E Agent
-
-用于验证 MAF Daemon 的 codex exec 链路。
-CODEXAGENT
+create_codex_agent_toml "$CODEX_PROJECT" "$CODEX_AGENT" "Codex E2E test agent"
 
 curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
   -d "{\"agent_name\":\"$CODEX_AGENT\",\"runtime\":\"codex\",\"directory\":\"$CODEX_PROJECT\"}" >/dev/null 2>&1
@@ -1424,10 +1438,11 @@ CODEX_AUTO_DAEMON="http://127.0.0.1:${CODEX_AUTO_PORT}"
 rm -rf "$CODEX_AUTO_HOME" "$CODEX_AUTO_PROJECT"
 mkdir -p "$CODEX_AUTO_HOME" "$CODEX_AUTO_PROJECT"
 cat > "$CODEX_AUTO_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_AUTO_AGENT}
+# E2E Codex autostart project
 
 E2E Codex autostart project.
 AGENTEOF
+create_codex_agent_toml "$CODEX_AUTO_PROJECT" "$CODEX_AUTO_AGENT" "Codex autostart e2e agent"
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_AUTO_HOME" XDG_CONFIG_HOME="$CODEX_AUTO_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_AUTO_PORT" MAF_CODEX_DELIVERY="detached" \
@@ -1470,10 +1485,11 @@ CODEX_WRAP_DAEMON="http://127.0.0.1:${CODEX_WRAP_PORT}"
 rm -rf "$CODEX_WRAP_HOME" "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_MISC"
 mkdir -p "$CODEX_WRAP_HOME" "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_MISC"
 cat > "$CODEX_WRAP_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_WRAP_AGENT}
+# E2E Codex wrapper project
 
 E2E Codex wrapper project.
 AGENTEOF
+create_codex_agent_toml "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_AGENT" "Codex wrapper e2e agent"
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
@@ -1482,15 +1498,24 @@ PATH="$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/
 assert "Codex wrapper installed" "true" "$([ -x "$CODEX_WRAP_HOME/.local/bin/codex" ] && echo true || echo false)"
 assert "Codex wrapper points to mock" "$E2E_BIN/codex" "$(grep 'REAL_CODEX=' "$CODEX_WRAP_HOME/.local/bin/codex" 2>/dev/null || true)"
 
+(cd "$CODEX_WRAP_HOME" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
+  MAF_CODEX_WRAPPER_DISABLE="" \
+  timeout 5s codex --no-alt-screen >/tmp/e2e-codex-wrapper-home-run.log 2>&1 || true)
+
+wait_until 10 "curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null" '"ok":true' || true
+assert "Codex wrapper home-dir daemon running" '"ok":true' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
+assert "Codex wrapper home-dir no agent" '"agents":\[\]' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
+assert "Codex wrapper home-dir log" "daemon ready without valid" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
+
+CODEX_WRAP_MISC_AGENT="$(basename "$CODEX_WRAP_MISC")"
 (cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
   MAF_CODEX_WRAPPER_DISABLE="" \
   timeout 5s codex --no-alt-screen >/tmp/e2e-codex-wrapper-misc-run.log 2>&1 || true)
 
-wait_until 10 "curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null" '"ok":true' || true
-assert "Codex wrapper arbitrary-dir daemon running" '"ok":true' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
-assert "Codex wrapper arbitrary-dir no agent" '"agents":\[\]' "$(curl -s $CODEX_WRAP_DAEMON/health 2>/dev/null)"
-assert "Codex wrapper arbitrary-dir log" "daemon ready without explicit" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
+wait_until 10 "curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null" "$CODEX_WRAP_MISC_AGENT" || true
+assert "Codex wrapper directory-name fallback agent" "$CODEX_WRAP_MISC_AGENT" "$(curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null)"
 
 (cd "$CODEX_WRAP_MISC" && PATH="$CODEX_WRAP_HOME/.local/bin:$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
@@ -1528,7 +1553,7 @@ cat > "$CODEX_ATT_HOME/.meta-agent-framework/package.json" << PKGJSON
 {"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
 PKGJSON
 cat > "$CODEX_ATT_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_ATT_AGENT}
+# E2E Codex attached project
 
 Default attached delivery should not pretend to be online without an attached receiver.
 AGENTEOF
@@ -1580,7 +1605,7 @@ cat > "$CODEX_RECV_HOME/.meta-agent-framework/package.json" << PKGJSON
 {"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
 PKGJSON
 cat > "$CODEX_RECV_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_RECV_AGENT}
+# E2E Codex attached receiver project
 
 E2E Codex attached receiver project.
 AGENTEOF
@@ -1697,10 +1722,11 @@ CODEX_REMOTE_ARGS_LOG="/tmp/e2e-codex-auto-remote-args.log"
 rm -rf "$CODEX_REMOTE_HOME" "$CODEX_REMOTE_PROJECT" "$CODEX_REMOTE_MISC" "$CODEX_REMOTE_ARGS_LOG"
 mkdir -p "$CODEX_REMOTE_HOME" "$CODEX_REMOTE_PROJECT" "$CODEX_REMOTE_MISC"
 cat > "$CODEX_REMOTE_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_REMOTE_AGENT}
+# E2E Codex wrapper auto-remote project
 
 E2E Codex wrapper auto-remote project.
 AGENTEOF
+create_codex_agent_toml "$CODEX_REMOTE_PROJECT" "$CODEX_REMOTE_AGENT" "Codex auto remote e2e agent"
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_REMOTE_HOME" XDG_CONFIG_HOME="$CODEX_REMOTE_HOME/.config"   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_REMOTE_PORT"   node "$ROOT_DIR/packages/client/bin/maf-install.mjs" --auto >/tmp/e2e-codex-auto-remote-install.log 2>&1
 
@@ -1766,7 +1792,7 @@ cat > "$CODEX_POLL_HOME/.meta-agent-framework/package.json" << PKGJSON
 {"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
 PKGJSON
 cat > "$CODEX_POLL_PROJECT/AGENTS.md" << AGENTEOF
-# Codex project agent: ${CODEX_POLL_AGENT}
+# E2E Codex attached receiver polling fallback project
 
 E2E Codex attached receiver polling fallback project.
 AGENTEOF

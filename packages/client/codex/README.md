@@ -2,17 +2,26 @@
 
 This Codex plugin connects Codex sessions to Meta-Agent Framework.
 
-On `SessionStart`, `scripts/maf-codex-hook.mjs` attempts to:
+On interactive Codex startup, `scripts/maf-codex-hook.mjs` attempts to:
 
-1. infer the current project agent from explicit metadata;
+1. infer the current project root;
 2. start `~/.meta-agent-framework/daemon.mjs` if the Node Daemon is not running;
-3. register the agent as `runtime=codex` with the local Daemon.
+3. register the Codex session as `runtime=codex` with the local Daemon when a valid non-home project agent name can be inferred.
 
-Supported agent metadata:
+MAF Codex agent identity inference:
 
-- `MAF_AGENT_NAME` environment variable;
-- a single `.codex/agents/<agent>.md`;
-- `AGENTS.md` line: `# Codex project agent: <agent>`.
+- `MAF_AGENT_NAME` environment variable, as an explicit temporary override;
+- project-local Codex standard agent definitions: `.codex/agents/*.toml`;
+- if no project-local TOML selects a main agent, the non-home project root directory name.
+
+MAF intentionally does **not** infer identity from `AGENTS.md`, because that file is free-form Codex project guidance and has no standard “I am agent X” metadata. MAF also does not use `~/.codex/agents/*.toml` for project identity, because those are global Codex subagents rather than the current project agent.
+
+TOML selection rules:
+
+1. prefer `.codex/agents/<project-dir-name>.toml` or a TOML whose `name` equals the project directory name;
+2. if there is exactly one `.codex/agents/*.toml`, use its `name` or file stem;
+3. otherwise fall back to the project root directory name;
+4. skip registration when the inferred name is not `[A-Za-z0-9_.-]+` or the project root is the user home directory.
 
 ## Attached receiver for current Codex TUI
 
@@ -27,9 +36,9 @@ codex app-server --listen ws://127.0.0.1:47891
 codex --remote ws://127.0.0.1:47891 -C /path/to/project
 ```
 
-When launched through the MAF wrapper from a project with explicit Codex agent
-metadata, normal interactive commands (`codex`, `codex resume ...`, prompts, and
-forks) are auto-remote-ized:
+When launched through the MAF wrapper from a non-home project with a valid Codex
+agent identity, normal interactive commands (`codex`, `codex resume ...`, prompts,
+and forks) are auto-remote-ized:
 
 1. `scripts/maf-codex-app-server.mjs` starts or reuses a local
    `codex app-server --listen ws://127.0.0.1:<port>`.
@@ -46,6 +55,7 @@ commands pass through to the real Codex binary without auto-remote conversion.
 
 Useful environment variables:
 
+- `MAF_AGENT_NAME=<agent>`: explicit temporary MAF agent-name override.
 - `MAF_CODEX_APP_SERVER_URL=ws://127.0.0.1:<port>`: explicit app-server URL.
 - `MAF_CODEX_APP_SERVER_CMD='codex app-server --stdio'`: start/connect via stdio command.
 - `MAF_CODEX_AUTO_REMOTE=0`: disable wrapper auto-remote conversion.
