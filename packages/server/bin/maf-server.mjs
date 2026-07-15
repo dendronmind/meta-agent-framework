@@ -49,8 +49,8 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 // 工作区同步：将 npm 包中的 agent/hook/scripts 同步到 MAF_HOME
 //
 // 源码包内使用非隐藏、按职责分层的目录：
-//   common_agent/  通用 Meta-Agent-Server 协议、rules、client skill 模板
-//   opencode/      opencode 运行时 agent/skills/入口配置
+//   common_agent/  通用 Meta-Agent-Server 协议、rules、server/client skill 模板
+//   opencode/      opencode 运行时 agent/入口配置
 //   claude/        Claude Code 运行时入口配置
 //   codex/         Codex 运行时入口配置
 //
@@ -58,8 +58,8 @@ mkdirSync(join(MAF_HOME, "data"), { recursive: true });
 //   common_agent/instructions   -> $MAF_HOME/common_agent/instructions
 //   common_agent/rules          -> $MAF_HOME/common_agent/rules
 //   common_agent/client_skills  -> $MAF_HOME/skills
+//   common_agent/server_skills  -> $MAF_HOME/.{opencode,claude,codex}/skills
 //   opencode/agents             -> $MAF_HOME/.opencode/agents
-//   opencode/skills             -> $MAF_HOME/.opencode/skills
 //   opencode/opencode.json      -> $MAF_HOME/opencode.json
 //   claude/settings.local.json  -> $MAF_HOME/.claude/settings.local.json
 //   claude/CLAUDE.md            -> $MAF_HOME/CLAUDE.md
@@ -71,8 +71,10 @@ const SYNC_MANAGED = [
   ["common_agent/instructions", "common_agent/instructions"],  // 通用 Meta-Agent-Server 协议
   ["common_agent/rules", "common_agent/rules"],                // 通用规则
   ["common_agent/client_skills", "skills"],                    // 推送给远端 agent 的 client skill 模板
+  ["common_agent/server_skills", ".opencode/skills"],          // Server agent skill（opencode 原生）
+  ["common_agent/server_skills", ".claude/skills"],            // Server agent skill（Claude Code 原生）
+  ["common_agent/server_skills", ".codex/skills"],             // Server agent skill（Codex 原生）
   ["opencode/agents", ".opencode/agents"],                    // opencode agent 定义
-  ["opencode/skills", ".opencode/skills"],                    // opencode runtime skills
   ["opencode/opencode.json", "opencode.json"],                 // opencode 配置（instructions 引用 user/*.md）
   ["claude/settings.local.json", ".claude/settings.local.json"], // claude hooks 配置
   ["claude/CLAUDE.md", "CLAUDE.md"],                           // claude system prompt
@@ -407,7 +409,7 @@ function detectRuntime() {
 
 function printRuntimeRequiredError() {
   console.error("❌ Server Runtime 未配置。");
-  console.error("   Runtime 是首次运行必须明确选择的选项，不会默认使用 opencode。");
+  console.error("   Runtime 是首次运行必须明确选择的选项，不会默认使用 runtime。");
   console.error("");
   console.error("   请选择一种方式配置：");
   console.error("     maf-server init");
@@ -651,8 +653,7 @@ Meta-Agent-Framework Server
   2. maf-server start         # 启动 Server（未配置时会自动 init）
   3. maf-server resume        # 恢复上次对话（最常用！）
   4. maf-server tui           # 启动全新会话
-  5. maf-server tui claude    # 用 Claude Code 启动新会话
-  6. maf-server tui codex     # 用 Codex 启动新会话
+  5. maf-server tui [claude/codex/opencode]    # 用 Claude/codex/opencode 启动新会话
 `);
 }
 

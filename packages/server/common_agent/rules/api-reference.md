@@ -12,7 +12,7 @@ Daemon URL: `http://127.0.0.1:4100`（默认端口，实际以配置中 `daemon.
 | 删除 Agent | DELETE | `/api/agents/<id>` | 被删除的 agent 对象（404 如不存在） |
 | 搜索 Agent | GET | `/api/agents/search?q=关键词` | 按 capabilities/agent_name 模糊匹配 |
 | 按用户查 Agent | GET | `/api/agents/by-user/<user_id>` | 该用户的所有 agent |
-| 创建工作流 | POST | `/api/workflows` | `{id, status, title}` |
+| 创建工作流 | POST | `/api/workflows` | `{workflow_id, status, title, failure_policy}` |
 | 查看工作流详情 | GET | `/api/workflows/<id>` | `{id, status, nodes: [{status, result}]}` |
 | 等待工作流完成（long-poll） | GET | `/api/workflows/<id>?wait=true` | 工作流完成后立即返回（最多 hold 60s） |
 | 查看所有工作流 | GET | `/api/workflows` | `[{id, status, title}]` |
@@ -33,15 +33,59 @@ Daemon URL: `http://127.0.0.1:4100`（默认端口，实际以配置中 `daemon.
 | 创建提议（Client→Server） | POST | `/api/proposals` | `{id, from_agent, type, title, status}` |
 | SSE 事件流 | GET | `/api/events` | Server-Sent Events（workflow_completed 等） |
 
-### Evolve API Body 格式
+## Workflow Body Schema
 
+```json
+{
+  "title": "任务简述",
+  "origin": {"agent_name": "Meta-Agent-Server"},
+  "notify": {"mode": "originator", "include_result": true},
+  "failure_policy": "fail_fast",
+  "nodes": [
+    {
+      "id": "step-1",
+      "agent_name": "目标 agent 名称",
+      "prompt": "描述目标即可，不要写具体命令",
+      "scope": "project",
+      "intent": "query",
+      "depends_on": []
+    }
+  ]
+}
 ```
-POST /api/evolve/skill     → { "agent_name": "xxx", "skill_name": "yyy", "files": [{"relative_path": "SKILL.md", "content": "..."}] }
+
+### Workflow 字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| title | string | 工作流标题 |
+| origin | object | 可选；发起方上下文，用于结果通知路由 |
+| notify | object | 可选；通知偏好，异步派发建议 `{mode:"originator", include_result:true}` |
+| failure_policy | `"fail_fast"` \| `"all_settled"` | 可选；默认 `fail_fast`，多并行分支建议 `all_settled` |
+| nodes | array | 工作流节点列表 |
+
+### Node 字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | string | 节点 ID |
+| agent_name | string | 目标 agent 名称 |
+| prompt | string | 任务描述（只写目标） |
+| scope | `"project"` \| `"agent_self"` | 可选，默认 `project`；建议显式填写 |
+| intent | `"query"` \| `"modify"` \| `"review"` \| `"diagnose"` \| `"execute"` | 可选，默认 `query`；建议显式填写 |
+| depends_on | `string[]` | 可选；依赖的前置节点 ID |
+| delivery_mode / execution_mode | `"attached"` \| `"detached"` \| `"auto"` | 可选；Codex 投递语义 |
+
+## Evolve API Body Schema
+
+```text
+POST /api/evolve/skill        → { "agent_name": "xxx", "skill_name": "yyy", "files": [{"relative_path": "SKILL.md", "content": "..."}] }
 POST /api/evolve/agent-config → { "agent_name": "xxx", "files": [...], "restart?": true, "project_path?": "..." }
-POST /api/evolve/mcp        → { "agent_name": "xxx", "files": [...], "install_command?": "npm install ...", "project_path?": "..." }
+POST /api/evolve/mcp          → { "agent_name": "xxx", "files": [...], "install_command?": "npm install ...", "project_path?": "..." }
+POST /api/evolve/broadcast    → { "title": "...", "actions": [{"type": "push_files", "target": "skill", "files": [...]}] }
 ```
 
-> ✅ Daemon `/evolve` 路由已实现（v0.4.0），推送功能正常可用。
+Evolve cookbook 见 `common_agent/rules/evolve-guide.md`。
 
 ## Node Daemon API（通过 agent 的 client_endpoint 访问）
 
@@ -50,50 +94,12 @@ POST /api/evolve/mcp        → { "agent_name": "xxx", "files": [...], "install_
 | 健康检查 | GET | `/health` | `{ok, agents, version, server}` |
 | 查看管理的 agent | GET | `/agents` | `{agents: [{agent_name, runtime, lastSeen}]}` |
 
-## Agent 状态说明
+## Agent 状态字段
 
-| status | 含义 | 派发 |
-|--------|------|------|
-| `online` | runtime 接收端在线 | ✅ 立即执行 |
-| `offline` | 心跳超时 15s | ✅ Daemon 可达时自动拉起 |
-| `dead` | 心跳超时 45s | ✅ Daemon 可达时自动拉起 |
+| status | 含义 |
+|--------|------|
+| `online` | runtime 接收端在线 |
+| `offline` | 心跳超时 15s |
+| `dead` | 心跳超时 45s |
 
-- 所有 agent 不论 runtime 不论状态都优先通过 Workflow 正常派发
-- Daemon 会按 runtime 能力自动拉起、唤醒或转交任务
-- Daemon 不可达时 Server workflow 会报失败（HTTP 超时）
-
-## 创建工作流 Body 格式
-
-```json
-{
-  "title": "任务简述",
-  "nodes": [
-    {
-      "id": "step-1",
-      "agent_name": "目标 agent 名称",
-      "prompt": "描述目标即可，不要写具体命令",
-      "scope": "project",
-      "intent": "query"
-    }
-  ]
-}
-```
-
-### 必填字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | string | 节点 ID |
-| agent_name | string | 目标 agent 名称 |
-| prompt | string | 任务描述（只写目标） |
-| scope | `"project"` \| `"agent_self"` | 操作范围（代码硬约束） |
-| intent | `"query"` \| `"modify"` \| `"review"` \| `"diagnose"` \| `"execute"` | 任务意图（代码硬约束） |
-
-### 可选字段
-
-| 字段 | 说明 |
-|------|------|
-| depends_on | `string[]` 依赖的前置节点 ID |
-
-- scope/intent 不填时默认 `project` / `query`，但建议显式填写
-- 返回中若无 `workflow_id`，需从 `GET /api/workflows` 列表中取最新的
+派发策略见 `common_agent/rules/dispatch-flow.md`。

@@ -13,6 +13,7 @@ function isManagedAsset(filePath) {
   if (!filePath) return false;
   return filePath.includes("/.opencode/")
     || filePath.includes("/.claude/")
+    || filePath.includes("/.codex/")
     || filePath.includes("/common_agent/")
     || filePath.endsWith("/AGENTS.md")
     || filePath.endsWith("/CLAUDE.md")
@@ -23,6 +24,7 @@ function suggestUserPath(filePath) {
   return filePath
     .replace(/\/\.opencode\//, "/user/")
     .replace(/\/\.claude\//, "/user/")
+    .replace(/\/\.codex\//, "/user/")
     .replace(/\/common_agent\//, "/user/");
 }
 

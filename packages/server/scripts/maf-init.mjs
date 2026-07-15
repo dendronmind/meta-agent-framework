@@ -53,13 +53,46 @@ function ask(question, defaultVal) {
 }
 
 /** 必填项：用户不输入就反复问 */
-async function askRequired(question, hint) {
+async function askRequired(question, hint = "", defaultVal = "") {
   while (true) {
     if (hint) console.log(`     ${hint}`);
-    const answer = await ask(question, "");
+    const answer = await ask(question, defaultVal);
     if (answer) return answer;
     console.log("     ⚠ 此项为必填，不能跳过\n");
   }
+}
+
+const SERVER_RUNTIME_ALIASES = {
+  opencode: "opencode",
+  claude: "claude",
+  "claude-code": "claude",
+  cc: "claude",
+  codex: "codex",
+};
+
+function normalizeServerRuntime(runtime) {
+  return SERVER_RUNTIME_ALIASES[String(runtime || "").trim().toLowerCase()] || "";
+}
+
+function missingRequiredFields(cfg, targetMode) {
+  const missing = [];
+  if (!cfg) return missing;
+
+  if (targetMode === "server") {
+    if (!cfg.server?.url) missing.push("server.url");
+    if (!normalizeServerRuntime(cfg.server?.runtime)) missing.push("server.runtime");
+    const registryType = cfg.registry?.type || (cfg.feishu?.app_id ? "feishu" : "none");
+    if (registryType === "feishu") {
+      if (!cfg.feishu?.app_id) missing.push("feishu.app_id");
+      if (!cfg.feishu?.app_secret) missing.push("feishu.app_secret");
+      if (!cfg.feishu?.bitable?.app_token) missing.push("feishu.bitable.app_token");
+      if (!cfg.feishu?.bitable?.table_id) missing.push("feishu.bitable.table_id");
+    }
+  } else if (targetMode === "client") {
+    if (!cfg.server?.url) missing.push("server.url");
+  }
+
+  return missing;
 }
 
 function printHelp() {
@@ -144,13 +177,20 @@ console.log("");
 
 if (existing) {
   console.log(`  ℹ 已有配置文件: ${CONFIG_PATH}`);
-  const overwrite = await ask("  覆盖？(y/N)", "N");
-  if (overwrite.toLowerCase() !== "y") {
-    console.log("  取消\n");
-    rl.close();
-    process.exit(0);
+  const missing = missingRequiredFields(existing, mode);
+  const isSameRole = !existing.role || existing.role === mode;
+  if (isSameRole && missing.length > 0) {
+    console.log(`  ⚠ 检测到配置未完成，缺少必填项: ${missing.join(", ")}`);
+    console.log("     将继续完整配置流程，不需要确认覆盖。\n");
+  } else {
+    const overwrite = await ask("  覆盖？(y/N)", "N");
+    if (overwrite.toLowerCase() !== "y") {
+      console.log("  取消\n");
+      rl.close();
+      process.exit(0);
+    }
+    console.log("");
   }
-  console.log("");
 }
 
 // ============================================================
@@ -197,12 +237,12 @@ if (mode === "server") {
   if (enableFeishu.toLowerCase() === "y") {
     registryType = "feishu";
     console.log("\n     需要一个飞书自建应用的凭证（在飞书开放平台创建）。\n");
-    feishuAppId = await ask("  飞书 App ID", existing?.feishu?.app_id || "");
-    feishuAppSecret = await ask("  飞书 App Secret", existing?.feishu?.app_secret || "");
+    feishuAppId = await askRequired("  飞书 App ID", "启用飞书注册表时必填。", existing?.feishu?.app_id || "");
+    feishuAppSecret = await askRequired("  飞书 App Secret", "启用飞书注册表时必填。", existing?.feishu?.app_secret || "");
     feishuApiUrl = await ask("  飞书 API URL", existing?.feishu?.api_url || "https://open.feishu.cn/open-apis");
     console.log("\n     Agent 注册表的飞书多维表格地址（URL 中可找到以下 ID）。\n");
-    bitableAppToken = await ask("  Bitable App Token", existing?.feishu?.bitable?.app_token || "");
-    bitableTableId = await ask("  Bitable Table ID", existing?.feishu?.bitable?.table_id || "");
+    bitableAppToken = await askRequired("  Bitable App Token", "启用飞书注册表时必填。", existing?.feishu?.bitable?.app_token || "");
+    bitableTableId = await askRequired("  Bitable Table ID", "启用飞书注册表时必填。", existing?.feishu?.bitable?.table_id || "");
     bitableViewId = await ask("  Bitable View ID", existing?.feishu?.bitable?.view_id || "");
   } else {
     console.log("     跳过，使用纯自注册模式\n");
@@ -226,18 +266,11 @@ if (mode === "server") {
     console.log("     未检测到已安装 Runtime；仍可先选择，后续再安装对应 CLI。\n");
   }
 
-  const runtimeAliases = {
-    opencode: "opencode",
-    claude: "claude",
-    "claude-code": "claude",
-    cc: "claude",
-    codex: "codex",
-  };
-  const runtimeDefault = runtimeAliases[existing?.server?.runtime] || "";
+  const runtimeDefault = normalizeServerRuntime(existing?.server?.runtime);
   let runtime = "";
   while (!runtime) {
     const runtimeAnswer = (await ask("  Runtime (必选: opencode/claude/codex)", runtimeDefault)).toLowerCase();
-    runtime = runtimeAliases[runtimeAnswer] || "";
+    runtime = normalizeServerRuntime(runtimeAnswer);
     if (!runtime) {
       console.log("     ⚠ Runtime 为必选项，请输入 opencode、claude 或 codex\n");
     }

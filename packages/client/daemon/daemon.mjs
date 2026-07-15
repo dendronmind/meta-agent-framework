@@ -455,6 +455,32 @@ function cleanDeadAgents() {
 // ============================================================
 // Skills / MCPs 扫描（机器级别，所有 agent 共享）
 // ============================================================
+function readSkillDescription(skillMdPath) {
+  try {
+    const content = readFileSync(skillMdPath, "utf-8");
+
+    // Prefer YAML frontmatter description for Codex/Claude/opencode skill files.
+    if (content.startsWith("---\n") || content.startsWith("---\r\n")) {
+      const endIdx = content.indexOf("\n---", 3);
+      if (endIdx !== -1) {
+        const fm = content.slice(4, endIdx);
+        const descMatch = fm.match(/^description:\s*(.+)$/m);
+        if (descMatch?.[1]?.trim()) {
+          const desc = descMatch[1].trim().replace(/^['"]|['"]$/g, "");
+          if (desc) return desc.substring(0, 200);
+        }
+      }
+    }
+
+    // Fallback for older skill files without frontmatter.
+    for (const line of content.split("\n")) {
+      const t = line.trim();
+      if (t && !t.startsWith("#") && t !== "---") return t.substring(0, 200);
+    }
+  } catch {}
+  return undefined;
+}
+
 function scanSkills() {
   const dirs = [
     join(DIRECTORY, ".opencode", "skills"),
@@ -478,12 +504,8 @@ function scanSkills() {
         const skill = { name: e.name };
         const md = join(d, e.name, "SKILL.md");
         if (existsSync(md)) {
-          try {
-            for (const line of readFileSync(md, "utf-8").split("\n")) {
-              const t = line.trim();
-              if (t && !t.startsWith("#")) { skill.description = t.substring(0, 200); break; }
-            }
-          } catch {}
+          const description = readSkillDescription(md);
+          if (description) skill.description = description;
         }
         skills.push(skill);
       }
@@ -1386,9 +1408,9 @@ function isEvolvePathAllowed(target) {
 }
 
 /**
- * 校验 SKILL.md 的 YAML frontmatter（opencode 要求 name + description 才能被 /skills 发现）
+ * 校验 SKILL.md 的 YAML frontmatter（runtime skill 要求 name + description 才能稳定发现）
  *
- * 规则（参考 https://opencode.ai/docs/skills/）：
+ * 规则：
  *   1. 必须以 "---\n" 开头
  *   2. 必须包含 name: 全小写字母数字+连字符，匹配 ^[a-z0-9]+(-[a-z0-9]+)*$
  *   3. 必须包含 description: 1-1024 字符
@@ -1447,7 +1469,7 @@ function executeEvolvePushFiles(action, runtime) {
       if (target === "skill" && f.relative_path.endsWith("/SKILL.md")) {
         const fmError = validateSkillFrontmatter(content, f.relative_path);
         if (fmError) {
-          log(`  ⚠️ ${fmError}（opencode /skills 可能不显示）`);
+          log(`  ⚠️ ${fmError}（runtime skills 可能不显示）`);
         }
       }
 

@@ -19,7 +19,7 @@ permission:
 
 你是 **Meta-Agent-Server**。这是 opencode runtime 的 agent 定义文件，只保留 opencode 需要的 frontmatter、权限和最小启动指令。
 
-通用管理者协议在：`common_agent/instructions/Meta-Agent-Server.md`。
+通用管理者协议在：`common_agent/instructions/Meta-Agent-Server.md`；高频速查 skill 在 `.opencode/skills/meta-agent-server/SKILL.md`。
 
 ## 快速派发优先
 
@@ -41,7 +41,7 @@ permission:
 ## opencode 专属注意事项
 
 - `.opencode/` 是 opencode 运行态目录，由框架同步生成，禁止写入；需要长期积累的内容写入 `user/`。
-- opencode skills 位于 `.opencode/skills/`，源码位于 `opencode/skills/`；它们是 runtime 专属资产，不属于通用协议。
+- opencode skills 位于 `.opencode/skills/`；Meta-Agent-Server 通用 skill 源码位于 `common_agent/server_skills/`，安装时会同步到 opencode/Claude/Codex 三种 runtime。
 - `opencode.json` 会自动加载 `user/*.md`，用于用户长期知识。
 
 ## 空闲启动时

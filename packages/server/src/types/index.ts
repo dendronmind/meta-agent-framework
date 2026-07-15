@@ -295,11 +295,11 @@ export type EvolveActionType =
 /**
  * 逻辑目标位置（声明式，Client 根据 runtime 映射到实际路径）
  *
- * Server 不需要知道远端到底是 ~/.claude/skills/ 还是 ~/.config/opencode/skills/，
+ * Server 不需要知道远端到底是 ~/.claude/skills/、~/.codex/skills/ 还是 ~/.config/opencode/skills/，
  * 只需声明意图，Client 本地解析。
  */
 export type EvolveTarget =
-  | 'skill'            // 技能目录 → opencode: ~/.config/opencode/skills/ | claude: ~/.claude/skills/
+  | 'skill'            // 技能目录 → opencode: ~/.config/opencode/skills/ | claude: ~/.claude/skills/ | codex: ~/.codex/skills/
   | 'agent'            // Agent 定义 → opencode: ~/.config/opencode/agents/ 或 项目 .opencode/agents/ | claude: 项目 CLAUDE.md
   | 'project_agent'    // 项目级 agent → opencode: {project}/.opencode/agents/ | claude: {project}/.claude/
   | 'mcp_config'       // MCP 配置 → opencode: opencode.json mcp 字段 | claude: .mcp.json + settings

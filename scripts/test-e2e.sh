@@ -39,6 +39,7 @@
 #   38 Codex wrapper auto-remote attached receiver
 #   39 Codex attached receiver thread/read fallback
 #   40 Workflow all_settled waits for parallel branches
+#   41 maf-init required input and incomplete config resume
 #
 set -uo pipefail
 
@@ -66,7 +67,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -1183,25 +1184,31 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-fram
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写 common_agent/ 被拒绝 (exit 2)" "2" "$EXIT_CODE"
 
-# 28c: 写 runtime 入口文件 → 应该拒绝 (exit 2)
+# 28c: 写 .codex/ → 应该拒绝 (exit 2)
+EXIT_CODE=0
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/.codex/skills/meta-agent-server/SKILL.md"}}' \
+  | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
+assert "写 .codex/ 被拒绝 (exit 2)" "2" "$EXIT_CODE"
+
+# 28d: 写 runtime 入口文件 → 应该拒绝 (exit 2)
 EXIT_CODE=0
 echo '{"tool_name":"Write","tool_input":{"file_path":"/home/user/.meta-agent-framework/AGENTS.md"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写 AGENTS.md 被拒绝 (exit 2)" "2" "$EXIT_CODE"
 
-# 28d: 写 user/ → 应该放行 (exit 0)
+# 28e: 写 user/ → 应该放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Edit","tool_input":{"file_path":"/home/user/.meta-agent-framework/user/notes.md"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写 user/ 放行 (exit 0)" "0" "$EXIT_CODE"
 
-# 28e: 写其他路径 → 放行 (exit 0)
+# 28f: 写其他路径 → 放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/random-file.txt"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
 assert "写其他路径放行 (exit 0)" "0" "$EXIT_CODE"
 
-# 28f: 非写工具 → 放行 (exit 0)
+# 28g: 非写工具 → 放行 (exit 0)
 EXIT_CODE=0
 echo '{"tool_name":"Read","tool_input":{"file_path":"/home/user/.meta-agent-framework/.opencode/rules/test.md"}}' \
   | node "$HOOK_SCRIPT" >/dev/null 2>&1 || EXIT_CODE=$?
@@ -1221,11 +1228,18 @@ SYNC_TEST_MAF_HOME="/tmp/maf-sync-test-maf-home"
 rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
 mkdir -p "$SYNC_TEST_HOME" \
   "$SYNC_TEST_MAF_HOME/common_agent/rules" \
-  "$SYNC_TEST_MAF_HOME/skills/meta-agent-client"
+  "$SYNC_TEST_MAF_HOME/skills/meta-agent-client" \
+  "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server" \
+  "$SYNC_TEST_MAF_HOME/.claude/skills/meta-agent-server" \
+  "$SYNC_TEST_MAF_HOME/.codex/skills/meta-agent-server"
 
 # 目标：已有托管资产旧版本，升级同步必须覆盖。
 echo "old framework dispatch" > "$SYNC_TEST_MAF_HOME/common_agent/rules/dispatch-flow.md"
+echo "old evolve guide" > "$SYNC_TEST_MAF_HOME/common_agent/rules/evolve-guide.md"
 echo "old client skill" > "$SYNC_TEST_MAF_HOME/skills/meta-agent-client/SKILL.md"
+echo "old opencode server skill" > "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server/SKILL.md"
+echo "old claude server skill" > "$SYNC_TEST_MAF_HOME/.claude/skills/meta-agent-server/SKILL.md"
+echo "old codex server skill" > "$SYNC_TEST_MAF_HOME/.codex/skills/meta-agent-server/SKILL.md"
 echo "old codex agents" > "$SYNC_TEST_MAF_HOME/AGENTS.md"
 
 HOME="$SYNC_TEST_HOME" MAF_HOME="$SYNC_TEST_MAF_HOME" \
@@ -1234,8 +1248,11 @@ HOME="$SYNC_TEST_HOME" MAF_HOME="$SYNC_TEST_MAF_HOME" \
 # 验证：common_agent/、opencode/、claude/、codex/ 已物化为安装态 runtime 布局。
 assert "common instructions 同步" "通用管理者协议" "$(cat "$SYNC_TEST_MAF_HOME/common_agent/instructions/Meta-Agent-Server.md" 2>/dev/null || true)"
 assert "common rules 被覆盖" "标准派发流程" "$(cat "$SYNC_TEST_MAF_HOME/common_agent/rules/dispatch-flow.md" 2>/dev/null || true)"
+assert "evolve guide 同步" "Evolve 分发指南" "$(cat "$SYNC_TEST_MAF_HOME/common_agent/rules/evolve-guide.md" 2>/dev/null || true)"
 assert "opencode agent 同步到 .opencode" "opencode runtime wrapper" "$(cat "$SYNC_TEST_MAF_HOME/.opencode/agents/Meta-Agent-Server.md" 2>/dev/null || true)"
-assert "opencode skill 同步到 .opencode" "Meta-Agent Server Protocol" "$(cat "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
+assert "opencode skill 同步到 .opencode" "Meta-Agent-Server Skill" "$(cat "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
+assert "Claude skill 同步到 .claude" "Meta-Agent-Server Skill" "$(cat "$SYNC_TEST_MAF_HOME/.claude/skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
+assert "Codex skill 同步到 .codex" "Meta-Agent-Server Skill" "$(cat "$SYNC_TEST_MAF_HOME/.codex/skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
 assert "client skill 被覆盖" "Meta-Agent Client Protocol" "$(cat "$SYNC_TEST_MAF_HOME/skills/meta-agent-client/SKILL.md" 2>/dev/null || true)"
 assert "opencode 配置同步" "instructions" "$(cat "$SYNC_TEST_MAF_HOME/opencode.json" 2>/dev/null || true)"
 assert "Claude settings 同步" "SessionStart" "$(cat "$SYNC_TEST_MAF_HOME/.claude/settings.local.json" 2>/dev/null || true)"
@@ -1288,8 +1305,10 @@ assert "Server Claude dotfile plugin route" '"name": "maf"' "$(curl -s "$E2E_SER
 assert "Server common_agent source layout" "common_agent/" "$(grep 'common_agent/' "$SCRIPT_DIR/package.json" 2>/dev/null || true)"
 assert "Server source no dot opencode package files" "not_found" "$(grep '\".opencode/' "$SCRIPT_DIR/package.json" 2>/dev/null || echo "not_found")"
 assert "Server sync maps common instructions" "common_agent/instructions" "$(grep 'common_agent/instructions' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Server sync maps server skills" "common_agent/server_skills" "$(grep 'common_agent/server_skills' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server sync maps opencode agents" "opencode/agents" "$(grep 'opencode/agents' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Server sync maps codex AGENTS" "codex/AGENTS.md" "$(grep 'codex/AGENTS.md' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
+assert "Opencode write guard protects .codex" "/.codex/" "$(grep '/.codex/' "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js" 2>/dev/null || true)"
 
 # 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据，且明确点名任务走 fast path
 DISPATCH_DOC="$(cat "$SCRIPT_DIR/common_agent/instructions/Meta-Agent-Server.md" "$SCRIPT_DIR/common_agent/rules/dispatch-flow.md" "$SCRIPT_DIR/opencode/agents/Meta-Agent-Server.md" "$SCRIPT_DIR/codex/AGENTS.md" "$SCRIPT_DIR/claude/CLAUDE.md" 2>/dev/null || true)"
@@ -1871,6 +1890,153 @@ assert "all_settled keeps skipped dependent" "c:skipped" "$SETTLED_NODE_STATUSES
 
 kill -9 "$SETTLED_ENDPOINT_PID" 2>/dev/null || true
 
+fi
+
+# ============================================================
+# Case 41: maf-init 必填项空输入提示 + 未完成配置继续流程
+# ============================================================
+if should_run 41; then
+echo -e "
+${YELLOW}Case 41: maf-init required inputs${NC}"
+
+INIT_TEST_BASE="/tmp/maf-init-e2e-$$"
+rm -rf "$INIT_TEST_BASE"
+mkdir -p "$INIT_TEST_BASE/incomplete/.meta-agent-framework" "$INIT_TEST_BASE/feishu"
+cat > "$INIT_TEST_BASE/incomplete/.meta-agent-framework/maf.config.json" <<'JSON'
+{"role":"server","server":{"url":"http://127.0.0.1:3000","port":3000},"daemon":{"port":4100},"registry":{"type":"none"}}
+JSON
+
+INIT_OUTPUT=$(INIT_SCRIPT="$SCRIPT_DIR/scripts/maf-init.mjs" INIT_TEST_BASE="$INIT_TEST_BASE" python3 <<'PY'
+import json
+import os
+import pty
+import select
+import subprocess
+import time
+
+script = os.environ["INIT_SCRIPT"]
+base = os.environ["INIT_TEST_BASE"]
+
+def run_init(home, steps, timeout=20):
+    env = os.environ.copy()
+    env["HOME"] = home
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        ["node", script, "server"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        cwd=os.path.dirname(os.path.dirname(script)),
+    )
+    os.close(slave)
+    chunks = []
+    cursor = 0
+
+    def read_available(wait=0.1):
+        nonlocal chunks
+        ready, _, _ = select.select([master], [], [], wait)
+        if ready:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                data = b""
+            if data:
+                chunks.append(data.decode("utf-8", "replace"))
+                return True
+        return False
+
+    for pattern, reply in steps:
+        deadline = time.time() + timeout
+        while True:
+            text = "".join(chunks)
+            if pattern in text[cursor:]:
+                cursor = len(text)
+                break
+            if proc.poll() is not None:
+                raise AssertionError(f"process exited before pattern {pattern!r}; output={text}")
+            if time.time() > deadline:
+                raise AssertionError(f"timeout waiting for {pattern!r}; output={text}")
+            read_available()
+        if reply is not None:
+            os.write(master, reply.encode())
+
+    deadline = time.time() + timeout
+    while proc.poll() is None and time.time() < deadline:
+        read_available()
+    if proc.poll() is None:
+        proc.kill()
+        raise AssertionError("maf-init did not exit")
+    while read_available(0):
+        pass
+    return proc.returncode, "".join(chunks)
+
+home1 = os.path.join(base, "incomplete")
+steps1 = [
+    ("Server 监听端口", "\n"),
+    ("Daemon 端口", "\n"),
+    ("启用飞书", "\n"),
+    ("Runtime (必选", "\n"),
+    ("Runtime 为必选项", "codex\n"),
+    ("自动添加", "n\n"),
+]
+code1, out1 = run_init(home1, steps1)
+if code1 != 0:
+    raise AssertionError(f"incomplete config init failed: {code1}\n{out1}")
+if "覆盖？" in out1:
+    raise AssertionError(f"incomplete config should not ask overwrite\n{out1}")
+if "配置未完成" not in out1 or "Runtime 为必选项" not in out1:
+    raise AssertionError(f"missing incomplete/required warning\n{out1}")
+cfg1 = json.load(open(os.path.join(home1, ".meta-agent-framework", "maf.config.json")))
+if cfg1.get("server", {}).get("runtime") != "codex":
+    raise AssertionError(f"runtime not saved as codex: {cfg1}")
+
+home2 = os.path.join(base, "feishu")
+steps2 = [
+    ("Server 监听端口", "\n"),
+    ("Daemon 端口", "\n"),
+    ("启用飞书", "y\n"),
+    ("飞书 App ID", "\n"),
+    ("此项为必填", "app-id\n"),
+    ("飞书 App Secret", "\n"),
+    ("此项为必填", "app-secret\n"),
+    ("飞书 API URL", "\n"),
+    ("Bitable App Token", "\n"),
+    ("此项为必填", "app-token\n"),
+    ("Bitable Table ID", "\n"),
+    ("此项为必填", "tbl-id\n"),
+    ("Bitable View ID", "\n"),
+    ("Runtime (必选", "codex\n"),
+    ("自动添加", "n\n"),
+]
+code2, out2 = run_init(home2, steps2)
+if code2 != 0:
+    raise AssertionError(f"feishu required init failed: {code2}\n{out2}")
+if out2.count("此项为必填") < 4:
+    raise AssertionError(f"required warning should appear for feishu required fields\n{out2}")
+cfg2 = json.load(open(os.path.join(home2, ".meta-agent-framework", "maf.config.json")))
+if cfg2.get("registry", {}).get("type") != "feishu":
+    raise AssertionError(f"registry not feishu: {cfg2}")
+if cfg2.get("feishu", {}).get("app_id") != "app-id":
+    raise AssertionError(f"app_id not saved: {cfg2}")
+if cfg2.get("feishu", {}).get("app_secret") != "app-secret":
+    raise AssertionError(f"app_secret not saved: {cfg2}")
+if cfg2.get("feishu", {}).get("bitable", {}).get("app_token") != "app-token":
+    raise AssertionError(f"bitable token not saved: {cfg2}")
+if cfg2.get("feishu", {}).get("bitable", {}).get("table_id") != "tbl-id":
+    raise AssertionError(f"table id not saved: {cfg2}")
+
+print("INCOMPLETE_NO_OVERWRITE=ok")
+print("RUNTIME_REQUIRED=ok")
+print("FEISHU_REQUIRED=ok")
+PY
+)
+
+assert "未完成配置不再提示覆盖" "INCOMPLETE_NO_OVERWRITE=ok" "$INIT_OUTPUT"
+assert "Runtime 空输入提示必选" "RUNTIME_REQUIRED=ok" "$INIT_OUTPUT"
+assert "飞书必填项空输入提示" "FEISHU_REQUIRED=ok" "$INIT_OUTPUT"
+
+rm -rf "$INIT_TEST_BASE"
 fi
 
 # ============================================================

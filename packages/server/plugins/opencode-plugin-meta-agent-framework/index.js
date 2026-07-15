@@ -838,6 +838,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
         const isManagedAsset =
           filePath.includes("/.opencode/") ||
           filePath.includes("/.claude/") ||
+          filePath.includes("/.codex/") ||
           filePath.includes("/common_agent/") ||
           filePath.endsWith("/AGENTS.md") ||
           filePath.endsWith("/CLAUDE.md") ||
@@ -847,6 +848,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
           const suggested = filePath
             .replace(/\/\.opencode\//, "/user/")
             .replace(/\/\.claude\//, "/user/")
+            .replace(/\/\.codex\//, "/user/")
             .replace(/\/common_agent\//, "/user/");
           throw new Error(
             `禁止修改框架托管资产（升级会覆盖）。` +

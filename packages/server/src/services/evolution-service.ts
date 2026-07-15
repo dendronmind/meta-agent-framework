@@ -21,8 +21,8 @@ import type {
 
 // ============================================================
 // SKILL.md frontmatter 校验
-// opencode 要求 SKILL.md 以 YAML frontmatter 开头（name + description），
-// 否则 /skills 命令不显示。参考: https://opencode.ai/docs/skills/
+// runtime skill 要求 SKILL.md 以 YAML frontmatter 开头（name + description），
+// 否则 skills 列表可能不显示。
 // ============================================================
 
 const SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -76,7 +76,7 @@ export class EvolutionService {
     // SKILL.md frontmatter 校验（仅警告，不阻止推送）
     const fmError = validateSkillFiles(files);
     if (fmError) {
-      console.log(`[Evolve] ⚠ ${fmError}（opencode /skills 可能不显示，但不阻止推送）`);
+      console.log(`[Evolve] ⚠ ${fmError}（runtime skills 可能不显示，但不阻止推送）`);
     }
 
     const agent = this.findOnlineAgent(agentName);
