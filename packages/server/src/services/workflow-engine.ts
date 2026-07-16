@@ -689,7 +689,8 @@ export class WorkflowEngine {
             timestamp: new Date().toISOString(),
           });
 
-          this.failWorkflow(workflow, `节点 [${node.id}] ${node.agent_name} 的 Client 已离线`);
+          this.advanceAfterNodeTerminal(workflow, `节点 [${node.id}] ${node.agent_name} 的 Client 已离线`);
+          if (workflow.status !== 'running') break;
         }
       }
     }
