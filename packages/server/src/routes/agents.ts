@@ -268,8 +268,7 @@ router.get('/agents/by-user/:user_id', (req: Request, res: Response) => {
 // 外部注册表拉取
 // ============================================================
 
-/** POST /api/agents/registry-pull — 手动从外部注册表拉取最新 agent 拓扑 */
-router.post('/agents/registry-pull', async (_req: Request, res: Response) => {
+async function pullAndReconcileRegistry(res: Response): Promise<void> {
   const registry = getRegistry();
   if (!registry.isEnabled) {
     res.status(503).json({ error: 'External registry not enabled' });
@@ -277,25 +276,21 @@ router.post('/agents/registry-pull', async (_req: Request, res: Response) => {
   }
   try {
     const agents = await registry.pull();
-    res.json({ pulled: agents.length, agents });
+    const result = agentRegistry.reconcileExternalAgents(agents);
+    res.json({ ...result, agents });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+}
+
+/** POST /api/agents/registry-pull — 手动从外部注册表拉取最新 agent 拓扑 */
+router.post('/agents/registry-pull', async (_req: Request, res: Response) => {
+  await pullAndReconcileRegistry(res);
 });
 
 /** POST /api/agents/feishu-pull — 向后兼容旧 API */
 router.post('/agents/feishu-pull', async (_req: Request, res: Response) => {
-  const registry = getRegistry();
-  if (!registry.isEnabled) {
-    res.status(503).json({ error: 'External registry not enabled' });
-    return;
-  }
-  try {
-    const agents = await registry.pull();
-    res.json({ pulled: agents.length, agents });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+  await pullAndReconcileRegistry(res);
 });
 
 // ============================================================

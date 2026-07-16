@@ -6,6 +6,13 @@ import { CLIENT_MIN_VERSION } from '../types';
 import { getConfig } from '../config';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
 
+export interface RegistryReconcileResult {
+  pulled: number;
+  added: number;
+  updated: number;
+  unchanged: number;
+}
+
 function semverParts(version: string): [number, number, number] {
   const core = String(version || '').trim().replace(/^v/, '').split(/[+-]/, 1)[0];
   const parts = core.split('.').slice(0, 3).map(part => {
@@ -45,6 +52,74 @@ export class AgentRegistry {
   // ============================================================
   // 注册 / 注销
   // ============================================================
+
+  /** 用外部注册表拉到的 agent 拓扑对账本地 SQLite。外部源只负责拓扑，运行时状态仍由心跳维护。 */
+  reconcileExternalAgents(remoteAgents: Agent[]): RegistryReconcileResult {
+    const db = getDb();
+    const localAgents = this.listAll();
+    const now = new Date().toISOString();
+
+    const localKey = (a: { user_id: string; host_user: string; agent_name: string }) =>
+      `${a.user_id}|${a.host_user}|${a.agent_name}`;
+    const localMap = new Map(localAgents.map(a => [localKey(a), a]));
+
+    let added = 0;
+    let updated = 0;
+    let unchanged = 0;
+
+    for (const remote of remoteAgents) {
+      if (!remote.agent_name) continue;
+
+      const key = localKey(remote);
+      const local = localMap.get(key);
+      const clientEndpoint = remote.client_endpoint || '';
+      const projectPath = remote.project_path || '';
+      const capabilities = remote.capabilities || '';
+      const mode = remote.mode || 'subagent';
+      const runtime = remote.runtime || 'opencode';
+      const skills = remote.skills || '[]';
+      const mcps = remote.mcps || '[]';
+
+      if (!local) {
+        db.prepare(`
+          INSERT OR IGNORE INTO agents (id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, client_version, plugin_hash, daemon_port, registered_at)
+          VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          uuidv4(), remote.user_id || '', remote.host_user || '', clientEndpoint,
+          remote.last_heartbeat || now,
+          remote.agent_name, projectPath, capabilities, mode, runtime, skills, mcps,
+          remote.client_version || '', remote.plugin_hash || '', remote.daemon_port || 0,
+          remote.registered_at || now,
+        );
+        added++;
+        continue;
+      }
+
+      const changed =
+        local.client_endpoint !== clientEndpoint ||
+        local.project_path !== projectPath ||
+        local.capabilities !== capabilities ||
+        local.mode !== mode ||
+        local.runtime !== runtime ||
+        local.skills !== skills ||
+        local.mcps !== mcps;
+
+      if (changed) {
+        db.prepare(`
+          UPDATE agents SET client_endpoint = ?, capabilities = ?, mode = ?, runtime = ?, project_path = ?, skills = ?, mcps = ?
+          WHERE user_id = ? AND host_user = ? AND agent_name = ?
+        `).run(
+          clientEndpoint, capabilities, mode, runtime, projectPath, skills, mcps,
+          local.user_id, local.host_user, local.agent_name,
+        );
+        updated++;
+      } else {
+        unchanged++;
+      }
+    }
+
+    return { pulled: remoteAgents.length, added, updated, unchanged };
+  }
 
   /** Client 注册（一个用户 + 其所有 agent，每个 agent 一行） */
   registerClient(payload: ClientRegisterPayload): Agent[] {
@@ -94,9 +169,22 @@ export class AgentRegistry {
           clientVersion, clientPluginHash, clientDaemonPort,
           payload.user_id, payload.host_user, info.agent_name
         );
-        const existing = db.prepare(
+        let existing = db.prepare(
           'SELECT * FROM agents WHERE user_id = ? AND host_user = ? AND agent_name = ?'
         ).get(payload.user_id, payload.host_user, info.agent_name) as Agent | undefined;
+        if (!existing) {
+          const id = uuidv4();
+          insertNew.run(
+            id, payload.user_id, payload.host_user, payload.client_endpoint,
+            agentStatus, now, info.agent_name, info.project_path || '',
+            info.capabilities || '', info.mode || 'subagent',
+            info.runtime || 'opencode',
+            JSON.stringify(info.skills || []), JSON.stringify(info.mcps || []),
+            clientVersion, clientPluginHash, clientDaemonPort,
+            now
+          );
+          existing = this.getById(id);
+        }
         if (existing) agents.push(existing);
       } else {
         // 动态 agent → INSERT

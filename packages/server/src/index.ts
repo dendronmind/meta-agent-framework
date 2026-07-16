@@ -166,7 +166,6 @@ app.get('/', (_req, res) => {
 // 运行时 Client 注册/心跳写 SQLite 后再单向推送：SQLite → 外部。
 async function reconcileWithRegistry(): Promise<void> {
   const registry = getRegistry();
-  const localAgents = agentRegistry.listAll();
   const remoteAgents = await registry.pull();
 
   if (remoteAgents.length === 0) {
@@ -174,65 +173,9 @@ async function reconcileWithRegistry(): Promise<void> {
     return;
   }
 
-  // 用外部数据更新 SQLite（外部源说了算）
-  const db = (await import('./db/database')).getDb();
-  const { v4: uuidv4 } = await import('uuid');
-  const now = new Date().toISOString();
+  const result = agentRegistry.reconcileExternalAgents(remoteAgents);
 
-  // 构建本地索引：key → Agent（不含 project_path，避免路径差异导致重复）
-  const localKey = (a: { user_id: string; host_user: string; agent_name: string }) =>
-    `${a.user_id}|${a.host_user}|${a.agent_name}`;
-  const localMap = new Map(localAgents.map(a => [localKey(a), a]));
-
-  let added = 0;
-  let updated = 0;
-  let unchanged = 0;
-
-  for (const remote of remoteAgents) {
-    const key = localKey(remote);
-    const local = localMap.get(key);
-
-    if (!local) {
-      // 外部有、本地没有 → 插入（状态初始为 offline，等 Client 心跳上线）
-      db.prepare(`
-        INSERT OR IGNORE INTO agents (id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, registered_at)
-        VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        uuidv4(), remote.user_id, remote.host_user, remote.client_endpoint,
-        remote.last_heartbeat || now,
-        remote.agent_name, remote.project_path, remote.capabilities, remote.mode || 'subagent',
-        remote.runtime || 'opencode',
-        remote.skills || '[]', remote.mcps || '[]',
-        now
-      );
-      added++;
-    } else {
-      // 两边都有 → 用外部源的字段覆盖本地
-      const changed =
-        local.client_endpoint !== remote.client_endpoint ||
-        local.capabilities !== remote.capabilities ||
-        local.mode !== remote.mode ||
-        local.runtime !== (remote.runtime || 'opencode') ||
-        local.skills !== (remote.skills || '[]') ||
-        local.mcps !== (remote.mcps || '[]');
-
-      if (changed) {
-        db.prepare(`
-          UPDATE agents SET client_endpoint = ?, capabilities = ?, mode = ?, runtime = ?, project_path = ?, skills = ?, mcps = ?
-          WHERE user_id = ? AND host_user = ? AND agent_name = ?
-        `).run(
-          remote.client_endpoint, remote.capabilities, remote.mode, remote.runtime || 'opencode',
-          remote.project_path, remote.skills || '[]', remote.mcps || '[]',
-          local.user_id, local.host_user, local.agent_name
-        );
-        updated++;
-      } else {
-        unchanged++;
-      }
-    }
-  }
-
-  console.log(`[Startup] 外部注册表 → SQLite 同步完成: +${added} 新增, ~${updated} 更新, =${unchanged} 一致`);
+  console.log(`[Startup] 外部注册表 → SQLite 同步完成: +${result.added} 新增, ~${result.updated} 更新, =${result.unchanged} 一致`);
 
   // 打印当前所有 agent 的状态（全部 offline，等待 Client 上线）
   const allAgents = agentRegistry.listAll();
