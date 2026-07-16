@@ -2140,9 +2140,11 @@ const httpServer = createServer(async (req, res) => {
           results.push(r);
           if (r.status === "failed") break;
         } else if (action.type === "restart_agent") {
-          results.push({ type: "restart_agent", status: "ok", message: "restart not yet implemented" });
+          results.push({ type: "restart_agent", status: "failed", message: "restart_agent not implemented" });
+          break;
         } else if (action.type === "reload_config") {
-          results.push({ type: "reload_config", status: "ok", message: "reload not yet implemented" });
+          results.push({ type: "reload_config", status: "failed", message: "reload_config not implemented" });
+          break;
         } else {
           results.push({ type: action.type, status: "failed", message: `unknown action type: ${action.type}` });
         }
