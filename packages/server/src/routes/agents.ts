@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { agentRegistry } from '../services/agent-registry';
 import { healthMonitor } from '../services/health-monitor';
 import { getRegistry } from '../services/registry';
+import { getConfig } from '../config';
 import type { ClientRegisterPayload, HeartbeatPayload } from '../types';
 
 const router = Router();
@@ -331,9 +332,9 @@ router.post('/ota/push', async (req: Request, res: Response) => {
   }
 
   const agent = agents[0];
-  // Daemon 端口从心跳 payload 里拿，或默认 4097
+  // Daemon 端口优先使用心跳/注册上报值，其次 endpoint URL 端口，最后使用配置默认值。
   const clientUrl = new URL(agent.client_endpoint);
-  const daemonPort = 4097; // TODO: 从心跳上报的 daemon_port 获取
+  const daemonPort = agent.daemon_port || Number.parseInt(clientUrl.port, 10) || getConfig().daemon.port;
   const daemonUrl = `http://${clientUrl.hostname}:${daemonPort}`;
 
   // 如果没传 files，自动打包本地最新 Plugin
