@@ -97,6 +97,8 @@ export class WorkflowEngine {
     workflow_id: string;
     promise: Promise<WorkflowSummary>;
   } {
+    this.validateNodes(nodes);
+
     const failurePolicy = this.normalizeFailurePolicy(options.failure_policy);
     const workflow: Workflow = {
       id: uuidv4(),
@@ -248,6 +250,55 @@ export class WorkflowEngine {
 
   private normalizeFailurePolicy(policy?: string): WorkflowFailurePolicy {
     return policy === 'all_settled' ? 'all_settled' : 'fail_fast';
+  }
+
+  private validateNodes(nodes: Omit<WorkflowNode, 'status'>[]): void {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      throw new Error('workflow nodes[] required');
+    }
+
+    const byId = new Map<string, Omit<WorkflowNode, 'status'>>();
+    for (const node of nodes) {
+      if (!node.id || !node.agent_name || !node.prompt) {
+        throw new Error(`Each node requires id, agent_name, prompt. Got: ${JSON.stringify(node)}`);
+      }
+      if (byId.has(node.id)) {
+        throw new Error(`Duplicate workflow node id: ${node.id}`);
+      }
+      const deps = node.depends_on;
+      if (deps !== undefined && !Array.isArray(deps)) {
+        throw new Error(`Node "${node.id}" depends_on must be an array`);
+      }
+      byId.set(node.id, node);
+    }
+
+    for (const node of nodes) {
+      for (const depId of node.depends_on || []) {
+        if (typeof depId !== 'string' || depId.trim() === '') {
+          throw new Error(`Node "${node.id}" has invalid dependency id: ${JSON.stringify(depId)}`);
+        }
+        if (!byId.has(depId)) {
+          throw new Error(`Node "${node.id}" depends on missing node "${depId}"`);
+        }
+      }
+    }
+
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (id: string, path: string[]): void => {
+      if (visiting.has(id)) {
+        const start = path.indexOf(id);
+        const cycle = [...path.slice(start >= 0 ? start : 0), id].join(' -> ');
+        throw new Error(`Workflow dependency cycle detected: ${cycle}`);
+      }
+      if (visited.has(id)) return;
+      visiting.add(id);
+      const node = byId.get(id)!;
+      for (const depId of node.depends_on || []) visit(depId, [...path, id]);
+      visiting.delete(id);
+      visited.add(id);
+    };
+    for (const id of byId.keys()) visit(id, []);
   }
 
   private isAllSettled(workflow: Workflow): boolean {
