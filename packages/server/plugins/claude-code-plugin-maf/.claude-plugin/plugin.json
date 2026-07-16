@@ -1,6 +1,6 @@
 {
   "name": "maf",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Meta-Agent Framework — 让 Claude Code 接入分布式 Agent 网络，接收远程任务并回报结果",
   "author": {
     "name": "Meta-Agent-Framework"

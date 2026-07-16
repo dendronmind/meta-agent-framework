@@ -1,6 +1,6 @@
 {
   "name": "@maf/meta-agent-client",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Meta-Agent Framework Client — opencode + Claude Code + Codex 一键接入",
   "bin": {
     "maf-client": "./bin/maf-client"

@@ -14,7 +14,7 @@ export const SERVER_VERSION: string = (() => {
 })();
 
 /** Client 最低兼容版本（低于此版本自动触发 OTA，需手动管理） */
-export const CLIENT_MIN_VERSION = '0.4.0';
+export const CLIENT_MIN_VERSION = '0.4.10';
 
 // --- Agent（一行 = 一个 agent，用户信息内联） ---
 

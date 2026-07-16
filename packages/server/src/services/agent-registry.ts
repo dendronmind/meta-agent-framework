@@ -2,9 +2,28 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/database';
 import { eventBus } from './event-bus';
 import { getRegistry } from './registry';
-import { SERVER_VERSION, CLIENT_MIN_VERSION } from '../types';
+import { CLIENT_MIN_VERSION } from '../types';
 import { getConfig } from '../config';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
+
+function semverParts(version: string): [number, number, number] {
+  const core = String(version || '').trim().replace(/^v/, '').split(/[+-]/, 1)[0];
+  const parts = core.split('.').slice(0, 3).map(part => {
+    const value = Number.parseInt(part, 10);
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  });
+  while (parts.length < 3) parts.push(0);
+  return [parts[0], parts[1], parts[2]];
+}
+
+function isVersionLess(version: string, minimum: string): boolean {
+  const current = semverParts(version);
+  const required = semverParts(minimum);
+  for (let i = 0; i < 3; i++) {
+    if (current[i] !== required[i]) return current[i] < required[i];
+  }
+  return false;
+}
 
 export class AgentRegistry {
 
@@ -128,7 +147,7 @@ export class AgentRegistry {
     });
 
     // 版本检查 → 自动触发 OTA（带冷却）
-    if (clientVersion && clientVersion < CLIENT_MIN_VERSION) {
+    if (clientVersion && isVersionLess(clientVersion, CLIENT_MIN_VERSION)) {
       const otaKey = `${payload.user_id}:${payload.host_user}`;
       if (this.canTriggerOTA(otaKey)) {
         console.log(`[OTA] ⚠ ${payload.user_id} client v=${clientVersion} < min=${CLIENT_MIN_VERSION}，触发 OTA`);
@@ -221,7 +240,7 @@ export class AgentRegistry {
     }
 
     // 4. 版本检查 → 自动触发 OTA（带冷却，同一用户 5 分钟只推一次）
-    if (payload.client_version && payload.client_version < CLIENT_MIN_VERSION) {
+    if (payload.client_version && isVersionLess(payload.client_version, CLIENT_MIN_VERSION)) {
       const otaKey = `${userId}:${hostUser}`;
       if (this.canTriggerOTA(otaKey)) {
         console.log(`[OTA] ⚠ ${userId}(${hostUser}) client v=${payload.client_version} < min=${CLIENT_MIN_VERSION}，触发 OTA`);

@@ -12,7 +12,7 @@
   "license": "MIT",
   "author": "fanlvchao <fanlvchao@gmail.com>",
   "dependencies": {
-    "@maf/meta-agent-client": "file:out/maf-meta-agent-client-0.4.9.tgz",
-    "@maf/meta-agent-server": "file:out/maf-meta-agent-server-0.4.9.tgz"
+    "@maf/meta-agent-client": "file:out/maf-meta-agent-client-0.4.10.tgz",
+    "@maf/meta-agent-server": "file:out/maf-meta-agent-server-0.4.10.tgz"
   }
 }
