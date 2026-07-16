@@ -2153,10 +2153,16 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // POST /shutdown — 兼容旧版：清理指定 agent，Node Daemon 常驻不退出
+  // POST /shutdown — daemon=true 时退出 Daemon；否则兼容旧版：清理指定 agent
   if (req.method === "POST" && pathname === "/shutdown") {
     const body = await readBody();
     const agent = body.agent_name;
+    if (body.daemon === true || !agent) {
+      log(`📴 shutdown: Daemon 退出${body.reason ? ` (${body.reason})` : ""}`);
+      json(200, { ok: true, shutdown: true });
+      setTimeout(() => process.exit(0), 100).unref?.();
+      return;
+    }
     if (agent && agents.has(agent)) {
       agents.delete(agent);
       const q = taskQueues.get(agent);

@@ -290,7 +290,7 @@ async function ensureNodeDaemon(directory) {
         const res = await fetch(`${daemonUrl}/shutdown`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ daemon: true, reason: "hash_mismatch" }),
           signal: AbortSignal.timeout(2000),
         });
       } catch {}
