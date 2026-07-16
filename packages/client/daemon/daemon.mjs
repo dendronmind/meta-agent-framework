@@ -1804,19 +1804,41 @@ const httpServer = createServer(async (req, res) => {
         // 无 Plugin 在线 → 按需拉起（opencode: screen TUI, claude-code: screen TUI + hooks）
       log(`🔄 ${targetAgent} 无 Plugin 在线，按需拉起 (runtime=${runtime})...`);
 
-      // 先入队（拉起后 Plugin/Wait 会取走）
-      enqueueTask(targetAgent, task);
+      // 先入队（拉起后 Plugin/Wait 会取走）；入队失败时不能继续返回 accepted，
+      // 否则 Server 会等待一个实际上不存在的任务直到超时。
+      const queued = enqueueTask(targetAgent, task);
+      if (!queued) {
+        json(409, { accepted: false, agent: targetAgent, error: "queue full" });
+        return;
+      }
       json(202, { accepted: true, agent: targetAgent, mode: "auto-launch" });
 
       // 异步拉起（不阻塞 HTTP 响应）
       const agentDir = projectPath || agents.get(targetAgent)?.directory || DIRECTORY;
+      const spawnStartedAt = Date.now();
       spawnAgent(targetAgent, agentDir, runtime).then(ok => {
         if (ok) {
           const info = serveProcesses.get(targetAgent);
           if (info) info.lastTaskAt = Date.now();
+        } else {
+          const msg = `按需拉起失败: ${targetAgent} runtime=${runtime}`;
+          const pending = getAgentQueue(targetAgent).pending;
+          const idx = pending.findIndex(t => t.id === task.id);
+          if (idx >= 0) pending.splice(idx, 1);
+          log(`❌ ${msg}`);
+          reportTaskResult(task, "failed", msg, Date.now() - spawnStartedAt).catch(err => {
+            log(`⚠ 按需拉起失败回报异常: ${err.message}`);
+          });
         }
       }).catch(err => {
-        log(`❌ 按需拉起失败: ${targetAgent} ${err.message}`);
+        const msg = `按需拉起失败: ${targetAgent} ${err.message}`;
+        const pending = getAgentQueue(targetAgent).pending;
+        const idx = pending.findIndex(t => t.id === task.id);
+        if (idx >= 0) pending.splice(idx, 1);
+        log(`❌ ${msg}`);
+        reportTaskResult(task, "failed", msg, Date.now() - spawnStartedAt).catch(reportErr => {
+          log(`⚠ 按需拉起失败回报异常: ${reportErr.message}`);
+        });
       });
     }
     return;
