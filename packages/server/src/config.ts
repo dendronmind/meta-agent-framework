@@ -18,11 +18,14 @@ import { homedir } from 'os';
 
 /** 外部注册表类型 */
 export type RegistryType = 'feishu' | 'none';
+/** Server 侧 Meta-Agent-Server runtime（配置兼容 claude / claude-code） */
+export type ServerRuntime = 'opencode' | 'codex' | 'claude' | 'claude-code';
 
 export interface MafConfig {
   server: {
     url: string;
     port: number;
+    runtime?: ServerRuntime;
   };
   daemon: {
     port: number;
@@ -126,6 +129,7 @@ export function getConfig(projectRoot?: string): MafConfig {
   // 4. 环境变量覆盖（最高优先级）
   if (process.env.META_AGENT_SERVER) config.server.url = process.env.META_AGENT_SERVER;
   if (process.env.META_AGENT_PORT || process.env.PORT) config.server.port = parseInt(process.env.META_AGENT_PORT || process.env.PORT || '3000');
+  if (process.env.MAF_SERVER_RUNTIME) config.server.runtime = process.env.MAF_SERVER_RUNTIME as ServerRuntime;
   if (process.env.MAF_NODE_PORT) config.daemon.port = parseInt(process.env.MAF_NODE_PORT);
   if (process.env.MAF_REGISTRY_TYPE) config.registry.type = process.env.MAF_REGISTRY_TYPE as RegistryType;
   if (process.env.FEISHU_APP_ID) config.feishu.app_id = process.env.FEISHU_APP_ID;

@@ -16,11 +16,14 @@
  */
 
 import { spawn } from 'child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { workflowEngine, WorkflowSummary } from './workflow-engine';
 import { eventBus } from './event-bus';
+import { getConfig } from '../config';
 import type { Agent, MASSession, SessionRound } from '../types';
 
 // ============================================================
@@ -28,7 +31,12 @@ import type { Agent, MASSession, SessionRound } from '../types';
 // ============================================================
 
 const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
+const CODEX_BIN = process.env.CODEX_BIN || 'codex';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const MAX_ROUNDS = parseInt(process.env.MAS_MAX_ROUNDS || '5');
+const MAS_RUN_TIMEOUT_MS = parseInt(process.env.MAS_RUN_TIMEOUT_MS || '600000');
+
+type MasRuntime = 'opencode' | 'codex' | 'claude';
 
 // ============================================================
 // 会话存储（内存）
@@ -97,7 +105,7 @@ export class MASRunner {
 
     let output: string;
     try {
-      output = await this.runOpencode(prompt);
+      output = await this.runMetaAgentServer(prompt);
     } catch (err: any) {
       console.error(`[MAS] ❌ Round ${roundNum} 失败: ${err.message}`);
       session.status = 'failed';
@@ -289,32 +297,174 @@ failure_policy 可选：
   }
 
   /**
-   * 执行 opencode run --agent Meta-Agent-Server
+   * 按 Server runtime 执行一次性 Meta-Agent-Server 编排。
+   *
+   * 这里是 Server 内部 headless 调用，不是启动长期 TUI/Plugin：
+   * - codex runtime → `codex exec`
+   * - opencode runtime → `opencode run --pure`（避免加载 MAF opencode plugin 常驻循环）
+   * - claude runtime → `claude --print` 且只加载 user settings（避免项目 hooks 常驻等待）
    */
-  private runOpencode(prompt: string): Promise<string> {
+  private async runMetaAgentServer(prompt: string): Promise<string> {
+    const runtime = this.getServerRuntime();
+    const mafHome = this.getMafHome();
+    console.log(`[MAS] 🧠 使用 ${runtime} runtime 执行 Meta-Agent-Server headless`);
+
+    if (runtime === 'codex') return await this.runCodex(prompt, mafHome);
+    if (runtime === 'claude') return await this.runClaude(prompt, mafHome);
+    return await this.runOpencode(prompt, mafHome);
+  }
+
+  private getMafHome(): string {
+    return process.env.MAF_HOME || path.join(os.homedir(), '.meta-agent-framework');
+  }
+
+  private getServerRuntime(): MasRuntime {
+    const cfg = getConfig();
+    const raw = String(process.env.MAF_SERVER_RUNTIME || cfg.server.runtime || process.env.MAF_RUNTIME || '').trim();
+    const normalized: Record<string, MasRuntime> = {
+      opencode: 'opencode',
+      codex: 'codex',
+      claude: 'claude',
+      'claude-code': 'claude',
+      cc: 'claude',
+    };
+    const runtime = normalized[raw];
+    if (!runtime) {
+      throw new Error(`Server runtime not configured or unsupported: "${raw || '-'}". Please set server.runtime to opencode, codex, or claude.`);
+    }
+    return runtime;
+  }
+
+  private getServerUrl(): string {
+    const cfg = getConfig();
+    return process.env.META_AGENT_SERVER || cfg.server.url || `http://127.0.0.1:${cfg.server.port || 3000}`;
+  }
+
+  private baseRuntimeEnv(mafHome: string, runtime: MasRuntime): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      MAF_HOME: mafHome,
+      MAF_AGENT_NAME: 'Meta-Agent-Server',
+      MAF_RUNTIME: runtime === 'claude' ? 'claude-code' : runtime,
+      MAF_DIRECTORY: mafHome,
+      META_AGENT_SERVER: this.getServerUrl(),
+    };
+  }
+
+  private runCommand(
+    label: string,
+    command: string,
+    args: string[],
+    options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs?: number },
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
-      const mafHome = process.env.MAF_HOME || path.join(require('os').homedir(), '.meta-agent-framework');
-      const child = spawn(OPENCODE_BIN, [
-        'run', '--agent', 'Meta-Agent-Server', prompt,
-      ], {
-        cwd: mafHome,  // 安装态工作区，包含 .opencode/agents、rules、skills
-        timeout: 600_000,
-        env: {
-          ...process.env,
-          OPENCODE_AGENTS_DIR: path.join(mafHome, '.opencode/agents'),
-          MAF_HOME: mafHome,
-        },
+      const child = spawn(command, args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      let stdout = '', stderr = '';
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let timedOut = false;
+      const timeoutMs = options.timeoutMs || MAS_RUN_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill('SIGTERM'); } catch {}
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000).unref();
+      }, timeoutMs);
+
       child.stdout?.on('data', d => { stdout += d; });
       child.stderr?.on('data', d => { stderr += d; });
-      child.on('close', code => {
-        code === 0
-          ? resolve(stdout.trim() || 'Completed (no output)')
-          : reject(new Error(`opencode exited ${code}: ${stderr || stdout}`));
+      child.on('error', e => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(`${label} spawn failed: ${e.message}`));
       });
-      child.on('error', e => reject(new Error(`spawn failed: ${e.message}`)));
+      child.on('close', code => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const output = stdout.trim();
+        const errOutput = stderr.trim();
+        if (timedOut) {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms${errOutput ? `: ${errOutput}` : ''}`));
+          return;
+        }
+        if (code === 0) {
+          resolve(output || 'Completed (no output)');
+        } else {
+          reject(new Error(`${label} exited ${code}: ${errOutput || output}`));
+        }
+      });
+
+      if (options.input !== undefined) {
+        child.stdin?.end(options.input);
+      } else {
+        child.stdin?.end();
+      }
+    });
+  }
+
+  private async runCodex(prompt: string, mafHome: string): Promise<string> {
+    const outDir = path.join(mafHome, 'state', 'mas-runner');
+    mkdirSync(outDir, { recursive: true });
+    const outputFile = path.join(outDir, `codex-${Date.now()}-${uuidv4()}.txt`);
+    try {
+      const stdout = await this.runCommand('codex exec', CODEX_BIN, [
+        'exec',
+        '--skip-git-repo-check',
+        '--ephemeral',
+        '--sandbox', 'workspace-write',
+        '--ask-for-approval', 'never',
+        '--output-last-message', outputFile,
+        '-',
+      ], {
+        cwd: mafHome,
+        input: prompt,
+        env: {
+          ...this.baseRuntimeEnv(mafHome, 'codex'),
+          CODEX_CWD: mafHome,
+          // headless MAS 不需要 attached receiver；避免把一次性编排误注册成前台接收器
+          MAF_CODEX_AUTO_ATTACHED_RECEIVER: '0',
+          MAF_CODEX_ATTACHED_RECEIVER_DISABLE: '1',
+        },
+      });
+      const final = existsSync(outputFile) ? readFileSync(outputFile, 'utf-8').trim() : '';
+      return final || stdout.trim() || 'Completed (no output)';
+    } finally {
+      try { rmSync(outputFile, { force: true }); } catch {}
+    }
+  }
+
+  private async runClaude(prompt: string, mafHome: string): Promise<string> {
+    return await this.runCommand('claude --print', CLAUDE_BIN, [
+      '--print',
+      '--output-format', 'text',
+      '--permission-mode', 'dontAsk',
+      '--no-session-persistence',
+      '--setting-sources', 'user',
+      prompt,
+    ], {
+      cwd: mafHome,
+      env: this.baseRuntimeEnv(mafHome, 'claude'),
+    });
+  }
+
+  private async runOpencode(prompt: string, mafHome: string): Promise<string> {
+    return await this.runCommand('opencode run', OPENCODE_BIN, [
+      'run',
+      '--pure',
+      '--agent', 'Meta-Agent-Server',
+      prompt,
+    ], {
+      cwd: mafHome,
+      env: {
+        ...this.baseRuntimeEnv(mafHome, 'opencode'),
+        OPENCODE_AGENTS_DIR: path.join(mafHome, '.opencode/agents'),
+      },
     });
   }
 
