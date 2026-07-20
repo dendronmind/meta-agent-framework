@@ -7,9 +7,8 @@
   <style>
     :root {
       --bg: #08111f;
-      --bg-soft: #0f172a;
       --panel: rgba(15, 23, 42, 0.92);
-      --panel-2: rgba(30, 41, 59, 0.88);
+      --panel-soft: rgba(15, 23, 42, 0.54);
       --line: rgba(148, 163, 184, 0.18);
       --muted: #94a3b8;
       --text: #e2e8f0;
@@ -25,9 +24,8 @@
 
     body.light {
       --bg: #f8fafc;
-      --bg-soft: #eef2ff;
       --panel: rgba(255, 255, 255, 0.94);
-      --panel-2: rgba(241, 245, 249, 0.94);
+      --panel-soft: rgba(248, 250, 252, 0.84);
       --line: rgba(71, 85, 105, 0.18);
       --muted: #64748b;
       --text: #334155;
@@ -49,7 +47,7 @@
     body.light { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 52%, #f1f5f9 100%); }
     body.embedded { min-height: 0; background: transparent; }
 
-    .shell { max-width: 1720px; margin: 0 auto; padding: 22px; }
+    .shell { max-width: 1780px; margin: 0 auto; padding: 22px; }
     body.embedded .shell { max-width: none; padding: 12px; }
     body.compact .shell { padding: 12px; }
 
@@ -114,7 +112,7 @@
     }
     .context-bar.show { display: flex; }
 
-    .stats-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
     body.embedded .stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     body.compact .stats-grid { gap: 10px; }
     .stat-card {
@@ -126,18 +124,18 @@
       min-height: 98px;
     }
     body.compact .stat-card { padding: 12px; min-height: 82px; border-radius: 14px; }
-    .stat-value { font-size: 29px; font-weight: 800; letter-spacing: -0.04em; color: var(--text-strong); line-height: 1; }
+    .stat-value { font-size: 28px; font-weight: 800; letter-spacing: -0.04em; color: var(--text-strong); line-height: 1; }
     .stat-label { margin-top: 8px; color: var(--muted); font-size: 12px; }
     .stat-hint { margin-top: 8px; color: #64748b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     .main-grid {
       margin-top: 16px;
       display: grid;
-      grid-template-columns: 390px minmax(540px, 1fr) 430px;
+      grid-template-columns: 390px minmax(560px, 1fr) 450px;
       gap: 16px;
       align-items: start;
     }
-    body.embedded .main-grid { grid-template-columns: minmax(420px, 1fr) 390px; }
+    body.embedded .main-grid { grid-template-columns: minmax(420px, 1fr) 410px; }
     body.embedded .hide-embedded { display: none; }
     .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
     .panel {
@@ -183,18 +181,17 @@
     .pill.online, .pill.completed, .pill.done { color: #86efac; background: rgba(20, 83, 45, 0.22); border-color: rgba(52, 211, 153, 0.22); }
     .pill.running, .pill.busy, .pill.active { color: #7dd3fc; background: rgba(7, 89, 133, 0.22); border-color: rgba(56, 189, 248, 0.25); }
     .pill.pending, .pill.dispatched { color: #fde68a; background: rgba(113, 63, 18, 0.18); border-color: rgba(251, 191, 36, 0.2); }
-    .pill.failed, .pill.dead, .pill.error { color: #fda4af; background: rgba(127, 29, 29, 0.22); border-color: rgba(251, 113, 133, 0.24); }
-    .pill.offline, .pill.skipped { color: #cbd5e1; background: rgba(71, 85, 105, 0.28); border-color: rgba(148, 163, 184, 0.18); }
-    .pill.info, .pill.codex, .pill.opencode, .pill.claude-code { color: #c4b5fd; background: rgba(91, 33, 182, 0.2); border-color: rgba(192, 132, 252, 0.2); }
+    .pill.failed, .pill.dead, .pill.error, .pill.outdated { color: #fda4af; background: rgba(127, 29, 29, 0.22); border-color: rgba(251, 113, 133, 0.24); }
+    .pill.offline, .pill.skipped, .pill.unknown { color: #cbd5e1; background: rgba(71, 85, 105, 0.28); border-color: rgba(148, 163, 184, 0.18); }
+    .pill.info, .pill.codex, .pill.opencode, .pill.claude-code, .pill.current { color: #c4b5fd; background: rgba(91, 33, 182, 0.2); border-color: rgba(192, 132, 252, 0.2); }
 
-    .workflow-card, .agent-card, .task-row, .session-card, .node {
+    .workflow-card, .agent-card, .task-row, .session-card, .node, .info-card {
       border: 1px solid rgba(148, 163, 184, 0.14);
-      background: rgba(15, 23, 42, 0.54);
+      background: var(--panel-soft);
       border-radius: 16px;
       padding: 12px;
       margin-bottom: 10px;
     }
-    body.light .workflow-card, body.light .agent-card, body.light .task-row, body.light .session-card, body.light .node { background: rgba(248, 250, 252, 0.82); }
     .workflow-card { cursor: pointer; transition: 0.15s ease; }
     .workflow-card:hover, .workflow-card.selected { border-color: rgba(56, 189, 248, 0.52); background: rgba(14, 165, 233, 0.11); }
     .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
@@ -211,6 +208,7 @@
     }
     .detail-title { font-size: 20px; font-weight: 820; color: var(--text-strong); margin: 8px 0; letter-spacing: -0.03em; }
     .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .detail-grid.single { grid-template-columns: 1fr; }
     .kv { padding: 10px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.12); background: rgba(15, 23, 42, 0.36); min-width: 0; }
     body.light .kv { background: rgba(255, 255, 255, 0.72); }
     .kv .k { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
@@ -239,6 +237,12 @@
     .agent-work { margin-top: 10px; padding: 9px; border-radius: 12px; background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(56, 189, 248, 0.16); color: #bfdbfe; font-size: 11px; line-height: 1.45; }
     body.light .agent-work { color: #075985; }
 
+    .coverage-list { display: flex; flex-direction: column; gap: 9px; }
+    .coverage-item { padding: 9px; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.12); background: rgba(15, 23, 42, 0.28); }
+    body.light .coverage-item { background: rgba(255, 255, 255, 0.64); }
+    .bar { height: 7px; border-radius: 999px; overflow: hidden; background: rgba(71, 85, 105, 0.36); margin-top: 8px; }
+    .bar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--blue), var(--green)); }
+
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th { color: var(--muted); text-align: left; font-weight: 650; padding: 9px 8px; border-bottom: 1px solid var(--line); }
     td { padding: 9px 8px; border-bottom: 1px solid rgba(148, 163, 184, 0.08); vertical-align: top; }
@@ -263,6 +267,7 @@
     }
     .chip.active { color: var(--text-strong); border-color: rgba(56, 189, 248, 0.5); background: rgba(14, 165, 233, 0.16); }
 
+    @media (max-width: 1480px) { .stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     @media (max-width: 1280px) {
       .main-grid, body.embedded .main-grid { grid-template-columns: 1fr; }
       .hide-embedded { display: block; }
@@ -293,26 +298,29 @@
           <span id="clock">--:--:--</span>
           <span id="last-refresh">未刷新</span>
         </div>
-        <button class="btn" id="refresh-btn">刷新</button>
+        <button class="btn" id="lang-toggle">EN</button>
+        <button class="btn" id="refresh-btn" data-i18n="refresh">刷新</button>
       </div>
     </header>
 
     <section class="context-bar" id="context-bar"></section>
 
     <section class="stats-grid">
-      <div class="stat-card"><div class="stat-value" id="stat-server">-</div><div class="stat-label">Server</div><div class="stat-hint" id="hint-server">/api/health</div></div>
-      <div class="stat-card"><div class="stat-value" id="stat-agents">-</div><div class="stat-label">Agents Online</div><div class="stat-hint" id="hint-agents">online / total</div></div>
-      <div class="stat-card"><div class="stat-value" style="color: var(--blue)" id="stat-busy">-</div><div class="stat-label">Busy Agents</div><div class="stat-hint">heartbeat / workflow</div></div>
-      <div class="stat-card"><div class="stat-value" id="stat-workflows">-</div><div class="stat-label">Running Workflows</div><div class="stat-hint" id="hint-workflows">filtered / total</div></div>
-      <div class="stat-card"><div class="stat-value" id="stat-mas">-</div><div class="stat-label">Active MAS Sessions</div><div class="stat-hint">Meta-Agent-Server</div></div>
-      <div class="stat-card"><div class="stat-value" id="stat-tasks">-</div><div class="stat-label">Open Tasks</div><div class="stat-hint">pending / running / dispatched</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-server">-</div><div class="stat-label" data-i18n="server">Server</div><div class="stat-hint" id="hint-server">/api/health</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-agents">-</div><div class="stat-label" data-i18n="agentsOnline">Agents Online</div><div class="stat-hint" id="hint-agents">online / total</div></div>
+      <div class="stat-card"><div class="stat-value" style="color: var(--blue)" id="stat-busy">-</div><div class="stat-label" data-i18n="busyAgents">Busy Agents</div><div class="stat-hint">heartbeat / workflow</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-skills">-</div><div class="stat-label" data-i18n="skills">Skills</div><div class="stat-hint" id="hint-skills">coverage</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-mcps">-</div><div class="stat-label" data-i18n="mcps">MCPs</div><div class="stat-hint" id="hint-mcps">coverage</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-workflows">-</div><div class="stat-label" data-i18n="runningWorkflows">Running Workflows</div><div class="stat-hint" id="hint-workflows">filtered / total</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-mas">-</div><div class="stat-label" data-i18n="activeMasSessions">Active MAS Sessions</div><div class="stat-hint">Meta-Agent-Server</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-tasks">-</div><div class="stat-label" data-i18n="openTasks">Open Tasks</div><div class="stat-hint">pending / running / dispatched</div></div>
     </section>
 
     <main class="main-grid">
       <section class="stack hide-embedded">
         <div class="panel">
           <div class="panel-header">
-            <div><div class="panel-title">Workflow Focus</div><div class="panel-subtitle">选择一个 workflow 查看执行详情</div></div>
+            <div><div class="panel-title" data-i18n="workflowFocus">Workflow Focus</div><div class="panel-subtitle" data-i18n="workflowFocusHint">选择一个 workflow 查看执行详情</div></div>
             <span class="pill running" id="workflow-focus-count">0</span>
           </div>
           <div class="panel-body">
@@ -323,17 +331,25 @@
 
         <div class="panel">
           <div class="panel-header">
-            <div><div class="panel-title">MAS Sessions</div><div class="panel-subtitle">Meta-Agent-Server 分诊 / 编排会话</div></div>
+            <div><div class="panel-title" data-i18n="masSessions">MAS Sessions</div><div class="panel-subtitle" data-i18n="masSessionsHint">Meta-Agent-Server 分诊 / 编排会话</div></div>
             <span class="pill active" id="session-count">0</span>
           </div>
           <div class="panel-body scroll small" id="session-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title" data-i18n="evolveResults">Evolve Results</div><div class="panel-subtitle" data-i18n="evolveResultsHint">Skill / MCP / Agent 配置进化结果</div></div>
+            <span class="pill info" id="evolve-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="evolve-list"></div>
         </div>
       </section>
 
       <section class="stack">
         <div class="panel">
           <div class="panel-header">
-            <div><div class="panel-title">Workflow Detail</div><div class="panel-subtitle">DAG 节点、执行结果和上下文</div></div>
+            <div><div class="panel-title" data-i18n="workflowDetail">Workflow Detail</div><div class="panel-subtitle" data-i18n="workflowDetailHint">DAG 节点、执行结果和上下文</div></div>
             <span class="pill unknown" id="selected-status">none</span>
           </div>
           <div class="panel-body" id="workflow-detail"></div>
@@ -341,7 +357,7 @@
 
         <div class="panel hide-embedded">
           <div class="panel-header">
-            <div><div class="panel-title">Tasks</div><div class="panel-subtitle">传统任务队列 / Agent 回报</div></div>
+            <div><div class="panel-title" data-i18n="tasks">Tasks</div><div class="panel-subtitle" data-i18n="tasksHint">传统任务队列 / Agent 回报</div></div>
             <span class="pill pending" id="task-count">0</span>
           </div>
           <div class="panel-body scroll small" id="task-list"></div>
@@ -351,15 +367,31 @@
       <section class="stack">
         <div class="panel">
           <div class="panel-header">
-            <div><div class="panel-title">Agent Board</div><div class="panel-subtitle">在线状态、runtime、版本和能力</div></div>
+            <div><div class="panel-title" data-i18n="agentBoard">Agent Board</div><div class="panel-subtitle" data-i18n="agentBoardHint">在线状态、runtime、版本和能力</div></div>
             <span class="pill online" id="agent-count">0</span>
           </div>
           <div class="panel-body scroll" id="agent-board"></div>
         </div>
 
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title" data-i18n="inventory">Skills & MCP Inventory</div><div class="panel-subtitle" data-i18n="inventoryHint">全网能力覆盖与缺口</div></div>
+            <span class="pill info" id="inventory-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="inventory-panel"></div>
+        </div>
+
         <div class="panel hide-embedded">
           <div class="panel-header">
-            <div><div class="panel-title">Runtime Context</div><div class="panel-subtitle">Server / Registry / Filter 状态</div></div>
+            <div><div class="panel-title" data-i18n="otaStatus">OTA / Version Status</div><div class="panel-subtitle" data-i18n="otaStatusHint">Client 版本、Plugin hash 与升级状态</div></div>
+            <span class="pill info" id="ota-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="ota-status"></div>
+        </div>
+
+        <div class="panel hide-embedded">
+          <div class="panel-header">
+            <div><div class="panel-title" data-i18n="runtimeContext">Runtime Context</div><div class="panel-subtitle" data-i18n="runtimeContextHint">Server / Registry / Filter 状态</div></div>
             <span class="pill info" id="context-mode">global</span>
           </div>
           <div class="panel-body" id="runtime-context"></div>
@@ -369,8 +401,8 @@
 
     <section class="panel" style="margin-top:16px;">
       <div class="panel-header">
-        <div><div class="panel-title">Live Event Log</div><div class="panel-subtitle">/api/events SSE 实时事件</div></div>
-        <button class="btn" id="clear-events-btn">清空</button>
+        <div><div class="panel-title" data-i18n="liveEvents">Live Event Log</div><div class="panel-subtitle" data-i18n="liveEventsHint">/api/events SSE 实时事件</div></div>
+        <button class="btn" id="clear-events-btn" data-i18n="clear">清空</button>
       </div>
       <div class="panel-body scroll small"><div class="event-log" id="event-log"></div></div>
     </section>
@@ -379,6 +411,44 @@
   <script>
     const API = location.origin;
     const params = new URLSearchParams(location.search);
+
+    const I18N = {
+      zh: {
+        htmlLang: 'zh-CN', all: '全部', refresh: '刷新', clear: '清空', lastRefresh: '刷新', global: '全局', embedded: '内嵌', readonly: '只读', actionsEnabled: '允许操作', currentFilter: '当前过滤上下文', waitingServer: '等待 Server',
+        pageTitle: 'MAF 控制台', pageSubtitle: 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件', embeddedTitle: 'MAF 执行面板', embeddedSubtitle: '可内嵌的 Agent / Workflow 执行面板',
+        server: 'Server', agentsOnline: '在线 Agent', busyAgents: '忙碌 Agent', skills: 'Skills', mcps: 'MCPs', runningWorkflows: '运行中 Workflow', activeMasSessions: '活跃 MAS 会话', openTasks: '未完成任务',
+        workflowFocus: 'Workflow 焦点', workflowFocusHint: '选择一个 workflow 查看执行详情', workflowDetail: 'Workflow 详情', workflowDetailHint: 'DAG 节点、执行结果和上下文',
+        agentBoard: 'Agent 看板', agentBoardHint: '在线状态、runtime、版本和能力', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
+        tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
+        inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果',
+        noWorkflow: '暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。', noSelectedWorkflow: '暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。', noNodes: '该 workflow 暂无节点信息。', noAgents: '暂无 agent 数据。', noSessions: '暂无 MAS session。调用 /api/workflows/mas/task 后会出现。', noTasks: '暂无传统 task 数据。', noEvents: '等待 SSE 事件。', noInventory: '暂无 Skills/MCP inventory 数据。等待 agent 心跳上报 skills/mcps 后会出现。', noEvolve: '暂无 evolve 结果。通过 /api/evolve/skill、/api/evolve/mcp 等接口推送后会出现。', noOta: '暂无 OTA 状态数据。',
+        workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: '创建时间', completedAt: '完成时间', nodes: '节点', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: '任务进入 MAF 控制面', dispatchNote: '按 agent_name 路由到节点', executeNoteIdle: '等待执行或已结束', resultNote: '最终状态', currentNode: '当前节点', coverage: '覆盖', gaps: '缺口', allAgents: '全部 Agent', latestHash: '最新 Hash', clientMinimum: 'Client 最低版本', serverVersion: 'Server 版本', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: '耗时', actions: '动作', endpoint: 'Endpoint', version: '版本', pluginHash: 'Plugin Hash', unknown: '未知', total: '总数', latest: '最新',
+        status: { online: '在线', offline: '离线', busy: '忙碌', dead: '死亡', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
+      },
+      en: {
+        htmlLang: 'en', all: 'all', refresh: 'Refresh', clear: 'Clear', lastRefresh: 'Refreshed', global: 'global', embedded: 'embedded', readonly: 'readonly', actionsEnabled: 'actions-enabled', currentFilter: 'Current filter', waitingServer: 'Waiting for Server',
+        pageTitle: 'MAF Console', pageSubtitle: 'Agent network · Workflow execution · MAS triage · Runtime events', embeddedTitle: 'MAF Execution Panel', embeddedSubtitle: 'Embeddable Agent / Workflow execution panel',
+        server: 'Server', agentsOnline: 'Agents Online', busyAgents: 'Busy Agents', skills: 'Skills', mcps: 'MCPs', runningWorkflows: 'Running Workflows', activeMasSessions: 'Active MAS Sessions', openTasks: 'Open Tasks',
+        workflowFocus: 'Workflow Focus', workflowFocusHint: 'Select a workflow to inspect execution details', workflowDetail: 'Workflow Detail', workflowDetailHint: 'DAG nodes, execution results, and context',
+        agentBoard: 'Agent Board', agentBoardHint: 'Status, runtime, version, and capabilities', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
+        tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
+        inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results',
+        noWorkflow: 'No workflows. Create one via /api/workflows or /api/workflows/mas/task.', noSelectedWorkflow: 'No workflow to display. Select one on the left, or filter by workflow_id / agent_name / origin_id.', noNodes: 'This workflow has no node details.', noAgents: 'No agent data.', noSessions: 'No MAS sessions. Call /api/workflows/mas/task to create one.', noTasks: 'No legacy task data.', noEvents: 'Waiting for SSE events.', noInventory: 'No Skills/MCP inventory yet. It appears after agents report skills/mcps via heartbeat.', noEvolve: 'No evolve results yet. Push via /api/evolve/skill, /api/evolve/mcp, etc.', noOta: 'No OTA status data.',
+        workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: 'Created', completedAt: 'Completed', nodes: 'Nodes', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: 'Task entered the MAF control plane', dispatchNote: 'Routed by agent_name', executeNoteIdle: 'Waiting or finished', resultNote: 'Final state', currentNode: 'Current node', coverage: 'coverage', gaps: 'gaps', allAgents: 'all agents', latestHash: 'Latest hash', clientMinimum: 'Client minimum', serverVersion: 'Server version', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: 'Duration', actions: 'Actions', endpoint: 'Endpoint', version: 'Version', pluginHash: 'Plugin Hash', unknown: 'unknown', total: 'total', latest: 'latest',
+        status: { online: 'online', offline: 'offline', busy: 'busy', dead: 'dead', pending: 'pending', dispatched: 'dispatched', running: 'running', completed: 'completed', failed: 'failed', skipped: 'skipped', active: 'active', done: 'done', unknown: 'unknown', current: 'current', outdated: 'outdated', info: 'info' }
+      }
+    };
+
+    function detectLang() {
+      const queryLang = params.get('lang');
+      if (queryLang === 'zh' || queryLang === 'en') return queryLang;
+      try {
+        const saved = localStorage.getItem('maf_console_lang');
+        if (saved === 'zh' || saved === 'en') return saved;
+      } catch {}
+      return (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+    }
+
     const config = {
       embedded: params.get('embed') === '1' || location.pathname.startsWith('/embed'),
       compact: params.get('compact') === '1' || params.get('compact') === 'true',
@@ -399,14 +469,17 @@
     ];
 
     const state = {
+      lang: detectLang(),
       health: null,
-      agents: [], tasks: [], workflows: [], sessions: [], events: [],
+      agents: [], tasks: [], workflows: [], sessions: [], inventory: null, otaStatus: null, evolveResults: [], events: [],
       selectedWorkflowId: config.workflowId || null,
       statusFilter: 'all',
       lastError: '',
     };
 
     function $(id) { return document.getElementById(id); }
+    function t(key) { return I18N[state.lang]?.[key] ?? I18N.en[key] ?? key; }
+    function statusLabel(status) { const s = String(status || 'unknown'); return I18N[state.lang]?.status?.[s] || s; }
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
     }
@@ -421,16 +494,7 @@
     }
     function pill(status, label) {
       const s = String(status || 'unknown');
-      return `<span class="pill ${escapeHtml(s)}">${escapeHtml(label || s)}</span>`;
-    }
-    function statusClass(status) {
-      const s = String(status || 'unknown');
-      if (['online', 'completed', 'done'].includes(s)) return 'online';
-      if (['running', 'busy', 'active'].includes(s)) return 'running';
-      if (['pending', 'dispatched'].includes(s)) return 'pending';
-      if (['failed', 'dead', 'error'].includes(s)) return 'failed';
-      if (['offline', 'skipped'].includes(s)) return 'offline';
-      return 'unknown';
+      return `<span class="pill ${escapeHtml(s)}" title="${escapeHtml(s)}">${escapeHtml(label || statusLabel(s))}</span>`;
     }
     function parseJson(value, fallback) {
       if (Array.isArray(value) || (value && typeof value === 'object')) return value;
@@ -442,6 +506,18 @@
       return short(text, len);
     }
     function nodeList(workflow) { return Array.isArray(workflow?.nodes) ? workflow.nodes : []; }
+    function semverParts(version) { return String(version || '').replace(/^v/, '').split(/[+-]/, 1)[0].split('.').slice(0, 3).map(v => Number.parseInt(v, 10) || 0).concat([0, 0, 0]).slice(0, 3); }
+    function semverLess(a, b) { const av = semverParts(a), bv = semverParts(b); for (let i = 0; i < 3; i++) if (av[i] !== bv[i]) return av[i] < bv[i]; return false; }
+
+    function applyI18n() {
+      document.documentElement.lang = I18N[state.lang].htmlLang;
+      document.title = config.embedded ? t('embeddedTitle') : t('pageTitle');
+      document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+      $('lang-toggle').textContent = state.lang === 'zh' ? 'EN' : '中文';
+      $('mode-label').textContent = config.embedded ? t('embedded') : t('global');
+      $('page-title').textContent = config.embedded ? t('embeddedTitle') : t('pageTitle');
+      $('page-subtitle').textContent = config.embedded ? t('embeddedSubtitle') : t('pageSubtitle');
+    }
 
     async function apiGet(path, fallback) {
       try {
@@ -486,12 +562,15 @@
     }
 
     async function refreshAll() {
-      const [health, agents, tasks, workflows, sessions] = await Promise.all([
+      const [health, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults] = await Promise.all([
         apiGet('/api/health', null),
         apiGet('/api/agents?all=true', []),
         apiGet('/api/tasks?limit=80', []),
         apiGet('/api/workflows', []),
         apiGet('/api/workflows/mas/sessions', []),
+        apiGet('/api/agents/inventory', null),
+        apiGet('/api/ota/status', null),
+        apiGet('/api/evolve', []),
       ]);
 
       state.health = health;
@@ -499,6 +578,9 @@
       state.tasks = Array.isArray(tasks) ? tasks : [];
       state.workflows = Array.isArray(workflows) ? workflows : [];
       state.sessions = Array.isArray(sessions) ? sessions : [];
+      state.inventory = inventory;
+      state.otaStatus = otaStatus;
+      state.evolveResults = Array.isArray(evolveResults) ? evolveResults : [];
 
       const visible = visibleWorkflows();
       if (!state.selectedWorkflowId || !visible.some(w => w.id === state.selectedWorkflowId || w.workflow_id === state.selectedWorkflowId)) {
@@ -506,11 +588,12 @@
       }
 
       renderAll();
-      $('last-refresh').textContent = `刷新 ${new Date().toLocaleTimeString()}`;
+      $('last-refresh').textContent = `${t('lastRefresh')} ${new Date().toLocaleTimeString()}`;
       notifyResize();
     }
 
     function renderAll() {
+      applyI18n();
       renderContextBar();
       renderStats();
       renderWorkflowFilters();
@@ -519,20 +602,30 @@
       renderAgents();
       renderSessions();
       renderTasks();
+      renderInventory();
+      renderOtaStatus();
+      renderEvolveResults();
       renderRuntimeContext();
       renderEvents();
     }
 
     function renderContextBar() {
       const items = [];
-      if (config.embedded) items.push('embedded');
+      if (config.embedded) items.push(t('embedded'));
       if (config.workflowId) items.push(`workflow_id=${config.workflowId}`);
       if (config.agentName) items.push(`agent_name=${config.agentName}`);
       if (config.originId) items.push(`origin_id=${config.originId}`);
       const bar = $('context-bar');
       if (!items.length) { bar.className = 'context-bar'; bar.innerHTML = ''; return; }
       bar.className = 'context-bar show';
-      bar.innerHTML = `<div>当前过滤上下文：<span class="mono">${escapeHtml(items.join(' · '))}</span></div><div>${pill(config.readonly ? 'info' : 'active', config.readonly ? 'readonly' : 'actions-enabled')}</div>`;
+      bar.innerHTML = `<div>${t('currentFilter')}：<span class="mono">${escapeHtml(items.join(' · '))}</span></div><div>${pill(config.readonly ? 'info' : 'active', config.readonly ? t('readonly') : t('actionsEnabled'))}</div>`;
+    }
+
+    function coverageEntries(kind) {
+      const coverage = state.inventory?.[kind]?.coverage || {};
+      const gaps = state.inventory?.[kind]?.gaps || {};
+      const total = state.inventory?.total_agents || state.agents.length || 0;
+      return Object.entries(coverage).map(([name, agents]) => ({ name, agents: agents || [], gaps: gaps[name] || [], ratio: total ? (agents || []).length / total : 0 })).sort((a, b) => b.agents.length - a.agents.length || a.name.localeCompare(b.name));
     }
 
     function renderStats() {
@@ -542,12 +635,18 @@
       const runningWf = visible.filter(w => w.status === 'running').length;
       const activeSessions = state.sessions.filter(s => !['completed', 'failed'].includes(s.status)).length;
       const openTasks = state.tasks.filter(t => ['pending', 'running', 'dispatched'].includes(t.status)).length;
+      const skills = coverageEntries('skills');
+      const mcps = coverageEntries('mcps');
 
       $('stat-server').textContent = state.health?.ok ? 'OK' : '-';
-      $('hint-server').textContent = state.health?.server_version ? `v${state.health.server_version}` : (state.lastError || '等待 Server');
+      $('hint-server').textContent = state.health?.server_version ? `v${state.health.server_version}` : (state.lastError || t('waitingServer'));
       $('stat-agents').textContent = online;
       $('hint-agents').textContent = `${online} / ${state.agents.length}`;
       $('stat-busy').textContent = busy || 0;
+      $('stat-skills').textContent = skills.length;
+      $('hint-skills').textContent = `${skills.length} ${t('total')}`;
+      $('stat-mcps').textContent = mcps.length;
+      $('hint-mcps').textContent = `${mcps.length} ${t('total')}`;
       $('stat-workflows').textContent = runningWf;
       $('hint-workflows').textContent = `${visible.length} / ${state.workflows.length}`;
       $('stat-mas').textContent = activeSessions || 0;
@@ -556,7 +655,7 @@
 
     function renderWorkflowFilters() {
       const statuses = ['all', 'running', 'pending', 'completed', 'failed'];
-      $('workflow-filters').innerHTML = statuses.map(s => `<button class="chip ${state.statusFilter === s ? 'active' : ''}" data-status-filter="${s}">${s}</button>`).join('');
+      $('workflow-filters').innerHTML = statuses.map(s => `<button class="chip ${state.statusFilter === s ? 'active' : ''}" data-status-filter="${s}">${escapeHtml(s === 'all' ? t('all') : statusLabel(s))}</button>`).join('');
     }
 
     function renderWorkflowList() {
@@ -577,12 +676,12 @@
             <div class="desc">${escapeHtml(short(w.description || w.reason || stringifySmall(w.origin, 110), 130))}</div>
             <div class="meta">
               <span class="mono">${escapeHtml(id || '-')}</span>
-              <span>nodes ${nodes.length}</span>
+              <span>${t('nodes')} ${nodes.length}</span>
               <span>✅ ${completed}</span><span>🔵 ${running}</span><span>❌ ${failed}</span>
               <span>${time(w.created_at || w.started_at)}</span>
             </div>
           </div>`;
-      }).join('') || '<div class="empty">暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。</div>';
+      }).join('') || `<div class="empty">${t('noWorkflow')}</div>`;
     }
 
     function renderWorkflowDetail() {
@@ -590,13 +689,13 @@
       if (!workflow) {
         $('selected-status').textContent = 'none';
         $('selected-status').className = 'pill unknown';
-        $('workflow-detail').innerHTML = '<div class="empty">暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。</div>';
+        $('workflow-detail').innerHTML = `<div class="empty">${t('noSelectedWorkflow')}</div>`;
         return;
       }
 
       const id = workflow.id || workflow.workflow_id;
-      $('selected-status').textContent = workflow.status || 'unknown';
-      $('selected-status').className = `pill ${statusClass(workflow.status)}`;
+      $('selected-status').textContent = statusLabel(workflow.status);
+      $('selected-status').className = `pill ${workflow.status || 'unknown'}`;
       const nodes = nodeList(workflow);
       const counts = {
         pending: nodes.filter(n => n.status === 'pending').length,
@@ -619,19 +718,19 @@
           <div class="detail-title">${escapeHtml(workflow.title || id || 'Untitled workflow')}</div>
           <div class="desc">${escapeHtml(short(workflow.description || workflow.reason || stringifySmall(workflow.origin, 260), 320))}</div>
           <div class="detail-grid">
-            <div class="kv"><div class="k">Workflow ID</div><div class="v mono">${escapeHtml(id || '-')}</div></div>
-            <div class="kv"><div class="k">Origin</div><div class="v">${escapeHtml(stringifySmall(workflow.origin, 90))}</div></div>
-            <div class="kv"><div class="k">Notify</div><div class="v">${escapeHtml(stringifySmall(workflow.notify, 90))}</div></div>
-            <div class="kv"><div class="k">Created</div><div class="v">${time(workflow.created_at || workflow.started_at)}</div></div>
-            <div class="kv"><div class="k">Completed</div><div class="v">${time(workflow.completed_at)}</div></div>
-            <div class="kv"><div class="k">Nodes</div><div class="v">${nodes.length} nodes · ✅${counts.completed} 🔵${counts.running} ❌${counts.failed} ⏭${counts.skipped}</div></div>
+            <div class="kv"><div class="k">${t('workflowId')}</div><div class="v mono">${escapeHtml(id || '-')}</div></div>
+            <div class="kv"><div class="k">${t('origin')}</div><div class="v">${escapeHtml(stringifySmall(workflow.origin, 90))}</div></div>
+            <div class="kv"><div class="k">${t('notify')}</div><div class="v">${escapeHtml(stringifySmall(workflow.notify, 90))}</div></div>
+            <div class="kv"><div class="k">${t('created')}</div><div class="v">${time(workflow.created_at || workflow.started_at)}</div></div>
+            <div class="kv"><div class="k">${t('completedAt')}</div><div class="v">${time(workflow.completed_at)}</div></div>
+            <div class="kv"><div class="k">${t('nodes')}</div><div class="v">${nodes.length} · ✅${counts.completed} 🔵${counts.running} ❌${counts.failed} ⏭${counts.skipped}</div></div>
           </div>
         </div>
         <div class="progress-line">
-          <div class="step ${stepState('created')}"><div class="step-icon">📥</div><div class="step-name">Created</div><div class="step-note">任务进入 MAF 控制面</div></div>
-          <div class="step ${stepState('dispatch')}"><div class="step-icon">🧭</div><div class="step-name">Dispatch</div><div class="step-note">按 agent_name 路由到节点</div></div>
-          <div class="step ${stepState('execute')}"><div class="step-icon">⚙️</div><div class="step-name">Execute</div><div class="step-note">${counts.running ? `${counts.running} 节点运行中` : '等待执行或已结束'}</div></div>
-          <div class="step ${stepState('result')}"><div class="step-icon">${workflow.status === 'failed' ? '❌' : '✅'}</div><div class="step-name">Result</div><div class="step-note">${workflow.status || 'pending'}</div></div>
+          <div class="step ${stepState('created')}"><div class="step-icon">📥</div><div class="step-name">${t('createdStep')}</div><div class="step-note">${t('createdNote')}</div></div>
+          <div class="step ${stepState('dispatch')}"><div class="step-icon">🧭</div><div class="step-name">${t('dispatchStep')}</div><div class="step-note">${t('dispatchNote')}</div></div>
+          <div class="step ${stepState('execute')}"><div class="step-icon">⚙️</div><div class="step-name">${t('executeStep')}</div><div class="step-note">${counts.running ? `${counts.running} ${statusLabel('running')}` : t('executeNoteIdle')}</div></div>
+          <div class="step ${stepState('result')}"><div class="step-icon">${workflow.status === 'failed' ? '❌' : '✅'}</div><div class="step-name">${t('resultStep')}</div><div class="step-note">${statusLabel(workflow.status)}</div></div>
         </div>
         <div class="nodes">
           ${nodes.map(n => `
@@ -651,14 +750,13 @@
               ${n.prompt ? `<div class="node-prompt">${escapeHtml(short(n.prompt, 260))}</div>` : ''}
               ${n.result ? `<div class="node-result">${escapeHtml(short(n.result, 900))}</div>` : ''}
             </div>
-          `).join('') || '<div class="empty">该 workflow 暂无节点信息。</div>'}
+          `).join('') || `<div class="empty">${t('noNodes')}</div>`}
         </div>`;
     }
 
     function workflowAgents() {
       const workflow = selectedWorkflow();
-      const names = new Set(nodeList(workflow).map(n => n.agent_name).filter(Boolean));
-      return names;
+      return new Set(nodeList(workflow).map(n => n.agent_name).filter(Boolean));
     }
 
     function renderAgents() {
@@ -688,9 +786,9 @@
               <span>mcps:${Array.isArray(mcps) ? mcps.length : 0}</span>
               <span>${time(a.last_heartbeat)}</span>
             </div>
-            ${activeNode ? `<div class="agent-work">当前节点：${escapeHtml(activeNode.workflow.title || activeNode.workflow.id)} / ${escapeHtml(activeNode.id)}</div>` : ''}
+            ${activeNode ? `<div class="agent-work">${t('currentNode')}：${escapeHtml(activeNode.workflow.title || activeNode.workflow.id)} / ${escapeHtml(activeNode.id)}</div>` : ''}
           </div>`;
-      }).join('') || '<div class="empty">暂无 agent 数据。</div>';
+      }).join('') || `<div class="empty">${t('noAgents')}</div>`;
     }
 
     function renderSessions() {
@@ -700,30 +798,96 @@
           <div class="row"><div class="title">${escapeHtml(s.title || s.id || 'MAS session')}</div>${pill(s.status || 'active')}</div>
           <div class="meta"><span class="mono">${escapeHtml(s.id || s.session_id || '-')}</span><span>${(s.rounds || []).length || s.round_count || 0} rounds</span><span>${time(s.updated_at || s.created_at)}</span></div>
           ${s.latest_output || s.summary ? `<div class="desc">${escapeHtml(short(s.latest_output || s.summary, 180))}</div>` : ''}
-        </div>`).join('') || '<div class="empty">暂无 MAS session。调用 /api/workflows/mas/task 后会出现。</div>';
+        </div>`).join('') || `<div class="empty">${t('noSessions')}</div>`;
     }
 
     function renderTasks() {
       const tasks = state.tasks.slice().sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
       $('task-count').textContent = tasks.length;
-      $('task-list').innerHTML = tasks.slice(0, 40).map(t => `
+      $('task-list').innerHTML = tasks.slice(0, 40).map(task => `
         <div class="task-row">
-          <div class="row"><div class="title">${escapeHtml(t.title || t.id || 'Task')}</div>${pill(t.status)}</div>
-          <div class="desc">${escapeHtml(short(t.description || t.result || '', 160))}</div>
-          <div class="meta"><span class="mono">${escapeHtml(t.id || '-')}</span><span>${escapeHtml(t.assigned_agent_name || t.target_agent || '-')}</span><span>${time(t.updated_at || t.created_at)}</span></div>
-        </div>`).join('') || '<div class="empty">暂无传统 task 数据。</div>';
+          <div class="row"><div class="title">${escapeHtml(task.title || task.id || 'Task')}</div>${pill(task.status)}</div>
+          <div class="desc">${escapeHtml(short(task.description || task.result || '', 160))}</div>
+          <div class="meta"><span class="mono">${escapeHtml(task.id || '-')}</span><span>${escapeHtml(task.assigned_agent_name || task.target_agent || '-')}</span><span>${time(task.updated_at || task.created_at)}</span></div>
+        </div>`).join('') || `<div class="empty">${t('noTasks')}</div>`;
+    }
+
+    function renderCoverage(kind, title) {
+      const entries = coverageEntries(kind).slice(0, 10);
+      const total = state.inventory?.total_agents || state.agents.length || 0;
+      if (!entries.length) return '';
+      return `<div class="title" style="margin: 4px 0 8px;">${escapeHtml(title)}</div><div class="coverage-list">${entries.map(e => {
+        const pct = Math.round(e.ratio * 100);
+        return `<div class="coverage-item">
+          <div class="row"><div class="title">${escapeHtml(e.name)}</div><span class="mono">${e.agents.length}/${total}</span></div>
+          <div class="meta"><span>${t('coverage')}: ${escapeHtml(e.agents.slice(0, 5).join(', ') || '-')}</span>${e.gaps.length ? `<span>${t('gaps')}: ${escapeHtml(e.gaps.slice(0, 5).join(', '))}</span>` : ''}</div>
+          <div class="bar"><span style="width:${Math.max(3, pct)}%"></span></div>
+        </div>`;
+      }).join('')}</div>`;
+    }
+
+    function renderInventory() {
+      const skills = coverageEntries('skills');
+      const mcps = coverageEntries('mcps');
+      $('inventory-count').textContent = `${skills.length}/${mcps.length}`;
+      if (!state.inventory || (!skills.length && !mcps.length)) {
+        $('inventory-panel').innerHTML = `<div class="empty">${t('noInventory')}</div>`;
+        return;
+      }
+      $('inventory-panel').innerHTML = `
+        <div class="detail-grid" style="grid-template-columns:1fr 1fr; margin-top:0;">
+          <div class="kv"><div class="k">${t('skills')}</div><div class="v">${skills.length}</div></div>
+          <div class="kv"><div class="k">${t('mcps')}</div><div class="v">${mcps.length}</div></div>
+        </div>
+        ${renderCoverage('skills', t('skills'))}
+        ${renderCoverage('mcps', t('mcps'))}`;
+    }
+
+    function renderOtaStatus() {
+      const minVersion = state.health?.client_min_version || '';
+      const latestHash = state.otaStatus?.latest_hash || '';
+      const agents = state.agents.slice().sort((a, b) => String(a.agent_name).localeCompare(String(b.agent_name)));
+      const outdated = agents.filter(a => minVersion && a.client_version && semverLess(a.client_version, minVersion));
+      $('ota-count').textContent = outdated.length ? `${outdated.length}` : 'OK';
+      if (!agents.length && !state.otaStatus) {
+        $('ota-status').innerHTML = `<div class="empty">${t('noOta')}</div>`;
+        return;
+      }
+      $('ota-status').innerHTML = `
+        <div class="detail-grid" style="grid-template-columns:1fr; margin-top:0;">
+          <div class="kv"><div class="k">${t('clientMinimum')}</div><div class="v">${escapeHtml(minVersion || '-')}</div></div>
+          <div class="kv"><div class="k">${t('latestHash')}</div><div class="v mono">${escapeHtml(latestHash || '-')}</div></div>
+        </div>
+        ${agents.slice(0, 30).map(a => {
+          const isOutdated = minVersion && a.client_version && semverLess(a.client_version, minVersion);
+          return `<div class="info-card">
+            <div class="row"><div class="title">${escapeHtml(a.agent_name)}</div>${pill(isOutdated ? 'outdated' : 'current')}</div>
+            <div class="meta"><span>${t('version')}: ${escapeHtml(a.client_version || '-')}</span><span>${t('pluginHash')}: ${escapeHtml(a.plugin_hash || '-')}</span><span>${t('endpoint')}: <span class="mono">${escapeHtml(a.client_endpoint || '-')}</span></span></div>
+          </div>`;
+        }).join('')}`;
+    }
+
+    function renderEvolveResults() {
+      const results = state.evolveResults.slice().sort((a, b) => String(b.completed_at || b.created_at || '').localeCompare(String(a.completed_at || a.created_at || '')));
+      $('evolve-count').textContent = results.length;
+      $('evolve-list').innerHTML = results.slice(0, 30).map(r => `
+        <div class="info-card">
+          <div class="row"><div class="title mono">${escapeHtml(r.evolve_id || '-')}</div>${pill(r.status)}</div>
+          <div class="meta"><span>${t('duration')}: ${escapeHtml(r.duration_ms ?? '-')}ms</span><span>${t('actions')}: ${(r.actions || []).map(a => escapeHtml(a.type || a.action || '?')).join(' → ') || '-'}</span></div>
+          ${(r.actions || []).some(a => a.message) ? `<div class="desc">${escapeHtml(short((r.actions || []).map(a => a.message).filter(Boolean).join('; '), 220))}</div>` : ''}
+        </div>`).join('') || `<div class="empty">${t('noEvolve')}</div>`;
     }
 
     function renderRuntimeContext() {
       const registry = state.health?.registry || state.health?.registry_type || '-';
-      $('context-mode').textContent = config.embedded ? 'embedded' : 'global';
+      $('context-mode').textContent = config.embedded ? t('embedded') : t('global');
       $('runtime-context').innerHTML = `
-        <div class="detail-grid" style="grid-template-columns:1fr;">
-          <div class="kv"><div class="k">Server URL</div><div class="v mono">${escapeHtml(API)}</div></div>
-          <div class="kv"><div class="k">Server Version</div><div class="v">${escapeHtml(state.health?.server_version || '-')}</div></div>
-          <div class="kv"><div class="k">Client Minimum</div><div class="v">${escapeHtml(state.health?.client_min_version || '-')}</div></div>
-          <div class="kv"><div class="k">Registry</div><div class="v">${escapeHtml(stringifySmall(registry, 120))}</div></div>
-          <div class="kv"><div class="k">Filter</div><div class="v mono">${escapeHtml(location.search || 'none')}</div></div>
+        <div class="detail-grid single" style="margin-top:0;">
+          <div class="kv"><div class="k">${t('serverUrl')}</div><div class="v mono">${escapeHtml(API)}</div></div>
+          <div class="kv"><div class="k">${t('serverVersion')}</div><div class="v">${escapeHtml(state.health?.server_version || '-')}</div></div>
+          <div class="kv"><div class="k">${t('clientMinimum')}</div><div class="v">${escapeHtml(state.health?.client_min_version || '-')}</div></div>
+          <div class="kv"><div class="k">${t('registry')}</div><div class="v">${escapeHtml(stringifySmall(registry, 120))}</div></div>
+          <div class="kv"><div class="k">${t('filter')}</div><div class="v mono">${escapeHtml(location.search || 'none')}</div></div>
         </div>`;
     }
 
@@ -744,7 +908,7 @@
           <span class="time">${time(e.timestamp || new Date())}</span>
           <span class="type">${escapeHtml(e.type || 'event')}</span>
           <span class="data">${escapeHtml(short(JSON.stringify(e.data ?? e), 900))}</span>
-        </div>`).join('') || '<div class="empty">等待 SSE 事件。</div>';
+        </div>`).join('') || `<div class="empty">${t('noEvents')}</div>`;
     }
 
     function addEvent(event) {
@@ -808,16 +972,18 @@
 
     $('refresh-btn').addEventListener('click', refreshAll);
     $('clear-events-btn').addEventListener('click', () => { state.events = []; renderEvents(); notifyResize(); });
+    $('lang-toggle').addEventListener('click', () => {
+      state.lang = state.lang === 'zh' ? 'en' : 'zh';
+      try { localStorage.setItem('maf_console_lang', state.lang); } catch {}
+      renderAll();
+      $('last-refresh').textContent = `${t('lastRefresh')} ${new Date().toLocaleTimeString()}`;
+    });
 
     function initPage() {
       if (config.theme === 'light') document.body.classList.add('light');
       if (config.embedded) document.body.classList.add('embedded');
       if (config.compact) document.body.classList.add('compact');
-      $('mode-label').textContent = config.embedded ? 'embedded' : 'global';
-      $('page-title').textContent = config.embedded ? 'MAF Execution Panel' : 'MAF Console';
-      $('page-subtitle').textContent = config.embedded
-        ? '可内嵌的 Agent / Workflow 执行面板'
-        : 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件';
+      applyI18n();
       setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
       setInterval(refreshAll, 8000);
       connectSSE();
