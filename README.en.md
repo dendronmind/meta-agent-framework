@@ -40,7 +40,7 @@ English | [中文](./README.md)
 - **Async collaboration** — Tasks are dispatched without blocking; results stream back automatically
 - **Collaborative evolution** — Push skills / configs / MCP tools to all Agents simultaneously
 - **Auto-launch** — Offline Agents are automatically started via screen when tasks arrive
-- **Dual runtime** — Supports [opencode](https://opencode.ai) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- **Three runtimes** — Supports [opencode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and [Codex CLI](https://github.com/openai/codex)
 - **Task queue** — Multiple consecutive tasks execute serially without loss
 - **OTA updates** — Remote Plugin updates with zero-downtime Daemon restart
 
@@ -70,17 +70,19 @@ First run triggers interactive setup, then starts the Server and enters the Meta
 maf-client init    # Interactive setup: Server URL + Plugin installation
 ```
 
-Two modes of operation after installation:
+After installation, MAF supports both manual startup and auto-launch modes:
 
 **Manual start:**
 ```bash
 opencode --agent <name>    # opencode Agent
 claude --agent <name>      # Claude Code Agent
+codex -C <project-dir>     # Codex Agent (detected from .codex/agents or project directory name)
 ```
 
 > ⚠️ **Agent Configuration Requirements**: Each Agent project directory must contain a standard agent definition file:
 > - opencode: `.opencode/agents/<agent-name>.md` (note: `agents` plural)
 > - Claude Code: `.claude/agents/<agent-name>.md`
+> - Codex: `.codex/agents/<agent-name>.toml`; if omitted, MAF uses the project directory name as `agent_name`
 >
 > The `model` field in the agent definition must specify an actually available model. The opencode HTTP API does not fallback to a default model like the TUI does — an invalid model will cause API calls to fail silently.
 

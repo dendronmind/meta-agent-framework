@@ -40,7 +40,7 @@
 - **异步协作** — 任务派发后不阻塞，结果自动回传并渲染展示
 - **协同进化** — Server 可向所有 Agent 推送 skill / 配置 / MCP 工具，整体能力同步提升
 - **按需拉起** — Agent 离线时 Daemon 自动通过 screen 拉起 TUI 执行
-- **双 Runtime** — 支持 [opencode](https://opencode.ai) 和 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- **三 Runtime** — 支持 [opencode](https://opencode.ai)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code) 和 [Codex CLI](https://github.com/openai/codex)
 - **任务队列** — 连续多任务串行执行，不丢不乱
 - **OTA 热更新** — Plugin 代码远程更新，Daemon 自重启，零停机
 
@@ -49,7 +49,7 @@
 ### 前置条件
 
 - Node.js >= 18
-- AI Runtime：[opencode](https://opencode.ai) 或 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- AI Runtime：[opencode](https://opencode.ai)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code) 或 [Codex CLI](https://github.com/openai/codex)
 
 如果尚未安装 Node.js 或版本过低，运行环境准备脚本（自动安装 nvm + Node.js 20）：
 
@@ -91,17 +91,19 @@ maf-server start
 maf-client init    # 交互式配置 Server 地址 + 安装 Plugin
 ```
 
-安装完成后有两种运行模式：
+安装完成后支持手动启动和自动拉起两种运行模式：
 
 **手动启动 Agent：**
 ```bash
 opencode --agent <name>    # opencode Agent
 claude --agent <name>      # Claude Code Agent
+codex -C <project-dir>     # Codex Agent（从 .codex/agents 或项目目录名识别）
 ```
 
 > ⚠️ **Agent 配置要求**：每个 Agent 项目目录下必须有标准格式的 agent 定义文件：
 > - opencode：`.opencode/agents/<agent-name>.md`（注意是 `agents` 复数）
 > - Claude Code：`.claude/agents/<agent-name>.md`
+> - Codex：`.codex/agents/<agent-name>.toml`；若未配置，MAF 会使用项目目录名作为 `agent_name`
 >
 > agent 定义文件中的 `model` 字段必须配置实际可用的模型，否则 API 调用会失败（opencode HTTP API 不会像 TUI 一样自动 fallback 默认模型）。
 
