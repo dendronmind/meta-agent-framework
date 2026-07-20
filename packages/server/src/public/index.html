@@ -3,200 +3,828 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Meta-Agent Dashboard</title>
+  <title>MAF Console</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
-    .header { background: #1e293b; padding: 20px 32px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
-    .header h1 { font-size: 20px; font-weight: 600; }
-    .header .status { display: flex; gap: 16px; font-size: 13px; color: #94a3b8; }
-    .header .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
-    .dot.green { background: #22c55e; }
-    .dot.red { background: #ef4444; }
-    .dot.yellow { background: #eab308; }
-    .dot.gray { background: #64748b; }
+    :root {
+      --bg: #08111f;
+      --bg-soft: #0f172a;
+      --panel: rgba(15, 23, 42, 0.92);
+      --panel-2: rgba(30, 41, 59, 0.88);
+      --line: rgba(148, 163, 184, 0.18);
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --text-strong: #f8fafc;
+      --blue: #38bdf8;
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #fb7185;
+      --purple: #c084fc;
+      --orange: #fb923c;
+      --shadow: 0 22px 60px rgba(0, 0, 0, 0.35);
+    }
 
-    .container { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 24px 32px; max-width: 1400px; margin: auto; }
-    .panel { background: #1e293b; border-radius: 8px; border: 1px solid #334155; overflow: hidden; }
-    .panel-header { padding: 12px 16px; border-bottom: 1px solid #334155; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .panel-body { padding: 0; max-height: 400px; overflow-y: auto; }
-    .panel.full-width { grid-column: 1 / -1; }
+    body.light {
+      --bg: #f8fafc;
+      --bg-soft: #eef2ff;
+      --panel: rgba(255, 255, 255, 0.94);
+      --panel-2: rgba(241, 245, 249, 0.94);
+      --line: rgba(71, 85, 105, 0.18);
+      --muted: #64748b;
+      --text: #334155;
+      --text-strong: #0f172a;
+      --shadow: 0 18px 44px rgba(15, 23, 42, 0.12);
+    }
 
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { text-align: left; padding: 8px 16px; color: #94a3b8; font-weight: 500; background: #0f172a; position: sticky; top: 0; }
-    td { padding: 8px 16px; border-top: 1px solid #1e293b; }
-    tr:hover td { background: #334155; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(56, 189, 248, 0.18), transparent 30%),
+        radial-gradient(circle at 82% 18%, rgba(192, 132, 252, 0.16), transparent 28%),
+        linear-gradient(135deg, #050816 0%, #0f172a 50%, #111827 100%);
+    }
+    body.light { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 52%, #f1f5f9 100%); }
+    body.embedded { min-height: 0; background: transparent; }
 
-    .badge { padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
-    .badge.online { background: #064e3b; color: #6ee7b7; }
-    .badge.offline { background: #78350f; color: #fcd34d; }
-    .badge.busy { background: #1e3a5f; color: #7dd3fc; }
-    .badge.dead { background: #7f1d1d; color: #fca5a5; }
-    .badge.pending { background: #334155; color: #94a3b8; }
-    .badge.running { background: #1e3a5f; color: #7dd3fc; }
-    .badge.completed { background: #064e3b; color: #6ee7b7; }
-    .badge.failed { background: #7f1d1d; color: #fca5a5; }
-    .badge.dispatched { background: #3b0764; color: #d8b4fe; }
+    .shell { max-width: 1720px; margin: 0 auto; padding: 22px; }
+    body.embedded .shell { max-width: none; padding: 12px; }
+    body.compact .shell { padding: 12px; }
 
-    .stats { display: flex; gap: 16px; padding: 16px; }
-    .stat-card { flex: 1; background: #0f172a; border-radius: 6px; padding: 16px; text-align: center; }
-    .stat-card .number { font-size: 28px; font-weight: 700; }
-    .stat-card .label { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 20px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+    }
+    body.compact .topbar { padding: 12px 14px; border-radius: 16px; }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .logo {
+      width: 44px; height: 44px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--blue), var(--purple));
+      display: grid; place-items: center; font-size: 24px;
+      box-shadow: 0 12px 34px rgba(56, 189, 248, 0.25);
+      flex: 0 0 auto;
+    }
+    h1 { margin: 0; font-size: 22px; letter-spacing: -0.03em; color: var(--text-strong); }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .top-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+    .status-line { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; flex-wrap: wrap; }
 
-    .event-log { font-family: 'SF Mono', Monaco, monospace; font-size: 12px; padding: 12px 16px; }
-    .event-log .event { padding: 4px 0; border-bottom: 1px solid #1e293b; }
-    .event-log .time { color: #64748b; margin-right: 8px; }
-    .event-log .type { color: #7dd3fc; margin-right: 8px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.1); }
+    .dot.green { background: var(--green); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16); }
+    .dot.red { background: var(--red); box-shadow: 0 0 0 3px rgba(251, 113, 133, 0.16); }
+    .dot.yellow { background: var(--yellow); box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.16); }
 
-    .btn { padding: 4px 12px; border-radius: 4px; border: 1px solid #475569; background: #334155; color: #e2e8f0; cursor: pointer; font-size: 12px; }
-    .btn:hover { background: #475569; }
-    .btn.danger { border-color: #dc2626; color: #fca5a5; }
-    .btn.danger:hover { background: #7f1d1d; }
+    .btn {
+      border: 1px solid rgba(148, 163, 184, 0.26);
+      color: var(--text);
+      background: rgba(30, 41, 59, 0.82);
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: 0.16s ease;
+    }
+    body.light .btn { background: rgba(255, 255, 255, 0.92); }
+    .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.55); background: rgba(51, 65, 85, 0.95); }
+    body.light .btn:hover { background: rgba(241, 245, 249, 0.95); }
+    .btn.primary { border-color: rgba(56, 189, 248, 0.6); background: linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(124, 58, 237, 0.9)); color: white; }
+
+    .context-bar {
+      margin-top: 14px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      background: rgba(14, 165, 233, 0.08);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .context-bar.show { display: flex; }
+
+    .stats-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+    body.embedded .stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    body.compact .stats-grid { gap: 10px; }
+    .stat-card {
+      padding: 16px;
+      border-radius: 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14);
+      min-height: 98px;
+    }
+    body.compact .stat-card { padding: 12px; min-height: 82px; border-radius: 14px; }
+    .stat-value { font-size: 29px; font-weight: 800; letter-spacing: -0.04em; color: var(--text-strong); line-height: 1; }
+    .stat-label { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .stat-hint { margin-top: 8px; color: #64748b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .main-grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: 390px minmax(540px, 1fr) 430px;
+      gap: 16px;
+      align-items: start;
+    }
+    body.embedded .main-grid { grid-template-columns: minmax(420px, 1fr) 390px; }
+    body.embedded .hide-embedded { display: none; }
+    .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .panel {
+      border-radius: 20px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
+      overflow: hidden;
+      min-width: 0;
+    }
+    body.compact .panel { border-radius: 16px; }
+    .panel-header {
+      padding: 14px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(15, 23, 42, 0.42);
+    }
+    body.light .panel-header { background: rgba(241, 245, 249, 0.72); }
+    .panel-title { font-weight: 750; color: var(--text-strong); font-size: 14px; }
+    .panel-subtitle { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .panel-body { padding: 14px; }
+    .scroll { max-height: 530px; overflow: auto; }
+    .scroll.small { max-height: 330px; }
+    body.embedded .scroll { max-height: 430px; }
+    .empty { color: var(--muted); font-size: 13px; line-height: 1.6; padding: 16px; text-align: center; border: 1px dashed rgba(148, 163, 184, 0.18); border-radius: 14px; }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(51, 65, 85, 0.35);
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.3;
+      white-space: nowrap;
+    }
+    body.light .pill { color: #334155; background: rgba(241, 245, 249, 0.85); }
+    .pill.online, .pill.completed, .pill.done { color: #86efac; background: rgba(20, 83, 45, 0.22); border-color: rgba(52, 211, 153, 0.22); }
+    .pill.running, .pill.busy, .pill.active { color: #7dd3fc; background: rgba(7, 89, 133, 0.22); border-color: rgba(56, 189, 248, 0.25); }
+    .pill.pending, .pill.dispatched { color: #fde68a; background: rgba(113, 63, 18, 0.18); border-color: rgba(251, 191, 36, 0.2); }
+    .pill.failed, .pill.dead, .pill.error { color: #fda4af; background: rgba(127, 29, 29, 0.22); border-color: rgba(251, 113, 133, 0.24); }
+    .pill.offline, .pill.skipped { color: #cbd5e1; background: rgba(71, 85, 105, 0.28); border-color: rgba(148, 163, 184, 0.18); }
+    .pill.info, .pill.codex, .pill.opencode, .pill.claude-code { color: #c4b5fd; background: rgba(91, 33, 182, 0.2); border-color: rgba(192, 132, 252, 0.2); }
+
+    .workflow-card, .agent-card, .task-row, .session-card, .node {
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: rgba(15, 23, 42, 0.54);
+      border-radius: 16px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    body.light .workflow-card, body.light .agent-card, body.light .task-row, body.light .session-card, body.light .node { background: rgba(248, 250, 252, 0.82); }
+    .workflow-card { cursor: pointer; transition: 0.15s ease; }
+    .workflow-card:hover, .workflow-card.selected { border-color: rgba(56, 189, 248, 0.52); background: rgba(14, 165, 233, 0.11); }
+    .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .title { color: var(--text-strong); font-size: 13px; font-weight: 750; line-height: 1.35; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .desc { color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 7px; }
+    .meta { color: #64748b; font-size: 11px; margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    .detail-hero {
+      padding: 16px;
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(124, 58, 237, 0.1));
+    }
+    .detail-title { font-size: 20px; font-weight: 820; color: var(--text-strong); margin: 8px 0; letter-spacing: -0.03em; }
+    .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .kv { padding: 10px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.12); background: rgba(15, 23, 42, 0.36); min-width: 0; }
+    body.light .kv { background: rgba(255, 255, 255, 0.72); }
+    .kv .k { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+    .kv .v { color: var(--text-strong); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .node { margin-bottom: 0; }
+    .nodes { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .node-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .node-prompt { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.45; max-height: 52px; overflow: hidden; }
+    .node-result { color: #cbd5e1; font-size: 12px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(148, 163, 184, 0.16); line-height: 1.45; max-height: 92px; overflow: hidden; white-space: pre-wrap; }
+    body.light .node-result { color: #475569; }
+
+    .progress-line { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+    .step { border: 1px solid rgba(148, 163, 184, 0.14); background: rgba(15, 23, 42, 0.42); border-radius: 14px; padding: 12px; min-height: 82px; }
+    body.light .step { background: rgba(255, 255, 255, 0.66); }
+    .step.done { border-color: rgba(52, 211, 153, 0.34); }
+    .step.active { border-color: rgba(56, 189, 248, 0.48); box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.08); }
+    .step.failed { border-color: rgba(251, 113, 133, 0.44); }
+    .step-icon { font-size: 18px; }
+    .step-name { margin-top: 8px; font-weight: 750; font-size: 12px; color: var(--text-strong); }
+    .step-note { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+
+    .agent-card.busy { border-color: rgba(56, 189, 248, 0.34); }
+    .agent-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+    .agent-name { font-weight: 800; color: var(--text-strong); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+    .agent-work { margin-top: 10px; padding: 9px; border-radius: 12px; background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(56, 189, 248, 0.16); color: #bfdbfe; font-size: 11px; line-height: 1.45; }
+    body.light .agent-work { color: #075985; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { color: var(--muted); text-align: left; font-weight: 650; padding: 9px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 9px 8px; border-bottom: 1px solid rgba(148, 163, 184, 0.08); vertical-align: top; }
+
+    .event-log { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; display: flex; flex-direction: column; gap: 8px; }
+    .event { padding: 8px 10px; border: 1px solid rgba(148, 163, 184, 0.12); border-radius: 12px; background: rgba(15, 23, 42, 0.42); }
+    body.light .event { background: rgba(255, 255, 255, 0.74); }
+    .event .time { color: #64748b; margin-right: 8px; }
+    .event .type { color: var(--blue); margin-right: 8px; font-weight: 750; }
+    .event .data { color: #cbd5e1; word-break: break-word; }
+    body.light .event .data { color: #475569; }
+
+    .filter-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .chip {
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 999px;
+      background: rgba(51, 65, 85, 0.24);
+      color: var(--muted);
+      padding: 5px 9px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .chip.active { color: var(--text-strong); border-color: rgba(56, 189, 248, 0.5); background: rgba(14, 165, 233, 0.16); }
+
+    @media (max-width: 1280px) {
+      .main-grid, body.embedded .main-grid { grid-template-columns: 1fr; }
+      .hide-embedded { display: block; }
+      .stats-grid, body.embedded .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .shell { padding: 12px; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .stats-grid { grid-template-columns: 1fr 1fr; }
+      .detail-grid, .progress-line { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Meta-Agent Dashboard</h1>
-    <div class="status">
-      <span><span class="dot green" id="sse-dot"></span>SSE <span id="sse-status">connecting...</span></span>
-      <span id="clock"></span>
-    </div>
-  </div>
-
-  <div class="container">
-    <!-- Stats -->
-    <div class="panel full-width">
-      <div class="stats" id="stats">
-        <div class="stat-card"><div class="number" id="stat-total">-</div><div class="label">Total Agents</div></div>
-        <div class="stat-card"><div class="number" style="color:#22c55e" id="stat-online">-</div><div class="label">Online</div></div>
-        <div class="stat-card"><div class="number" style="color:#eab308" id="stat-offline">-</div><div class="label">Offline</div></div>
-        <div class="stat-card"><div class="number" style="color:#ef4444" id="stat-dead">-</div><div class="label">Dead</div></div>
-        <div class="stat-card"><div class="number" style="color:#7dd3fc" id="stat-tasks">-</div><div class="label">Tasks Today</div></div>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">🧠</div>
+        <div>
+          <h1 id="page-title">MAF Console</h1>
+          <div class="subtitle" id="page-subtitle">Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件</div>
+        </div>
       </div>
-    </div>
-
-    <!-- Agents -->
-    <div class="panel">
-      <div class="panel-header">Registered Agents <button class="btn" onclick="refreshAgents()">Refresh</button></div>
-      <div class="panel-body">
-        <table><thead><tr><th>Name</th><th>Status</th><th>Endpoint</th><th>Actions</th></tr></thead>
-        <tbody id="agents-table"></tbody></table>
+      <div class="top-actions">
+        <div class="status-line">
+          <span><span class="dot yellow" id="sse-dot"></span>SSE <span id="sse-status">connecting...</span></span>
+          <span id="mode-label">global</span>
+          <span id="clock">--:--:--</span>
+          <span id="last-refresh">未刷新</span>
+        </div>
+        <button class="btn" id="refresh-btn">刷新</button>
       </div>
-    </div>
+    </header>
 
-    <!-- Tasks -->
-    <div class="panel">
-      <div class="panel-header">Tasks <button class="btn" onclick="refreshTasks()">Refresh</button></div>
-      <div class="panel-body">
-        <table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Time</th></tr></thead>
-        <tbody id="tasks-table"></tbody></table>
+    <section class="context-bar" id="context-bar"></section>
+
+    <section class="stats-grid">
+      <div class="stat-card"><div class="stat-value" id="stat-server">-</div><div class="stat-label">Server</div><div class="stat-hint" id="hint-server">/api/health</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-agents">-</div><div class="stat-label">Agents Online</div><div class="stat-hint" id="hint-agents">online / total</div></div>
+      <div class="stat-card"><div class="stat-value" style="color: var(--blue)" id="stat-busy">-</div><div class="stat-label">Busy Agents</div><div class="stat-hint">heartbeat / workflow</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-workflows">-</div><div class="stat-label">Running Workflows</div><div class="stat-hint" id="hint-workflows">filtered / total</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-mas">-</div><div class="stat-label">Active MAS Sessions</div><div class="stat-hint">Meta-Agent-Server</div></div>
+      <div class="stat-card"><div class="stat-value" id="stat-tasks">-</div><div class="stat-label">Open Tasks</div><div class="stat-hint">pending / running / dispatched</div></div>
+    </section>
+
+    <main class="main-grid">
+      <section class="stack hide-embedded">
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title">Workflow Focus</div><div class="panel-subtitle">选择一个 workflow 查看执行详情</div></div>
+            <span class="pill running" id="workflow-focus-count">0</span>
+          </div>
+          <div class="panel-body">
+            <div class="filter-row" id="workflow-filters"></div>
+            <div class="scroll" id="workflow-list"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title">MAS Sessions</div><div class="panel-subtitle">Meta-Agent-Server 分诊 / 编排会话</div></div>
+            <span class="pill active" id="session-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="session-list"></div>
+        </div>
+      </section>
+
+      <section class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title">Workflow Detail</div><div class="panel-subtitle">DAG 节点、执行结果和上下文</div></div>
+            <span class="pill unknown" id="selected-status">none</span>
+          </div>
+          <div class="panel-body" id="workflow-detail"></div>
+        </div>
+
+        <div class="panel hide-embedded">
+          <div class="panel-header">
+            <div><div class="panel-title">Tasks</div><div class="panel-subtitle">传统任务队列 / Agent 回报</div></div>
+            <span class="pill pending" id="task-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="task-list"></div>
+        </div>
+      </section>
+
+      <section class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <div><div class="panel-title">Agent Board</div><div class="panel-subtitle">在线状态、runtime、版本和能力</div></div>
+            <span class="pill online" id="agent-count">0</span>
+          </div>
+          <div class="panel-body scroll" id="agent-board"></div>
+        </div>
+
+        <div class="panel hide-embedded">
+          <div class="panel-header">
+            <div><div class="panel-title">Runtime Context</div><div class="panel-subtitle">Server / Registry / Filter 状态</div></div>
+            <span class="pill info" id="context-mode">global</span>
+          </div>
+          <div class="panel-body" id="runtime-context"></div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel" style="margin-top:16px;">
+      <div class="panel-header">
+        <div><div class="panel-title">Live Event Log</div><div class="panel-subtitle">/api/events SSE 实时事件</div></div>
+        <button class="btn" id="clear-events-btn">清空</button>
       </div>
-    </div>
-
-    <!-- Event Log -->
-    <div class="panel full-width">
-      <div class="panel-header">Event Log (Live)</div>
-      <div class="panel-body event-log" id="event-log" style="max-height:250px;"></div>
-    </div>
+      <div class="panel-body scroll small"><div class="event-log" id="event-log"></div></div>
+    </section>
   </div>
 
   <script>
-    const API = '';
+    const API = location.origin;
+    const params = new URLSearchParams(location.search);
+    const config = {
+      embedded: params.get('embed') === '1' || location.pathname.startsWith('/embed'),
+      compact: params.get('compact') === '1' || params.get('compact') === 'true',
+      readonly: params.get('readonly') !== 'false',
+      theme: params.get('theme') || 'dark',
+      workflowId: params.get('workflow_id') || params.get('workflow') || '',
+      agentName: params.get('agent_name') || params.get('agent') || '',
+      originId: params.get('origin_id') || params.get('origin') || '',
+    };
 
-    // --- SSE ---
-    function connectSSE() {
-      const es = new EventSource(`${API}/api/events`);
-      es.addEventListener('connected', () => {
-        document.getElementById('sse-dot').className = 'dot green';
-        document.getElementById('sse-status').textContent = 'connected';
-      });
-      ['agent_registered','agent_offline','agent_dead','task_created','task_dispatched','task_completed','task_failed'].forEach(evt => {
-        es.addEventListener(evt, (e) => {
-          const data = JSON.parse(e.data);
-          addEvent(data);
-          refreshAgents();
-          refreshTasks();
-          refreshStats();
-        });
-      });
-      es.onerror = () => {
-        document.getElementById('sse-dot').className = 'dot red';
-        document.getElementById('sse-status').textContent = 'disconnected';
+    const EVENT_TYPES = [
+      'workflow_started', 'workflow_completed', 'workflow_failed',
+      'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed',
+      'client_registered', 'client_offline', 'client_dead', 'client_revived',
+      'task_created', 'task_dispatched', 'task_completed', 'task_failed',
+      'proposal_created', 'proposal_reviewed', 'proposal_applied',
+      'evolve_started', 'evolve_completed', 'evolve_failed', 'ota_started', 'ota_completed'
+    ];
+
+    const state = {
+      health: null,
+      agents: [], tasks: [], workflows: [], sessions: [], events: [],
+      selectedWorkflowId: config.workflowId || null,
+      statusFilter: 'all',
+      lastError: '',
+    };
+
+    function $(id) { return document.getElementById(id); }
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+    }
+    function short(value, len = 120) {
+      const s = String(value ?? '');
+      return s.length > len ? s.slice(0, len - 1) + '…' : s;
+    }
+    function time(value) {
+      if (!value) return '-';
+      const d = new Date(value);
+      return Number.isNaN(d.getTime()) ? short(value, 24) : d.toLocaleString();
+    }
+    function pill(status, label) {
+      const s = String(status || 'unknown');
+      return `<span class="pill ${escapeHtml(s)}">${escapeHtml(label || s)}</span>`;
+    }
+    function statusClass(status) {
+      const s = String(status || 'unknown');
+      if (['online', 'completed', 'done'].includes(s)) return 'online';
+      if (['running', 'busy', 'active'].includes(s)) return 'running';
+      if (['pending', 'dispatched'].includes(s)) return 'pending';
+      if (['failed', 'dead', 'error'].includes(s)) return 'failed';
+      if (['offline', 'skipped'].includes(s)) return 'offline';
+      return 'unknown';
+    }
+    function parseJson(value, fallback) {
+      if (Array.isArray(value) || (value && typeof value === 'object')) return value;
+      try { return JSON.parse(value || ''); } catch { return fallback; }
+    }
+    function stringifySmall(value, len = 220) {
+      if (value === undefined || value === null || value === '') return '-';
+      const text = typeof value === 'string' ? value : JSON.stringify(value);
+      return short(text, len);
+    }
+    function nodeList(workflow) { return Array.isArray(workflow?.nodes) ? workflow.nodes : []; }
+
+    async function apiGet(path, fallback) {
+      try {
+        const res = await fetch(`${API}${path}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } catch (err) {
+        state.lastError = `${path}: ${err.message}`;
+        return fallback;
+      }
+    }
+
+    function originMatches(workflow) {
+      if (!config.originId) return true;
+      const origin = workflow?.origin || workflow?.metadata?.origin || {};
+      const haystack = [workflow?.id, workflow?.title, ...Object.values(origin || {})]
+        .filter(v => v !== undefined && v !== null)
+        .map(v => typeof v === 'string' ? v : JSON.stringify(v))
+        .join('\n');
+      return haystack.includes(config.originId);
+    }
+
+    function agentMatches(workflow) {
+      if (!config.agentName) return true;
+      return nodeList(workflow).some(n => n.agent_name === config.agentName) || workflow?.agent_name === config.agentName;
+    }
+
+    function visibleWorkflows() {
+      let items = state.workflows.filter(originMatches).filter(agentMatches);
+      if (config.workflowId) items = items.filter(w => w.id === config.workflowId || w.workflow_id === config.workflowId);
+      if (state.statusFilter !== 'all') items = items.filter(w => (w.status || 'unknown') === state.statusFilter);
+      return items.slice().sort((a, b) => String(b.created_at || b.started_at || '').localeCompare(String(a.created_at || a.started_at || '')));
+    }
+
+    function selectedWorkflow() {
+      const visible = visibleWorkflows();
+      if (state.selectedWorkflowId) {
+        const found = visible.find(w => w.id === state.selectedWorkflowId || w.workflow_id === state.selectedWorkflowId);
+        if (found) return found;
+      }
+      return visible[0] || null;
+    }
+
+    async function refreshAll() {
+      const [health, agents, tasks, workflows, sessions] = await Promise.all([
+        apiGet('/api/health', null),
+        apiGet('/api/agents?all=true', []),
+        apiGet('/api/tasks?limit=80', []),
+        apiGet('/api/workflows', []),
+        apiGet('/api/workflows/mas/sessions', []),
+      ]);
+
+      state.health = health;
+      state.agents = Array.isArray(agents) ? agents : [];
+      state.tasks = Array.isArray(tasks) ? tasks : [];
+      state.workflows = Array.isArray(workflows) ? workflows : [];
+      state.sessions = Array.isArray(sessions) ? sessions : [];
+
+      const visible = visibleWorkflows();
+      if (!state.selectedWorkflowId || !visible.some(w => w.id === state.selectedWorkflowId || w.workflow_id === state.selectedWorkflowId)) {
+        state.selectedWorkflowId = visible[0]?.id || visible[0]?.workflow_id || null;
+      }
+
+      renderAll();
+      $('last-refresh').textContent = `刷新 ${new Date().toLocaleTimeString()}`;
+      notifyResize();
+    }
+
+    function renderAll() {
+      renderContextBar();
+      renderStats();
+      renderWorkflowFilters();
+      renderWorkflowList();
+      renderWorkflowDetail();
+      renderAgents();
+      renderSessions();
+      renderTasks();
+      renderRuntimeContext();
+      renderEvents();
+    }
+
+    function renderContextBar() {
+      const items = [];
+      if (config.embedded) items.push('embedded');
+      if (config.workflowId) items.push(`workflow_id=${config.workflowId}`);
+      if (config.agentName) items.push(`agent_name=${config.agentName}`);
+      if (config.originId) items.push(`origin_id=${config.originId}`);
+      const bar = $('context-bar');
+      if (!items.length) { bar.className = 'context-bar'; bar.innerHTML = ''; return; }
+      bar.className = 'context-bar show';
+      bar.innerHTML = `<div>当前过滤上下文：<span class="mono">${escapeHtml(items.join(' · '))}</span></div><div>${pill(config.readonly ? 'info' : 'active', config.readonly ? 'readonly' : 'actions-enabled')}</div>`;
+    }
+
+    function renderStats() {
+      const visible = visibleWorkflows();
+      const online = state.agents.filter(a => a.status === 'online' || a.status === 'busy').length;
+      const busy = state.agents.filter(a => a.status === 'busy').length + visible.flatMap(nodeList).filter(n => n.status === 'running').length;
+      const runningWf = visible.filter(w => w.status === 'running').length;
+      const activeSessions = state.sessions.filter(s => !['completed', 'failed'].includes(s.status)).length;
+      const openTasks = state.tasks.filter(t => ['pending', 'running', 'dispatched'].includes(t.status)).length;
+
+      $('stat-server').textContent = state.health?.ok ? 'OK' : '-';
+      $('hint-server').textContent = state.health?.server_version ? `v${state.health.server_version}` : (state.lastError || '等待 Server');
+      $('stat-agents').textContent = online;
+      $('hint-agents').textContent = `${online} / ${state.agents.length}`;
+      $('stat-busy').textContent = busy || 0;
+      $('stat-workflows').textContent = runningWf;
+      $('hint-workflows').textContent = `${visible.length} / ${state.workflows.length}`;
+      $('stat-mas').textContent = activeSessions || 0;
+      $('stat-tasks').textContent = openTasks || 0;
+    }
+
+    function renderWorkflowFilters() {
+      const statuses = ['all', 'running', 'pending', 'completed', 'failed'];
+      $('workflow-filters').innerHTML = statuses.map(s => `<button class="chip ${state.statusFilter === s ? 'active' : ''}" data-status-filter="${s}">${s}</button>`).join('');
+    }
+
+    function renderWorkflowList() {
+      const list = visibleWorkflows();
+      $('workflow-focus-count').textContent = list.length;
+      $('workflow-list').innerHTML = list.map(w => {
+        const nodes = nodeList(w);
+        const running = nodes.filter(n => n.status === 'running').length;
+        const completed = nodes.filter(n => n.status === 'completed').length;
+        const failed = nodes.filter(n => n.status === 'failed').length;
+        const id = w.id || w.workflow_id;
+        return `
+          <div class="workflow-card ${id === state.selectedWorkflowId ? 'selected' : ''}" data-workflow-id="${escapeHtml(id)}">
+            <div class="row">
+              <div class="title">${escapeHtml(w.title || id || 'Untitled workflow')}</div>
+              ${pill(w.status)}
+            </div>
+            <div class="desc">${escapeHtml(short(w.description || w.reason || stringifySmall(w.origin, 110), 130))}</div>
+            <div class="meta">
+              <span class="mono">${escapeHtml(id || '-')}</span>
+              <span>nodes ${nodes.length}</span>
+              <span>✅ ${completed}</span><span>🔵 ${running}</span><span>❌ ${failed}</span>
+              <span>${time(w.created_at || w.started_at)}</span>
+            </div>
+          </div>`;
+      }).join('') || '<div class="empty">暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。</div>';
+    }
+
+    function renderWorkflowDetail() {
+      const workflow = selectedWorkflow();
+      if (!workflow) {
+        $('selected-status').textContent = 'none';
+        $('selected-status').className = 'pill unknown';
+        $('workflow-detail').innerHTML = '<div class="empty">暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。</div>';
+        return;
+      }
+
+      const id = workflow.id || workflow.workflow_id;
+      $('selected-status').textContent = workflow.status || 'unknown';
+      $('selected-status').className = `pill ${statusClass(workflow.status)}`;
+      const nodes = nodeList(workflow);
+      const counts = {
+        pending: nodes.filter(n => n.status === 'pending').length,
+        running: nodes.filter(n => n.status === 'running').length,
+        completed: nodes.filter(n => n.status === 'completed').length,
+        failed: nodes.filter(n => n.status === 'failed').length,
+        skipped: nodes.filter(n => n.status === 'skipped').length,
       };
+      const stepState = (kind) => {
+        if (workflow.status === 'failed' && kind === 'result') return 'failed';
+        if (workflow.status === 'completed' && kind === 'result') return 'done';
+        if (workflow.status === 'running' && kind === 'execute') return 'active';
+        if (kind === 'created' || (kind === 'dispatch' && nodes.length)) return 'done';
+        return '';
+      };
+
+      $('workflow-detail').innerHTML = `
+        <div class="detail-hero">
+          <div>${pill(workflow.status)} ${workflow.failure_policy ? pill('info', workflow.failure_policy) : ''}</div>
+          <div class="detail-title">${escapeHtml(workflow.title || id || 'Untitled workflow')}</div>
+          <div class="desc">${escapeHtml(short(workflow.description || workflow.reason || stringifySmall(workflow.origin, 260), 320))}</div>
+          <div class="detail-grid">
+            <div class="kv"><div class="k">Workflow ID</div><div class="v mono">${escapeHtml(id || '-')}</div></div>
+            <div class="kv"><div class="k">Origin</div><div class="v">${escapeHtml(stringifySmall(workflow.origin, 90))}</div></div>
+            <div class="kv"><div class="k">Notify</div><div class="v">${escapeHtml(stringifySmall(workflow.notify, 90))}</div></div>
+            <div class="kv"><div class="k">Created</div><div class="v">${time(workflow.created_at || workflow.started_at)}</div></div>
+            <div class="kv"><div class="k">Completed</div><div class="v">${time(workflow.completed_at)}</div></div>
+            <div class="kv"><div class="k">Nodes</div><div class="v">${nodes.length} nodes · ✅${counts.completed} 🔵${counts.running} ❌${counts.failed} ⏭${counts.skipped}</div></div>
+          </div>
+        </div>
+        <div class="progress-line">
+          <div class="step ${stepState('created')}"><div class="step-icon">📥</div><div class="step-name">Created</div><div class="step-note">任务进入 MAF 控制面</div></div>
+          <div class="step ${stepState('dispatch')}"><div class="step-icon">🧭</div><div class="step-name">Dispatch</div><div class="step-note">按 agent_name 路由到节点</div></div>
+          <div class="step ${stepState('execute')}"><div class="step-icon">⚙️</div><div class="step-name">Execute</div><div class="step-note">${counts.running ? `${counts.running} 节点运行中` : '等待执行或已结束'}</div></div>
+          <div class="step ${stepState('result')}"><div class="step-icon">${workflow.status === 'failed' ? '❌' : '✅'}</div><div class="step-name">Result</div><div class="step-note">${workflow.status || 'pending'}</div></div>
+        </div>
+        <div class="nodes">
+          ${nodes.map(n => `
+            <div class="node">
+              <div class="node-main">
+                <div>
+                  <div class="title">[${escapeHtml(n.id)}] ${escapeHtml(n.agent_name || '-')}</div>
+                  <div class="meta">
+                    ${pill(n.status)}
+                    ${n.intent ? pill('info', n.intent) : ''}
+                    ${n.scope ? `<span>${escapeHtml(n.scope)}</span>` : ''}
+                    ${(n.depends_on || []).length ? `<span>depends: ${escapeHtml((n.depends_on || []).join(', '))}</span>` : ''}
+                  </div>
+                </div>
+                ${pill(n.runtime || 'agent')}
+              </div>
+              ${n.prompt ? `<div class="node-prompt">${escapeHtml(short(n.prompt, 260))}</div>` : ''}
+              ${n.result ? `<div class="node-result">${escapeHtml(short(n.result, 900))}</div>` : ''}
+            </div>
+          `).join('') || '<div class="empty">该 workflow 暂无节点信息。</div>'}
+        </div>`;
     }
 
-    function addEvent(evt) {
-      const log = document.getElementById('event-log');
-      const div = document.createElement('div');
-      div.className = 'event';
-      const time = new Date(evt.timestamp).toLocaleTimeString();
-      div.innerHTML = `<span class="time">${time}</span><span class="type">${evt.type}</span>${JSON.stringify(evt.data)}`;
-      log.prepend(div);
-      // 限制 100 条
-      while (log.children.length > 100) log.removeChild(log.lastChild);
+    function workflowAgents() {
+      const workflow = selectedWorkflow();
+      const names = new Set(nodeList(workflow).map(n => n.agent_name).filter(Boolean));
+      return names;
     }
 
-    // --- Data ---
-    async function refreshAgents() {
-      const res = await fetch(`${API}/api/agents`);
-      const agents = await res.json();
-      const tbody = document.getElementById('agents-table');
-      tbody.innerHTML = agents.map(a => `
-        <tr>
-          <td><strong>${a.name}</strong></td>
-          <td><span class="badge ${a.status}">${a.status}</span></td>
-          <td style="font-size:11px;color:#64748b">${a.endpoint}</td>
-          <td>
-            ${a.status === 'dead' ? `<button class="btn danger" onclick="restartAgent('${a.id}')">Restart</button>` : ''}
-          </td>
-        </tr>
-      `).join('');
+    function renderAgents() {
+      const involved = workflowAgents();
+      let agents = state.agents;
+      if (config.agentName) agents = agents.filter(a => a.agent_name === config.agentName);
+      else if (config.embedded && involved.size) agents = agents.filter(a => involved.has(a.agent_name));
+      $('agent-count').textContent = agents.length;
+      $('agent-board').innerHTML = agents.map(a => {
+        const skills = parseJson(a.skills, []);
+        const mcps = parseJson(a.mcps, []);
+        const activeNode = visibleWorkflows().flatMap(w => nodeList(w).map(n => ({ ...n, workflow: w }))).find(n => n.agent_name === a.agent_name && n.status === 'running');
+        return `
+          <div class="agent-card ${escapeHtml(a.status || '')}">
+            <div class="agent-top">
+              <div>
+                <div class="agent-name">${escapeHtml(a.agent_name)}</div>
+                <div class="meta"><span>${escapeHtml(a.user_id || '-') }@${escapeHtml(a.host_user || '-')}</span><span>${escapeHtml(a.runtime || 'opencode')}</span></div>
+              </div>
+              ${pill(a.status)}
+            </div>
+            <div class="meta">
+              <span class="mono">${escapeHtml(a.client_endpoint || '-')}</span>
+              ${a.daemon_port ? `<span>daemon:${escapeHtml(a.daemon_port)}</span>` : ''}
+              ${a.client_version ? `<span>v${escapeHtml(a.client_version)}</span>` : ''}
+              <span>skills:${Array.isArray(skills) ? skills.length : 0}</span>
+              <span>mcps:${Array.isArray(mcps) ? mcps.length : 0}</span>
+              <span>${time(a.last_heartbeat)}</span>
+            </div>
+            ${activeNode ? `<div class="agent-work">当前节点：${escapeHtml(activeNode.workflow.title || activeNode.workflow.id)} / ${escapeHtml(activeNode.id)}</div>` : ''}
+          </div>`;
+      }).join('') || '<div class="empty">暂无 agent 数据。</div>';
     }
 
-    async function refreshTasks() {
-      const res = await fetch(`${API}/api/tasks?limit=20`);
-      const tasks = await res.json();
-      const tbody = document.getElementById('tasks-table');
-      tbody.innerHTML = tasks.map(t => `
-        <tr>
-          <td>${t.title}</td>
-          <td><span class="badge ${t.status}">${t.status}</span></td>
-          <td>${t.assigned_agent_name || '-'}</td>
-          <td style="font-size:11px;color:#64748b">${new Date(t.created_at).toLocaleTimeString()}</td>
-        </tr>
-      `).join('');
+    function renderSessions() {
+      $('session-count').textContent = state.sessions.length;
+      $('session-list').innerHTML = state.sessions.slice(0, 30).map(s => `
+        <div class="session-card">
+          <div class="row"><div class="title">${escapeHtml(s.title || s.id || 'MAS session')}</div>${pill(s.status || 'active')}</div>
+          <div class="meta"><span class="mono">${escapeHtml(s.id || s.session_id || '-')}</span><span>${(s.rounds || []).length || s.round_count || 0} rounds</span><span>${time(s.updated_at || s.created_at)}</span></div>
+          ${s.latest_output || s.summary ? `<div class="desc">${escapeHtml(short(s.latest_output || s.summary, 180))}</div>` : ''}
+        </div>`).join('') || '<div class="empty">暂无 MAS session。调用 /api/workflows/mas/task 后会出现。</div>';
     }
 
-    async function refreshStats() {
-      const res = await fetch(`${API}/api/agents/stats`);
-      const s = await res.json();
-      document.getElementById('stat-total').textContent = s.total;
-      document.getElementById('stat-online').textContent = s.online;
-      document.getElementById('stat-offline').textContent = s.offline;
-      document.getElementById('stat-dead').textContent = s.dead;
-      // tasks count
-      const tres = await fetch(`${API}/api/tasks?limit=1000`);
-      const tasks = await tres.json();
-      document.getElementById('stat-tasks').textContent = tasks.length;
+    function renderTasks() {
+      const tasks = state.tasks.slice().sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
+      $('task-count').textContent = tasks.length;
+      $('task-list').innerHTML = tasks.slice(0, 40).map(t => `
+        <div class="task-row">
+          <div class="row"><div class="title">${escapeHtml(t.title || t.id || 'Task')}</div>${pill(t.status)}</div>
+          <div class="desc">${escapeHtml(short(t.description || t.result || '', 160))}</div>
+          <div class="meta"><span class="mono">${escapeHtml(t.id || '-')}</span><span>${escapeHtml(t.assigned_agent_name || t.target_agent || '-')}</span><span>${time(t.updated_at || t.created_at)}</span></div>
+        </div>`).join('') || '<div class="empty">暂无传统 task 数据。</div>';
     }
 
-    async function restartAgent(id) {
-      const res = await fetch(`${API}/api/agents/${id}/restart`, { method: 'POST' });
-      const data = await res.json();
-      alert(data.message);
-      refreshAgents();
+    function renderRuntimeContext() {
+      const registry = state.health?.registry || state.health?.registry_type || '-';
+      $('context-mode').textContent = config.embedded ? 'embedded' : 'global';
+      $('runtime-context').innerHTML = `
+        <div class="detail-grid" style="grid-template-columns:1fr;">
+          <div class="kv"><div class="k">Server URL</div><div class="v mono">${escapeHtml(API)}</div></div>
+          <div class="kv"><div class="k">Server Version</div><div class="v">${escapeHtml(state.health?.server_version || '-')}</div></div>
+          <div class="kv"><div class="k">Client Minimum</div><div class="v">${escapeHtml(state.health?.client_min_version || '-')}</div></div>
+          <div class="kv"><div class="k">Registry</div><div class="v">${escapeHtml(stringifySmall(registry, 120))}</div></div>
+          <div class="kv"><div class="k">Filter</div><div class="v mono">${escapeHtml(location.search || 'none')}</div></div>
+        </div>`;
     }
 
-    // --- Clock ---
-    setInterval(() => {
-      document.getElementById('clock').textContent = new Date().toLocaleTimeString();
-    }, 1000);
+    function eventRelevant(event) {
+      if (!config.embedded && !config.workflowId && !config.agentName && !config.originId) return true;
+      const data = event?.data || event || {};
+      const text = JSON.stringify(data);
+      if (config.workflowId && text.includes(config.workflowId)) return true;
+      if (config.agentName && text.includes(config.agentName)) return true;
+      if (config.originId && text.includes(config.originId)) return true;
+      return false;
+    }
 
-    // --- Init ---
-    connectSSE();
-    refreshAgents();
-    refreshTasks();
-    refreshStats();
+    function renderEvents() {
+      const items = state.events.filter(eventRelevant).slice(0, 80);
+      $('event-log').innerHTML = items.map(e => `
+        <div class="event">
+          <span class="time">${time(e.timestamp || new Date())}</span>
+          <span class="type">${escapeHtml(e.type || 'event')}</span>
+          <span class="data">${escapeHtml(short(JSON.stringify(e.data ?? e), 900))}</span>
+        </div>`).join('') || '<div class="empty">等待 SSE 事件。</div>';
+    }
+
+    function addEvent(event) {
+      state.events.unshift(event);
+      state.events = state.events.slice(0, 160);
+      renderEvents();
+      notifyResize();
+    }
+
+    function connectSSE() {
+      try {
+        const es = new EventSource(`${API}/api/events`);
+        es.addEventListener('connected', (event) => {
+          $('sse-dot').className = 'dot green';
+          $('sse-status').textContent = 'connected';
+          try { addEvent({ type: 'connected', data: JSON.parse(event.data), timestamp: new Date().toISOString() }); } catch {}
+        });
+        for (const type of EVENT_TYPES) {
+          es.addEventListener(type, (event) => {
+            try { addEvent(JSON.parse(event.data)); } catch { addEvent({ type, data: event.data, timestamp: new Date().toISOString() }); }
+            scheduleRefresh();
+          });
+        }
+        es.onerror = () => {
+          $('sse-dot').className = 'dot red';
+          $('sse-status').textContent = 'disconnected';
+        };
+      } catch (err) {
+        $('sse-dot').className = 'dot red';
+        $('sse-status').textContent = 'unavailable';
+      }
+    }
+
+    let refreshTimer = null;
+    function scheduleRefresh() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refreshAll, 600);
+    }
+
+    function notifyResize() {
+      if (!config.embedded || window.parent === window) return;
+      window.parent.postMessage({ type: 'maf:resize', height: document.body.scrollHeight }, '*');
+    }
+
+    document.addEventListener('click', (event) => {
+      const workflowCard = event.target.closest('[data-workflow-id]');
+      if (workflowCard) {
+        state.selectedWorkflowId = workflowCard.dataset.workflowId;
+        renderAll();
+        notifyResize();
+        return;
+      }
+      const filter = event.target.closest('[data-status-filter]');
+      if (filter) {
+        state.statusFilter = filter.dataset.statusFilter;
+        state.selectedWorkflowId = null;
+        renderAll();
+        notifyResize();
+      }
+    });
+
+    $('refresh-btn').addEventListener('click', refreshAll);
+    $('clear-events-btn').addEventListener('click', () => { state.events = []; renderEvents(); notifyResize(); });
+
+    function initPage() {
+      if (config.theme === 'light') document.body.classList.add('light');
+      if (config.embedded) document.body.classList.add('embedded');
+      if (config.compact) document.body.classList.add('compact');
+      $('mode-label').textContent = config.embedded ? 'embedded' : 'global';
+      $('page-title').textContent = config.embedded ? 'MAF Execution Panel' : 'MAF Console';
+      $('page-subtitle').textContent = config.embedded
+        ? '可内嵌的 Agent / Workflow 执行面板'
+        : 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件';
+      setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
+      setInterval(refreshAll, 8000);
+      connectSSE();
+      refreshAll();
+    }
+
+    initPage();
   </script>
 </body>
 </html>
