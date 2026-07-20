@@ -134,15 +134,15 @@ async function handleSubmitTask(req: Request, res: Response): Promise<void> {
   }
 }
 
-/** POST /api/mas/task — 提交任务给 Meta-Agent-Server */
+/** POST /api/workflows/mas/task — 提交任务给 Meta-Agent-Server */
 router.post('/mas/task', handleSubmitTask);
 
-/** GET /api/mas/sessions — 列出所有会话 */
+/** GET /api/workflows/mas/sessions — 列出所有会话 */
 router.get('/mas/sessions', (_req: Request, res: Response) => {
   res.json(masRunner.listSessions());
 });
 
-/** GET /api/mas/sessions/:id — 获取会话详情 */
+/** GET /api/workflows/mas/sessions/:id — 获取会话详情 */
 router.get('/mas/sessions/:id', (req: Request, res: Response) => {
   const session = masRunner.getSession(req.params.id as string);
   if (!session) { res.status(404).json({ error: 'Session not found' }); return; }

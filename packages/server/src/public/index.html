@@ -98,6 +98,35 @@
     .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.55); background: rgba(51, 65, 85, 0.95); }
     body.light .btn:hover { background: rgba(241, 245, 249, 0.95); }
     .btn.primary { border-color: rgba(56, 189, 248, 0.6); background: linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(124, 58, 237, 0.9)); color: white; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .form-grid { display: grid; grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 1.2fr); gap: 12px; align-items: start; }
+    .form-grid.two { grid-template-columns: 1fr 1fr; margin-top: 10px; }
+    .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .field label { color: var(--muted); font-size: 11px; font-weight: 720; }
+    .input, .textarea {
+      width: 100%;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.5);
+      color: var(--text);
+      padding: 10px 11px;
+      font: inherit;
+      font-size: 12px;
+      outline: none;
+      resize: vertical;
+    }
+    body.light .input, body.light .textarea { background: rgba(255, 255, 255, 0.82); }
+    .input:focus, .textarea:focus { border-color: rgba(56, 189, 248, 0.62); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1); }
+    .textarea { min-height: 92px; line-height: 1.5; }
+    .textarea.compact { min-height: 74px; font-size: 11px; }
+    .advanced-options { margin-top: 12px; color: var(--muted); font-size: 12px; }
+    .advanced-options summary { cursor: pointer; user-select: none; color: var(--text); font-weight: 720; }
+    .form-actions { margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .form-status { color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .form-status.success { color: var(--green); }
+    .form-status.error { color: var(--red); }
+    .form-status.info { color: var(--blue); }
 
     .context-bar {
       margin-top: 14px;
@@ -279,6 +308,7 @@
       .shell { padding: 12px; }
       .topbar { align-items: flex-start; flex-direction: column; }
       .stats-grid { grid-template-columns: 1fr 1fr; }
+      .form-grid, .form-grid.two { grid-template-columns: 1fr; }
       .detail-grid, .progress-line { grid-template-columns: 1fr; }
     }
   </style>
@@ -316,6 +346,43 @@
       <div class="stat-card"><div class="stat-value" id="stat-workflows">-</div><div class="stat-label" data-i18n="runningWorkflows">Running Workflows</div><div class="stat-hint" id="hint-workflows">filtered / total</div></div>
       <div class="stat-card"><div class="stat-value" id="stat-mas">-</div><div class="stat-label" data-i18n="activeMasSessions">Active MAS Sessions</div><div class="stat-hint">Meta-Agent-Server</div></div>
       <div class="stat-card"><div class="stat-value" id="stat-tasks">-</div><div class="stat-label" data-i18n="openTasks">Open Tasks</div><div class="stat-hint">pending / running / dispatched</div></div>
+    </section>
+
+    <section class="panel" style="margin-top:16px;">
+      <div class="panel-header">
+        <div><div class="panel-title" data-i18n="submitMasTask">Submit MAS Task</div><div class="panel-subtitle" data-i18n="submitMasTaskHint">向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow</div></div>
+        <span class="pill active mono">POST /api/workflows/mas/task</span>
+      </div>
+      <form class="panel-body" id="mas-submit-form">
+        <div class="form-grid">
+          <div class="field">
+            <label for="mas-task-title" data-i18n="masTaskTitle">任务标题</label>
+            <input class="input" id="mas-task-title" name="title" maxlength="180" required autocomplete="off" data-i18n-placeholder="masTaskTitlePlaceholder" placeholder="例如：检查当前 Agent 网络状态">
+          </div>
+          <div class="field">
+            <label for="mas-task-description" data-i18n="masTaskDescription">任务描述</label>
+            <textarea class="textarea" id="mas-task-description" name="description" data-i18n-placeholder="masTaskDescriptionPlaceholder" placeholder="描述目标、范围、约束和期望输出。"></textarea>
+          </div>
+        </div>
+        <details class="advanced-options">
+          <summary data-i18n="advancedOptions">高级选项：origin / notify JSON</summary>
+          <div class="form-grid two">
+            <div class="field">
+              <label for="mas-task-origin" data-i18n="masOrigin">Origin JSON</label>
+              <textarea class="textarea compact mono" id="mas-task-origin" name="origin" spellcheck="false" data-i18n-placeholder="masOriginPlaceholder" placeholder='{"source":"maf-console"}'></textarea>
+            </div>
+            <div class="field">
+              <label for="mas-task-notify" data-i18n="masNotify">Notify JSON</label>
+              <textarea class="textarea compact mono" id="mas-task-notify" name="notify" spellcheck="false" data-i18n-placeholder="masNotifyPlaceholder" placeholder='{"target":"maf-console"}'></textarea>
+            </div>
+          </div>
+        </details>
+        <div class="form-actions">
+          <button class="btn primary" id="mas-submit-btn" type="submit" data-i18n="submitToMas">提交给 MAS</button>
+          <button class="btn" id="mas-clear-btn" type="button" data-i18n="clearForm">清空</button>
+          <span class="form-status" id="mas-submit-status"></span>
+        </div>
+      </form>
     </section>
 
     <main class="main-grid">
@@ -423,6 +490,7 @@
         agentBoard: 'Agent 看板', agentBoardHint: '在线状态、runtime、版本和能力', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
         tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
         inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果',
+        submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败',
         noWorkflow: '暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。', noSelectedWorkflow: '暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。', noNodes: '该 workflow 暂无节点信息。', noAgents: '暂无 agent 数据。', noSessions: '暂无 MAS session。调用 /api/workflows/mas/task 后会出现。', noTasks: '暂无传统 task 数据。', noEvents: '等待 SSE 事件。', noInventory: '暂无 Skills/MCP inventory 数据。等待 agent 心跳上报 skills/mcps 后会出现。', noEvolve: '暂无 evolve 结果。通过 /api/evolve/skill、/api/evolve/mcp 等接口推送后会出现。', noOta: '暂无 OTA 状态数据。',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: '创建时间', completedAt: '完成时间', nodes: '节点', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: '任务进入 MAF 控制面', dispatchNote: '按 agent_name 路由到节点', executeNoteIdle: '等待执行或已结束', resultNote: '最终状态', currentNode: '当前节点', coverage: '覆盖', gaps: '缺口', allAgents: '全部 Agent', latestHash: '最新 Hash', clientMinimum: 'Client 最低版本', serverVersion: 'Server 版本', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: '耗时', actions: '动作', endpoint: 'Endpoint', version: '版本', pluginHash: 'Plugin Hash', unknown: '未知', total: '总数', latest: '最新',
         status: { online: '在线', offline: '离线', busy: '忙碌', dead: '死亡', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
@@ -435,6 +503,7 @@
         agentBoard: 'Agent Board', agentBoardHint: 'Status, runtime, version, and capabilities', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
         tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
         inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results',
+        submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed',
         noWorkflow: 'No workflows. Create one via /api/workflows or /api/workflows/mas/task.', noSelectedWorkflow: 'No workflow to display. Select one on the left, or filter by workflow_id / agent_name / origin_id.', noNodes: 'This workflow has no node details.', noAgents: 'No agent data.', noSessions: 'No MAS sessions. Call /api/workflows/mas/task to create one.', noTasks: 'No legacy task data.', noEvents: 'Waiting for SSE events.', noInventory: 'No Skills/MCP inventory yet. It appears after agents report skills/mcps via heartbeat.', noEvolve: 'No evolve results yet. Push via /api/evolve/skill, /api/evolve/mcp, etc.', noOta: 'No OTA status data.',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: 'Created', completedAt: 'Completed', nodes: 'Nodes', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: 'Task entered the MAF control plane', dispatchNote: 'Routed by agent_name', executeNoteIdle: 'Waiting or finished', resultNote: 'Final state', currentNode: 'Current node', coverage: 'coverage', gaps: 'gaps', allAgents: 'all agents', latestHash: 'Latest hash', clientMinimum: 'Client minimum', serverVersion: 'Server version', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: 'Duration', actions: 'Actions', endpoint: 'Endpoint', version: 'Version', pluginHash: 'Plugin Hash', unknown: 'unknown', total: 'total', latest: 'latest',
         status: { online: 'online', offline: 'offline', busy: 'busy', dead: 'dead', pending: 'pending', dispatched: 'dispatched', running: 'running', completed: 'completed', failed: 'failed', skipped: 'skipped', active: 'active', done: 'done', unknown: 'unknown', current: 'current', outdated: 'outdated', info: 'info' }
@@ -454,7 +523,7 @@
     const config = {
       embedded: params.get('embed') === '1' || location.pathname.startsWith('/embed'),
       compact: params.get('compact') === '1' || params.get('compact') === 'true',
-      readonly: params.get('readonly') !== 'false',
+      readonly: params.get('readonly') === '1' || params.get('readonly') === 'true',
       theme: params.get('theme') || 'dark',
       workflowId: params.get('workflow_id') || params.get('workflow') || '',
       agentName: params.get('agent_name') || params.get('agent') || '',
@@ -477,6 +546,7 @@
       selectedWorkflowId: config.workflowId || null,
       statusFilter: 'all',
       lastError: '',
+      masSubmit: { busy: false, status: '', message: '' },
     };
 
     function $(id) { return document.getElementById(id); }
@@ -515,6 +585,7 @@
       document.documentElement.lang = I18N[state.lang].htmlLang;
       document.title = config.embedded ? t('embeddedTitle') : t('pageTitle');
       document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.setAttribute('placeholder', t(el.dataset.i18nPlaceholder)); });
       $('lang-toggle').textContent = state.lang === 'zh' ? 'EN' : '中文';
       $('mode-label').textContent = config.embedded ? t('embedded') : t('global');
       $('page-title').textContent = config.embedded ? t('embeddedTitle') : t('pageTitle');
@@ -530,6 +601,23 @@
         state.lastError = `${path}: ${err.message}`;
         return fallback;
       }
+    }
+
+    async function apiPost(path, payload) {
+      const res = await fetch(`${API}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const text = await res.text();
+      let data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch { data = { message: text }; }
+      }
+      if (!res.ok) {
+        throw new Error(data.error || data.message || `HTTP ${res.status}`);
+      }
+      return data;
     }
 
     function originMatches(workflow) {
@@ -598,6 +686,7 @@
       applyI18n();
       renderContextBar();
       renderStats();
+      renderMasSubmitStatus();
       renderWorkflowFilters();
       renderWorkflowList();
       renderWorkflowDetail();
@@ -621,6 +710,15 @@
       if (!items.length) { bar.className = 'context-bar'; bar.innerHTML = ''; return; }
       bar.className = 'context-bar show';
       bar.innerHTML = `<div>${t('currentFilter')}：<span class="mono">${escapeHtml(items.join(' · '))}</span></div><div>${pill(config.readonly ? 'info' : 'active', config.readonly ? t('readonly') : t('actionsEnabled'))}</div>`;
+    }
+
+    function renderMasSubmitStatus() {
+      const button = $('mas-submit-btn');
+      const status = $('mas-submit-status');
+      button.disabled = config.readonly || state.masSubmit.busy;
+      button.textContent = state.masSubmit.busy ? t('submitting') : t('submitToMas');
+      status.className = `form-status ${state.masSubmit.status || ''}`;
+      status.textContent = config.readonly ? t('readonlyActionHint') : state.masSubmit.message;
     }
 
     function coverageEntries(kind) {
@@ -920,6 +1018,71 @@
       notifyResize();
     }
 
+    function parseOptionalJsonField(id, labelKey) {
+      const raw = $(id).value.trim();
+      if (!raw) return undefined;
+      try { return JSON.parse(raw); } catch { throw new Error(`${t(labelKey)} ${t('invalidJson')}`); }
+    }
+
+    function defaultMasOrigin() {
+      const origin = { source: config.embedded ? 'maf-console-embed' : 'maf-console' };
+      if (config.originId) origin.origin_id = config.originId;
+      if (config.workflowId) origin.workflow_id = config.workflowId;
+      if (config.agentName) origin.agent_name = config.agentName;
+      return origin;
+    }
+
+    async function submitMasTask(event) {
+      event.preventDefault();
+      if (config.readonly || state.masSubmit.busy) return;
+
+      const title = $('mas-task-title').value.trim();
+      if (!title) {
+        state.masSubmit = { busy: false, status: 'error', message: t('titleRequired') };
+        renderMasSubmitStatus();
+        return;
+      }
+
+      let origin;
+      let notify;
+      try {
+        origin = parseOptionalJsonField('mas-task-origin', 'masOrigin') || defaultMasOrigin();
+        notify = parseOptionalJsonField('mas-task-notify', 'masNotify');
+      } catch (err) {
+        state.masSubmit = { busy: false, status: 'error', message: err.message };
+        renderMasSubmitStatus();
+        return;
+      }
+
+      const payload = {
+        title,
+        description: $('mas-task-description').value.trim(),
+        origin,
+      };
+      if (notify) payload.notify = notify;
+
+      state.masSubmit = { busy: true, status: 'info', message: t('submitting') };
+      renderMasSubmitStatus();
+
+      try {
+        const result = await apiPost('/api/workflows/mas/task', payload);
+        const parts = [
+          `${t('taskSubmitted')}`,
+          `${t('sessionId')}: ${result.session_id || '-'}`,
+          `${t('statusText')}: ${statusLabel(result.status)}`,
+        ];
+        if (result.rounds !== undefined) parts.push(`${result.rounds} ${t('rounds')}`);
+        state.masSubmit = { busy: false, status: 'success', message: parts.join(' · ') };
+        $('mas-task-title').value = '';
+        $('mas-task-description').value = '';
+        addEvent({ type: 'mas_task_submitted', data: result, timestamp: new Date().toISOString() });
+        await refreshAll();
+      } catch (err) {
+        state.masSubmit = { busy: false, status: 'error', message: `${t('submitFailed')}: ${err.message}` };
+        renderMasSubmitStatus();
+      }
+    }
+
     function connectSSE() {
       try {
         const es = new EventSource(`${API}/api/events`);
@@ -974,6 +1137,15 @@
 
     $('refresh-btn').addEventListener('click', refreshAll);
     $('clear-events-btn').addEventListener('click', () => { state.events = []; renderEvents(); notifyResize(); });
+    $('mas-submit-form').addEventListener('submit', submitMasTask);
+    $('mas-clear-btn').addEventListener('click', () => {
+      $('mas-task-title').value = '';
+      $('mas-task-description').value = '';
+      $('mas-task-origin').value = '';
+      $('mas-task-notify').value = '';
+      state.masSubmit = { busy: false, status: '', message: '' };
+      renderMasSubmitStatus();
+    });
     $('lang-toggle').addEventListener('click', () => {
       state.lang = state.lang === 'zh' ? 'en' : 'zh';
       try { localStorage.setItem('maf_console_lang', state.lang); } catch {}
@@ -986,6 +1158,7 @@
       if (config.embedded) document.body.classList.add('embedded');
       if (config.compact) document.body.classList.add('compact');
       applyI18n();
+      renderMasSubmitStatus();
       setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
       setInterval(refreshAll, 8000);
       connectSSE();
