@@ -415,10 +415,10 @@ failure_policy 可选：
     try {
       const stdout = await this.runCommand('codex exec', CODEX_BIN, [
         'exec',
+        '-c', 'approval_policy="never"',
         '--skip-git-repo-check',
         '--ephemeral',
         '--sandbox', 'workspace-write',
-        '--ask-for-approval', 'never',
         '--output-last-message', outputFile,
         '-',
       ], {

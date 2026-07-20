@@ -976,7 +976,7 @@ function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
 function buildCodexArgs(cwd, outputFile) {
   const args = [];
   if (!CODEX_BYPASS_SANDBOX) {
-    args.push("-a", process.env.MAF_CODEX_APPROVAL || "never");
+    args.push("-c", `approval_policy="${process.env.MAF_CODEX_APPROVAL || "never"}"`);
   }
   if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
   args.push("exec");
@@ -993,7 +993,7 @@ function buildCodexArgs(cwd, outputFile) {
 function buildCodexTuiArgs(cwd, promptFile) {
   const args = [];
   if (!CODEX_BYPASS_SANDBOX) {
-    args.push("-a", process.env.MAF_CODEX_APPROVAL || "never");
+    args.push("-c", `approval_policy="${process.env.MAF_CODEX_APPROVAL || "never"}"`);
   }
   if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
   if (CODEX_BYPASS_SANDBOX) {
