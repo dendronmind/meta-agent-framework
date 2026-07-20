@@ -400,6 +400,8 @@ H=$(curl -s $E2E_SERVER/api/health 2>/dev/null)
 assert "Server 启动" "server_version" "$H"
 assert "Server health ok" '"ok":true' "$H"
 assert "Dashboard Server 显示 1" "serverOnline ? '1' : '-'" "$(grep "serverOnline ? '1' : '-'" "$SCRIPT_DIR/src/public/index.html" 2>/dev/null || true)"
+assert "Dashboard 版本使用 Server 统一版本" "state.health.server_version" "$(grep "state.health.server_version" "$SCRIPT_DIR/src/public/index.html" 2>/dev/null || true)"
+assert "Dashboard 无独立 Console 版本硬编码" "not_found" "$(grep -o "0.1.0" "$SCRIPT_DIR/src/public/index.html" 2>/dev/null || echo not_found)"
 fi
 
 # ============================================================

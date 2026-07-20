@@ -4,9 +4,9 @@
 #
 # 用法：
 #   bash scripts/release.sh <version>
-#   bash scripts/release.sh 0.5.0
+#   bash scripts/release.sh 0.4.10
 #   bash scripts/release.sh patch    # 自动 +1 patch（0.4.5 → 0.4.6）
-#   bash scripts/release.sh minor    # 自动 +1 minor（0.4.5 → 0.5.0）
+#   bash scripts/release.sh minor    # 自动 +1 minor（0.3.5 → 0.4.0）
 #   bash scripts/release.sh --retry  # 版本号已改好，从编译检查开始继续发布
 #
 # 流程：
@@ -54,7 +54,7 @@ if [[ "$RETRY" == "false" ]]; then
     echo ""
     echo "用法: bash scripts/release.sh <version|patch|minor|major|--retry>"
     echo ""
-    echo "  bash scripts/release.sh 0.5.0    # 指定版本"
+    echo "  bash scripts/release.sh 0.4.10    # 指定版本"
     echo "  bash scripts/release.sh patch    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2"."$3+1}')"
     echo "  bash scripts/release.sh minor    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2+1".0"}')"
     echo "  bash scripts/release.sh major    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1+1".0.0"}')"
@@ -88,11 +88,16 @@ if [[ "$RETRY" == "false" ]]; then
   # 确认
   # ============================================================
   echo "将要更新以下文件的版本号:"
-  echo "  - package.json (@maf/meta-agent-server)"
+  echo "  - package.json (本地 file:out/*.tgz 依赖引用)"
+  echo "  - packages/server/package.json (@maf/meta-agent-server)"
+  echo "  - packages/server/src/types/index.ts (CLIENT_MIN_VERSION)"
   echo "  - packages/server/plugins/opencode-plugin-meta-agent-framework/package.json"
   echo "  - packages/server/plugins/claude-code-plugin-maf/.claude-plugin/plugin.json"
+  echo "  - packages/server/plugins/codex/.codex-plugin/plugin.json"
   echo "  - packages/client/package.json (@maf/meta-agent-client)"
   echo "  - packages/client/opencode/package.json"
+  echo "  - packages/client/claude-code/.claude-plugin/plugin.json"
+  echo "  - packages/client/codex/.codex-plugin/plugin.json"
   echo ""
   read -p "确认发布 ${CURRENT_VERSION} → ${NEW_VERSION}? (y/N) " confirm
   if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -106,32 +111,61 @@ if [[ "$RETRY" == "false" ]]; then
   echo ""
   echo -e "${CYAN}[1/6] 更新版本号...${NC}"
 
-# 主 package.json
+# 主 package.json + npm package/plugin metadata
 python3 -c "
 import json
+version = '${NEW_VERSION}'
 for f in [
-  'package.json',
+  'packages/server/package.json',
   'packages/server/plugins/opencode-plugin-meta-agent-framework/package.json',
   'packages/client/package.json',
   'packages/client/opencode/package.json',
 ]:
     try:
         d = json.load(open(f))
-        d['version'] = '${NEW_VERSION}'
+        d['version'] = version
         json.dump(d, open(f, 'w'), indent=2, ensure_ascii=False)
+        open(f, 'a').write('\n')
         print(f'  ✅ {f}')
     except Exception as e:
         print(f'  ❌ {f}: {e}')
+
+root = 'package.json'
+d = json.load(open(root))
+deps = d.setdefault('dependencies', {})
+deps['@maf/meta-agent-server'] = f'file:out/maf-meta-agent-server-{version}.tgz'
+deps['@maf/meta-agent-client'] = f'file:out/maf-meta-agent-client-{version}.tgz'
+json.dump(d, open(root, 'w'), indent=2, ensure_ascii=False)
+open(root, 'a').write('\n')
+print(f'  ✅ {root}')
 "
 
-# claude-code plugin.json
+# runtime plugin.json
 python3 -c "
 import json
-f = 'packages/server/plugins/claude-code-plugin-maf/.claude-plugin/plugin.json'
-d = json.load(open(f))
-d['version'] = '${NEW_VERSION}'
-json.dump(d, open(f, 'w'), indent=2, ensure_ascii=False)
-print(f'  ✅ {f}')
+version = '${NEW_VERSION}'
+for f in [
+  'packages/server/plugins/claude-code-plugin-maf/.claude-plugin/plugin.json',
+  'packages/server/plugins/codex/.codex-plugin/plugin.json',
+  'packages/client/claude-code/.claude-plugin/plugin.json',
+  'packages/client/codex/.codex-plugin/plugin.json',
+]:
+    d = json.load(open(f))
+    d['version'] = version
+    json.dump(d, open(f, 'w'), indent=2, ensure_ascii=False)
+    open(f, 'a').write('\n')
+    print(f'  ✅ {f}')
+"
+
+# Client 最低版本：低版本 client 会触发 OTA
+python3 -c "
+from pathlib import Path
+p = Path('packages/server/src/types/index.ts')
+s = p.read_text()
+import re
+s2 = re.sub(r\"export const CLIENT_MIN_VERSION = '[^']+';\", \"export const CLIENT_MIN_VERSION = '${NEW_VERSION}';\", s)
+p.write_text(s2)
+print('  ✅ packages/server/src/types/index.ts')
 "
 
   echo -e "  ${GREEN}版本号已更新为 ${NEW_VERSION}${NC}"
