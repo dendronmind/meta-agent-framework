@@ -10,8 +10,20 @@ import { appendFileSync } from "node:fs";
 
 const THREAD_ID = process.env.MOCK_CODEX_THREAD_ID || "mock-thread-1";
 const NO_TURN_COMPLETED = process.env.MOCK_CODEX_NO_TURN_COMPLETED === "1" || process.env.MOCK_CODEX_NO_TURN_COMPLETED === "true";
+const TURN_STATUS_OBJECT = process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "1" || process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "true";
 let nextTurn = 0;
 const turns = [];
+
+function normalizeTurnStatus(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return String(value.type || value.status || value.state || "");
+  return String(value);
+}
+
+function turnStatus(value) {
+  return TURN_STATUS_OBJECT ? { type: value } : value;
+}
 
 function mockThread() {
   return {
@@ -25,7 +37,7 @@ function mockThread() {
     createdAt: Date.now() / 1000,
     updatedAt: Date.now() / 1000,
     recencyAt: Date.now() / 1000,
-    status: { type: turns.some(t => t.status === "inProgress") ? "active" : "idle", activeFlags: [] },
+    status: { type: turns.some(t => normalizeTurnStatus(t.status) === "inProgress") ? "active" : "idle", activeFlags: [] },
     path: null,
     cwd: process.cwd(),
     cliVersion: "mock",
@@ -66,12 +78,12 @@ function responseFor(msg, send) {
     const notice = prompt.match(/\[(?:MAF 任务回报完成|MAF 后台任务结果通知)\][\s\S]*/);
     const text = notice ? notice[0] : `mock attached codex completed: ${match ? match[0] : "no prompt match"}`;
     const startedAt = Date.now() / 1000;
-    const turn = { id: turnId, items: [], itemsView: "all", status: "inProgress", error: null, startedAt, completedAt: null, durationMs: null };
+    const turn = { id: turnId, items: [], itemsView: "all", status: turnStatus("inProgress"), error: null, startedAt, completedAt: null, durationMs: null };
     turns.push(turn);
     send({ id, result: { turn: { ...turn } } });
     setTimeout(() => {
       turn.items = [{ type: "agentMessage", id: "agent-1", text, phase: null, memoryCitation: null }];
-      turn.status = "completed";
+      turn.status = turnStatus("completed");
       turn.completedAt = Date.now() / 1000;
       turn.durationMs = 10;
       send({ method: "item/agentMessage/delta", params: { threadId: THREAD_ID, turnId, itemId: "agent-1", delta: text } });

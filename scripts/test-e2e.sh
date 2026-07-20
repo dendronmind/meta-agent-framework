@@ -1810,7 +1810,7 @@ HOME="$CODEX_POLL_HOME" XDG_CONFIG_HOME="$CODEX_POLL_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_POLL_PORT" \
   MAF_AGENT_NAME="$CODEX_POLL_AGENT" MAF_DIRECTORY="$CODEX_POLL_PROJECT" \
   MAF_CODEX_TURN_POLL_MS=100 \
-  MAF_CODEX_APP_SERVER_CMD="MOCK_CODEX_NO_TURN_COMPLETED=1 node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  MAF_CODEX_APP_SERVER_CMD="MOCK_CODEX_NO_TURN_COMPLETED=1 MOCK_CODEX_TURN_STATUS_OBJECT=1 node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
   node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-poll-hook.log 2>&1
 {"cwd":"$CODEX_POLL_PROJECT","eventName":"SessionStart"}
 HOOKJSON

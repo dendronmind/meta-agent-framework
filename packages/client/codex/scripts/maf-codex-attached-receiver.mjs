@@ -284,7 +284,7 @@ async function waitForNotificationTurn(client, threadId, turnId, fallbackText, t
       } else if (msg.method === "turn/completed") {
         if (isTerminalFailedTurn(p.turn)) {
           text = turnErrorMessage(p.turn) || text;
-          finish("notification", p.turn?.status || "failed");
+          finish("notification", turnStatusValue(p.turn) || "failed");
         } else {
           text = extractAgentTextFromTurn(p.turn, text);
           finish("notification", "completed");
@@ -305,12 +305,12 @@ async function waitForNotificationTurn(client, threadId, turnId, fallbackText, t
           lastPollStatus = statusForLog;
           log(`notification turn poll observed: turn=${turnId} ${statusForLog}`);
         }
-        if (observed.turn?.status === "completed") {
+        if (isCompletedTurn(observed.turn)) {
           finish("poll", "completed");
           return;
         }
         if (isTerminalFailedTurn(observed.turn)) {
-          finish("poll", observed.turn?.status || "failed");
+          finish("poll", turnStatusValue(observed.turn) || "failed");
           return;
         }
       } catch (err) {
@@ -616,8 +616,27 @@ function turnErrorMessage(turn) {
   try { return JSON.stringify(err); } catch { return String(err); }
 }
 
+function normalizeTurnStatus(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "object") {
+    const candidate = value.type ?? value.status ?? value.state ?? value.kind ?? value.value;
+    return candidate == null ? "" : String(candidate).trim();
+  }
+  return String(value).trim();
+}
+
+function turnStatusValue(turn) {
+  return normalizeTurnStatus(turn?.status);
+}
+
+function isCompletedTurn(turn) {
+  return turnStatusValue(turn) === "completed" || turn?.completedAt != null;
+}
+
 function isTerminalFailedTurn(turn) {
-  return turn?.status === "failed" || turn?.status === "interrupted";
+  const status = turnStatusValue(turn);
+  return status === "failed" || status === "interrupted" || status === "cancelled" || status === "canceled";
 }
 
 function observeThreadTurn(readResult, turnId, fallbackText) {
@@ -630,15 +649,15 @@ function observeThreadTurn(readResult, turnId, fallbackText) {
       status: "",
       text: fallbackText.trim(),
       turn: null,
-      threadStatus: thread?.status?.type || thread?.status || "",
+      threadStatus: normalizeTurnStatus(thread?.status),
     };
   }
   return {
     found: true,
-    status: turn.status || "",
+    status: turnStatusValue(turn),
     text: extractAgentTextFromTurn(turn, fallbackText),
     turn,
-    threadStatus: thread?.status?.type || thread?.status || "",
+    threadStatus: normalizeTurnStatus(thread?.status),
   };
 }
 
@@ -655,13 +674,14 @@ async function runTurn(client, threadId, task) {
   const turnId = result?.turn?.id;
   if (!turnId) throw new Error("turn/start did not return a turn id");
   let text = extractAgentTextFromTurn(result.turn, "");
-  log(`turn/start returned: task=${task.id || task.task_id || ""} turn=${turnId} status=${result.turn?.status || "unknown"}`);
-  if (result.turn?.status === "completed") {
+  const startStatus = turnStatusValue(result.turn);
+  log(`turn/start returned: task=${task.id || task.task_id || ""} turn=${turnId} status=${startStatus || "unknown"}`);
+  if (isCompletedTurn(result.turn)) {
     log(`turn already completed from start response: turn=${turnId} chars=${text.length}`);
     return text || "Codex turn completed with no assistant text";
   }
   if (isTerminalFailedTurn(result.turn)) {
-    throw new Error(`Codex turn ${result.turn.status}: ${turnErrorMessage(result.turn) || "no error detail"}`);
+    throw new Error(`Codex turn ${startStatus || "unknown"}: ${turnErrorMessage(result.turn) || "no error detail"}`);
   }
 
   return await new Promise((resolve, reject) => {
@@ -701,7 +721,7 @@ async function runTurn(client, threadId, task) {
         text = p.item.text;
       } else if (msg.method === "turn/completed") {
         if (isTerminalFailedTurn(p.turn)) {
-          finishErr(new Error(`Codex turn ${p.turn.status}: ${turnErrorMessage(p.turn) || "no error detail"}`));
+          finishErr(new Error(`Codex turn ${turnStatusValue(p.turn) || "unknown"}: ${turnErrorMessage(p.turn) || "no error detail"}`));
         } else {
           finishOk("notification", extractAgentTextFromTurn(p.turn, text));
         }
@@ -727,12 +747,12 @@ async function runTurn(client, threadId, task) {
           lastPollStatus = statusForLog;
           log(`turn poll observed: turn=${turnId} ${statusForLog}`);
         }
-        if (observed.turn?.status === "completed") {
+        if (isCompletedTurn(observed.turn)) {
           finishOk("poll", observed.text);
           return;
         }
         if (isTerminalFailedTurn(observed.turn)) {
-          finishErr(new Error(`Codex turn ${observed.turn.status}: ${turnErrorMessage(observed.turn) || "no error detail"}`));
+          finishErr(new Error(`Codex turn ${turnStatusValue(observed.turn) || "unknown"}: ${turnErrorMessage(observed.turn) || "no error detail"}`));
           return;
         }
       } catch (err) {
