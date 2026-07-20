@@ -3,8 +3,10 @@
  * MAF Codex attached receiver (experimental).
  *
  * Bridges MAF Node Daemon attached-task delivery to a Codex app-server thread.
- * This is not the detached screen executor. It only marks the Codex agent online
- * when this receiver is running and connected to a specific app-server thread.
+ * This is not the detached screen executor. It only marks a client Codex agent
+ * online when this receiver is running and connected to a specific app-server
+ * thread. Meta-Agent-Server is a Server control-plane identity and uses this
+ * receiver only for workflow result notifications, not Client Agent registration.
  *
  * Required for real current-TUI usage:
  *   1. Start a Codex app-server endpoint, e.g. `codex app-server --listen ws://127.0.0.1:47891`.
@@ -40,6 +42,8 @@ const SESSION_PID = parseInt(process.env.MAF_CODEX_SESSION_PID || "0", 10) || 0;
 const NOTIFY_ACK = process.env.MAF_CODEX_NOTIFY_ACK === "1";
 const NOTIFY_WORKFLOWS = process.env.MAF_CODEX_NOTIFY_WORKFLOWS !== "0";
 const NOTIFY_WAIT = process.env.MAF_CODEX_NOTIFY_WAIT === "1";
+const SERVER_AGENT_NAME = "Meta-Agent-Server";
+const IS_SERVER_IDENTITY = AGENT_NAME === SERVER_AGENT_NAME;
 
 function log(msg) {
   try {
@@ -191,7 +195,7 @@ function shouldNotifyWorkflow(payload, threadId) {
   }
 
   // 与 opencode 保持一致：管理者会话接收完整后台 workflow 结果。
-  return AGENT_NAME === "Meta-Agent-Server";
+  return IS_SERVER_IDENTITY;
 }
 
 function buildNotificationTurnPrompt(text) {
@@ -771,6 +775,10 @@ async function runTurn(client, threadId, task) {
 
 async function registerAgent() {
   if (!AGENT_NAME) throw new Error("MAF_AGENT_NAME or MAF_CODEX_AGENT is required");
+  if (IS_SERVER_IDENTITY) {
+    log(`${SERVER_AGENT_NAME} is a Server control-plane identity; skip Client Agent registration`);
+    return;
+  }
   await postJson(`${DAEMON_URL}/agents/connect`, {
     agent_name: AGENT_NAME,
     runtime: "codex",
@@ -785,6 +793,7 @@ let lastRegisterAt = 0;
 
 async function ensureRegistered(force = false) {
   const now = Date.now();
+  if (IS_SERVER_IDENTITY && registered) return;
   if (!force && registered && now - lastRegisterAt < 5_000) return;
   await registerAgent();
   registered = true;
@@ -792,6 +801,7 @@ async function ensureRegistered(force = false) {
 }
 
 async function disconnectAgent() {
+  if (IS_SERVER_IDENTITY) return;
   if (!AGENT_NAME) return;
   try {
     await postJson(`${DAEMON_URL}/agents/disconnect`, {
@@ -830,6 +840,9 @@ async function main() {
   const threadId = await resolveThreadId(client);
   log(`attached receiver bound to thread=${threadId}`);
   await ensureRegistered(true);
+  if (IS_SERVER_IDENTITY) {
+    log(`${SERVER_AGENT_NAME} notification-only mode: skip /tasks/wait and Agent board presence`);
+  }
   subscribeWorkflowEvents(client, threadId).catch(err => log(`workflow SSE start failed: ${err.message}`));
   if (SESSION_PID) {
     log(`attached receiver follows Codex session pid=${SESSION_PID}`);
@@ -849,6 +862,10 @@ async function main() {
     }
     try { await ensureRegistered(); } catch (err) { log(`receiver re-register failed: ${err.message}`); }
     await injectPendingNotifications(client, threadId);
+    if (IS_SERVER_IDENTITY) {
+      await sleep(1000);
+      continue;
+    }
     let data;
     try {
       data = await getJson(`${DAEMON_URL}/tasks/wait?agent=${encodeURIComponent(AGENT_NAME)}`, WAIT_TIMEOUT_MS + 5000);

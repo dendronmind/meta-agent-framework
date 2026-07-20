@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/database';
 import { eventBus } from './event-bus';
 import { getRegistry } from './registry';
-import { CLIENT_MIN_VERSION } from '../types';
+import { CLIENT_MIN_VERSION, SERVER_AGENT_NAME, isServerAgentName } from '../types';
 import { getConfig } from '../config';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
 
@@ -58,6 +58,7 @@ export class AgentRegistry {
     const db = getDb();
     const localAgents = this.listAll();
     const now = new Date().toISOString();
+    const clientRemoteAgents = remoteAgents.filter(remote => remote.agent_name && !isServerAgentName(remote.agent_name));
 
     const localKey = (a: { user_id: string; host_user: string; agent_name: string }) =>
       `${a.user_id}|${a.host_user}|${a.agent_name}`;
@@ -67,7 +68,7 @@ export class AgentRegistry {
     let updated = 0;
     let unchanged = 0;
 
-    for (const remote of remoteAgents) {
+    for (const remote of clientRemoteAgents) {
       if (!remote.agent_name) continue;
 
       const key = localKey(remote);
@@ -118,18 +119,26 @@ export class AgentRegistry {
       }
     }
 
-    return { pulled: remoteAgents.length, added, updated, unchanged };
+    return { pulled: clientRemoteAgents.length, added, updated, unchanged };
   }
 
   /** Client 注册（一个用户 + 其所有 agent，每个 agent 一行） */
   registerClient(payload: ClientRegisterPayload): Agent[] {
     const db = getDb();
     const now = new Date().toISOString();
+    const clientAgentInfos = payload.agents.filter(info => {
+      const kind = String((info as any).kind || (info as any).role || '').trim().toLowerCase();
+      return kind !== 'server' && !isServerAgentName(info.agent_name);
+    });
+    const ignoredServerCount = payload.agents.length - clientAgentInfos.length;
+    if (ignoredServerCount > 0) {
+      console.log(`[Registry] 忽略 ${ignoredServerCount} 个 Server 控制面身份，不注册为 Client Agent（${SERVER_AGENT_NAME} 属于 Server）`);
+    }
 
     // 策略：外部注册表管理的 agent 不能随意删除
     //   - 受管理的 agent：UPDATE（更新 endpoint/status/skills/mcps）
     //   - 动态 agent：先删旧的再 INSERT（全量同步）
-    const incomingNames = new Set(payload.agents.map(a => a.agent_name));
+    const incomingNames = new Set(clientAgentInfos.map(a => a.agent_name));
 
     // 不再删除旧 agent——多个 Client（opencode + Claude Code）可能各自注册不同 agent
     // 每个 agent 通过下面的 upsert/insert 更新，不在列表里的保持原样（靠心跳超时自然下线）
@@ -155,7 +164,7 @@ export class AgentRegistry {
     `);
 
     const agents: Agent[] = [];
-    for (const info of payload.agents) {
+    for (const info of clientAgentInfos) {
       // Daemon 上报的状态优先，没上报的默认 online（向后兼容旧版 Daemon）
       const agentStatus = agentStatuses[info.agent_name] || 'online';
 
@@ -261,8 +270,8 @@ export class AgentRegistry {
   /** 注销（删除该用户的所有 agent） */
   unregisterClient(userId: string, hostUser: string): number {
     const db = getDb();
-    const result = db.prepare('DELETE FROM agents WHERE user_id = ? AND host_user = ?')
-      .run(userId, hostUser);
+    const result = db.prepare('DELETE FROM agents WHERE user_id = ? AND host_user = ? AND agent_name <> ?')
+      .run(userId, hostUser, SERVER_AGENT_NAME);
     return result.changes;
   }
 
@@ -280,6 +289,7 @@ export class AgentRegistry {
     let changes = 0;
     if (payload.agent_statuses) {
       for (const [agentName, status] of Object.entries(payload.agent_statuses)) {
+        if (isServerAgentName(agentName)) continue;
         // 更新该 agent 的心跳时间
         db.prepare(`
           UPDATE agents SET last_heartbeat = ? WHERE user_id = ? AND host_user = ? AND agent_name = ?
@@ -350,6 +360,7 @@ export class AgentRegistry {
         UPDATE agents SET mcps = ? WHERE user_id = ? AND host_user = ? AND agent_name = ?
       `);
       for (const [agentName, inv] of Object.entries(payload.agent_inventory)) {
+        if (isServerAgentName(agentName)) continue;
         if (inv.skills) {
           updateSkills.run(JSON.stringify(inv.skills), userId, hostUser, agentName);
         }
@@ -399,8 +410,8 @@ export class AgentRegistry {
   /** 批量更新一个用户所有 agent 的状态 */
   updateUserStatus(userId: string, hostUser: string, status: AgentStatus): number {
     const agents = this.listByUser(userId).filter(a => a.host_user === hostUser);
-    const changes = getDb().prepare('UPDATE agents SET status = ? WHERE user_id = ? AND host_user = ?')
-      .run(status, userId, hostUser).changes;
+    const changes = getDb().prepare('UPDATE agents SET status = ? WHERE user_id = ? AND host_user = ? AND agent_name <> ?')
+      .run(status, userId, hostUser, SERVER_AGENT_NAME).changes;
     if (changes > 0) {
       const registry = getRegistry();
       for (const a of agents) {
@@ -425,12 +436,15 @@ export class AgentRegistry {
     return result.changes > 0;
   }
 
-  listAll(): Agent[] {
-    return getDb().prepare('SELECT * FROM agents ORDER BY user_id, agent_name').all() as Agent[];
+  listAll(includeServer = false): Agent[] {
+    if (includeServer) {
+      return getDb().prepare('SELECT * FROM agents ORDER BY user_id, agent_name').all() as Agent[];
+    }
+    return getDb().prepare('SELECT * FROM agents WHERE agent_name <> ? ORDER BY user_id, agent_name').all(SERVER_AGENT_NAME) as Agent[];
   }
 
   listByUser(userId: string): Agent[] {
-    return getDb().prepare('SELECT * FROM agents WHERE user_id = ? ORDER BY agent_name').all(userId) as Agent[];
+    return getDb().prepare('SELECT * FROM agents WHERE user_id = ? AND agent_name <> ? ORDER BY agent_name').all(userId, SERVER_AGENT_NAME) as Agent[];
   }
 
   listUsers(): { user_id: string; host_user: string; client_endpoint: string; status: string; last_heartbeat: string; agent_count: number }[] {
@@ -440,21 +454,23 @@ export class AgentRegistry {
              MAX(last_heartbeat) as last_heartbeat,
              COUNT(*) as agent_count
       FROM agents
+      WHERE agent_name <> ?
       GROUP BY user_id, host_user
       ORDER BY user_id
-    `).all() as any[];
+    `).all(SERVER_AGENT_NAME) as any[];
   }
 
   findByName(name: string): Agent[] {
+    if (isServerAgentName(name)) return [];
     return getDb().prepare(`
-      SELECT * FROM agents WHERE agent_name = ? AND status IN ('online', 'busy')
-    `).all(name) as Agent[];
+      SELECT * FROM agents WHERE agent_name = ? AND agent_name <> ? AND status IN ('online', 'busy')
+    `).all(name, SERVER_AGENT_NAME) as Agent[];
   }
 
   findByCapability(keyword: string): Agent[] {
     return getDb().prepare(`
-      SELECT * FROM agents WHERE capabilities LIKE ? AND status = 'online'
-    `).all(`%${keyword}%`) as Agent[];
+      SELECT * FROM agents WHERE capabilities LIKE ? AND status = 'online' AND agent_name <> ?
+    `).all(`%${keyword}%`, SERVER_AGENT_NAME) as Agent[];
   }
 
   // ============================================================
@@ -519,10 +535,10 @@ export class AgentRegistry {
 
   getStats(): { users_total: number; users_online: number; agents_total: number; agents_online: number } {
     const db = getDb();
-    const agents = db.prepare('SELECT COUNT(*) as c FROM agents').get() as { c: number };
-    const agentsOnline = db.prepare("SELECT COUNT(*) as c FROM agents WHERE status = 'online'").get() as { c: number };
-    const users = db.prepare('SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents').get() as { c: number };
-    const usersOnline = db.prepare("SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE status = 'online'").get() as { c: number };
+    const agents = db.prepare('SELECT COUNT(*) as c FROM agents WHERE agent_name <> ?').get(SERVER_AGENT_NAME) as { c: number };
+    const agentsOnline = db.prepare("SELECT COUNT(*) as c FROM agents WHERE status = 'online' AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
+    const users = db.prepare('SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE agent_name <> ?').get(SERVER_AGENT_NAME) as { c: number };
+    const usersOnline = db.prepare("SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE status = 'online' AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
     return {
       users_total: users.c,
       users_online: usersOnline.c,

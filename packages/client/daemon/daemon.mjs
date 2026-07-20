@@ -61,6 +61,11 @@ const CLIENT_VERSION = (() => {
 const HEARTBEAT_INTERVAL = 1_000;
 const POLL_INTERVAL = 1_000;
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
+const SERVER_AGENT_NAME = "Meta-Agent-Server";
+
+function isServerAgentName(name) {
+  return String(name || "").trim() === SERVER_AGENT_NAME;
+}
 
 process.title = "MAF_Node_Daemon";
 mkdirSync(STATE_DIR, { recursive: true });
@@ -1584,6 +1589,12 @@ const httpServer = createServer(async (req, res) => {
     const body = await readBody();
     const name = body.agent_name;
     if (!name) { json(400, { error: "agent_name required" }); return; }
+    const kind = String(body.kind || body.role || "").trim().toLowerCase();
+    if (kind === "server" || isServerAgentName(name)) {
+      log(`ℹ️ 忽略 Server 控制面连接，不注册为 Agent: ${name}`);
+      json(200, { ok: true, ignored: true, kind: "server", agents: [...agents.keys()] });
+      return;
+    }
 
     const existing = agents.get(name);
     const info = {
@@ -1611,6 +1622,11 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/agents/disconnect") {
     const body = await readBody();
     const name = body.agent_name;
+    if (isServerAgentName(name)) {
+      log(`ℹ️ 忽略 Server 控制面断开，不按 Agent 注销: ${name}`);
+      json(200, { ok: true, ignored: true, kind: "server", agents: [...agents.keys()] });
+      return;
+    }
     if (name && agents.has(name)) {
       // 防竞态：如果 disconnect 的 PID 和当前 agent 的 pluginPid 不同，说明是旧 Plugin 发的
       const info = agents.get(name);

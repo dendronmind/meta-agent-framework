@@ -78,6 +78,7 @@ app.use('/api/events', eventsRouter);
 // --- Health check ---
 app.get('/api/health', (_req, res) => {
   res.json({
+    ok: true,
     status: 'ok',
     server_version: SERVER_VERSION,
     client_min_version: CLIENT_MIN_VERSION,

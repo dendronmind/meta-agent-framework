@@ -24,6 +24,11 @@ const MAF_HOME = join(HOME, ".meta-agent-framework");
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
 const DEFAULT_PORT = 4100;
+const SERVER_AGENT_NAME = "Meta-Agent-Server";
+
+function isServerAgentName(name) {
+  return String(name || "").trim() === SERVER_AGENT_NAME;
+}
 
 function log(message) {
   try {
@@ -509,6 +514,7 @@ async function main() {
 
   const inferred = inferAgent(startDir);
   const hasAgent = validAgentName(inferred.agentName);
+  const isServerIdentity = isServerAgentName(inferred.agentName);
   const projectPath = inferred.projectPath || resolve(startDir);
   const cfg = readMafConfig(projectPath);
   const serverUrl = process.env.META_AGENT_SERVER || cfg.server?.url || "";
@@ -543,6 +549,9 @@ async function main() {
     log(`daemon ready without valid MAF Codex agent for ${startDir}`);
     return;
   }
+  if (isServerIdentity) {
+    log(`${SERVER_AGENT_NAME} 是 Server 控制面身份：保持 daemon/receiver 通知能力，但跳过 Client Agent 注册`);
+  }
 
   const appServerUrl = findCodexRemote(hookEvent);
   const appServerCmd = process.env.MAF_CODEX_APP_SERVER_CMD || "";
@@ -554,7 +563,9 @@ async function main() {
     appServerCmd,
   });
 
-  await connectAgent({ agentName: inferred.agentName, projectPath, port, pluginPid: receiver?.pid || 0 });
+  if (!isServerIdentity) {
+    await connectAgent({ agentName: inferred.agentName, projectPath, port, pluginPid: receiver?.pid || 0 });
+  }
 }
 
 main().catch(err => log(`unexpected error: ${err?.stack || err?.message || err}`));

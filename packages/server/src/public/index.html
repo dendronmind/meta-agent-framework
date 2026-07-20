@@ -742,7 +742,8 @@
       const skills = coverageEntries('skills');
       const mcps = coverageEntries('mcps');
 
-      $('stat-server').textContent = state.health?.ok ? 'OK' : '-';
+      const serverOnline = state.health?.ok || state.health?.status === 'ok';
+      $('stat-server').textContent = serverOnline ? '1' : '-';
       $('hint-server').textContent = state.health?.server_version ? `v${state.health.server_version}` : (state.lastError || t('waitingServer'));
       $('stat-agents').textContent = online;
       $('hint-agents').textContent = `${online} / ${state.agents.length}`;

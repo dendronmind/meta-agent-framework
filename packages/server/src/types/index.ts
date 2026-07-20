@@ -18,6 +18,14 @@ export const CLIENT_MIN_VERSION = '0.4.10';
 
 // --- Agent（一行 = 一个 agent，用户信息内联） ---
 
+/** Server 管理者身份名：它属于控制面，不应被统计为 Client Agent */
+export const SERVER_AGENT_NAME = 'Meta-Agent-Server';
+
+/** 判断一个名称是否是 Server 管理者身份 */
+export function isServerAgentName(agentName?: string | null): boolean {
+  return String(agentName || '').trim() === SERVER_AGENT_NAME;
+}
+
 export type AgentStatus = 'online' | 'offline' | 'busy' | 'dead';
 
 /** Agent 运行时类型：决定 Client 端使用哪个 CLI 工具执行 */
@@ -57,6 +65,7 @@ export interface AgentInfo {
   capabilities: string;            // 自然语言描述
   mode?: 'primary' | 'subagent' | 'all';
   runtime?: AgentRuntime;          // 运行时：opencode（默认）/ claude-code / codex
+  kind?: 'agent' | 'server';       // 身份类型：server 只属于控制面，不进入 Agent 看板
   skills?: SkillInfo[];            // 该 agent 可用的 skills
   mcps?: McpInfo[];                // 该 agent 可用的 MCP servers
 }

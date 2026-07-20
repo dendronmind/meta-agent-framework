@@ -40,6 +40,7 @@
 #   39 Codex attached receiver thread/read fallback
 #   40 Workflow all_settled waits for parallel branches
 #   41 maf-init required input and incomplete config resume
+#   42 Server 控制面身份不计入 Agent 看板
 #
 set -uo pipefail
 
@@ -67,7 +68,7 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -397,6 +398,8 @@ if should_run 1; then
 echo -e "${YELLOW}[1] Server 启动${NC}"
 H=$(curl -s $E2E_SERVER/api/health 2>/dev/null)
 assert "Server 启动" "server_version" "$H"
+assert "Server health ok" '"ok":true' "$H"
+assert "Dashboard Server 显示 1" "serverOnline ? '1' : '-'" "$(grep "serverOnline ? '1' : '-'" "$SCRIPT_DIR/src/public/index.html" 2>/dev/null || true)"
 fi
 
 # ============================================================
@@ -2063,6 +2066,43 @@ assert "Runtime 空输入提示必选" "RUNTIME_REQUIRED=ok" "$INIT_OUTPUT"
 assert "飞书必填项空输入提示" "FEISHU_REQUIRED=ok" "$INIT_OUTPUT"
 
 rm -rf "$INIT_TEST_BASE"
+fi
+
+# ============================================================
+# Case 42: Server 控制面身份不计入 Agent 看板
+# ============================================================
+if should_run 42; then
+echo -e "\n${YELLOW}Case 42: Server 控制面身份不计入 Agent 看板${NC}"
+
+BASE_STATS_RES=$(curl -s "$E2E_SERVER/api/agents/stats" 2>/dev/null)
+BASE_TOTAL=$(echo "$BASE_STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_total',0))" 2>/dev/null)
+BASE_ONLINE=$(echo "$BASE_STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_online',0))" 2>/dev/null)
+BASE_INVENTORY_TOTAL=$(curl -s "$E2E_SERVER/api/agents/inventory" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('total_agents',0))" 2>/dev/null)
+BOARD_AGENT="board-agent-e2e-$$"
+REGISTER_RES=$(curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"e2e\",\"host_user\":\"e2e\",\"client_endpoint\":\"http://127.0.0.1:$NODE_PORT\",\"agents\":[{\"agent_name\":\"Meta-Agent-Server\",\"kind\":\"server\",\"runtime\":\"codex\",\"project_path\":\"/tmp/maf-server\",\"capabilities\":\"server control plane\",\"mode\":\"primary\"},{\"agent_name\":\"$BOARD_AGENT\",\"runtime\":\"opencode\",\"project_path\":\"/tmp\",\"capabilities\":\"test\",\"mode\":\"subagent\"}]}" 2>/dev/null)
+
+REGISTER_NAMES=$(echo "$REGISTER_RES" | python3 -c "import json,sys;d=json.load(sys.stdin);print(','.join(a.get('agent_name','') for a in d.get('agents',[])))" 2>/dev/null)
+assert "注册响应只返回 Client Agent" "$BOARD_AGENT" "$REGISTER_NAMES"
+assert "注册响应不含 Server" "not_found" "$(echo "$REGISTER_NAMES" | grep -o 'Meta-Agent-Server' || echo not_found)"
+
+AGENTS_RES=$(curl -s "$E2E_SERVER/api/agents?all=true" 2>/dev/null)
+SERVER_IN_BOARD=$(echo "$AGENTS_RES" | python3 -c "import json,sys;print(any(a.get('agent_name')=='Meta-Agent-Server' for a in json.load(sys.stdin)))" 2>/dev/null)
+BOARD_IN_BOARD=$(echo "$AGENTS_RES" | python3 -c "import json,sys;print(any(a.get('agent_name')=='$BOARD_AGENT' for a in json.load(sys.stdin)))" 2>/dev/null)
+assert "Agent 看板不含 Server" "False" "$SERVER_IN_BOARD"
+assert "Agent 看板保留普通 Agent" "True" "$BOARD_IN_BOARD"
+
+STATS_RES=$(curl -s "$E2E_SERVER/api/agents/stats" 2>/dev/null)
+AGENTS_TOTAL=$(echo "$STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_total',''))" 2>/dev/null)
+AGENTS_ONLINE=$(echo "$STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_online',''))" 2>/dev/null)
+EXPECTED_TOTAL=$((BASE_TOTAL + 1))
+EXPECTED_ONLINE=$((BASE_ONLINE + 1))
+assert "Agent stats total 排除 Server" "$EXPECTED_TOTAL" "$AGENTS_TOTAL"
+assert "Agent stats online 排除 Server" "$EXPECTED_ONLINE" "$AGENTS_ONLINE"
+
+INVENTORY_TOTAL=$(curl -s "$E2E_SERVER/api/agents/inventory" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('total_agents',''))" 2>/dev/null)
+EXPECTED_INVENTORY_TOTAL=$((BASE_INVENTORY_TOTAL + 1))
+assert "Inventory total 排除 Server" "$EXPECTED_INVENTORY_TOTAL" "$INVENTORY_TOTAL"
 fi
 
 # ============================================================

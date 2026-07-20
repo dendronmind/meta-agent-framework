@@ -9,6 +9,7 @@
  * 直接调飞书 Open API，用 feishu-mcp-pro 的 OAuth user token 认证。
  */
 
+import { isServerAgentName } from '../../types';
 import type { Agent, AgentRuntime, SkillInfo, McpInfo } from '../../types';
 import type { ExternalRegistry } from './index';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
@@ -348,6 +349,7 @@ export class FeishuRegistry implements ExternalRegistry {
 
       const agentName = extractTextValue(f['Agent 名称']);
       if (!agentName) continue;
+      if (isServerAgentName(agentName)) continue;
 
       if (recordId) {
         this.recordIdMap.set(agentName, recordId);
