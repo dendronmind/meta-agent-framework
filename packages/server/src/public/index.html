@@ -6,6 +6,7 @@
   <title>MAF Console</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%2338bdf8'/%3E%3Cstop offset='1' stop-color='%23c084fc'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M18 40V24h7l7 10 7-10h7v16h-6V30l-8 10-8-10v10z' fill='%23fff'/%3E%3Ccircle cx='18' cy='18' r='4' fill='%23fff' opacity='.9'/%3E%3Ccircle cx='46' cy='46' r='4' fill='%23fff' opacity='.9'/%3E%3Cpath d='M22 20l20 22' stroke='%23fff' stroke-width='3' opacity='.55' stroke-linecap='round'/%3E%3C/svg%3E">
   <meta name="theme-color" content="#08111f">
+  <meta name="maf-console-version" content="0.1.0">
   <style>
     :root {
       --bg: #08111f;
@@ -327,6 +328,7 @@
         <div class="status-line">
           <span><span class="dot yellow" id="sse-dot"></span>SSE <span id="sse-status">connecting...</span></span>
           <span id="mode-label">global</span>
+          <span><span data-i18n="consoleVersionShort">Console</span> <span class="mono" id="console-version">v0.1.0</span></span>
           <span id="clock">--:--:--</span>
           <span id="last-refresh">未刷新</span>
         </div>
@@ -479,11 +481,12 @@
 
   <script>
     const API = location.origin;
+    const CONSOLE_VERSION = '0.1.0';
     const params = new URLSearchParams(location.search);
 
     const I18N = {
       zh: {
-        htmlLang: 'zh-CN', all: '全部', refresh: '刷新', clear: '清空', lastRefresh: '刷新', global: '全局', embedded: '内嵌', readonly: '只读', actionsEnabled: '允许操作', currentFilter: '当前过滤上下文', waitingServer: '等待 Server',
+        htmlLang: 'zh-CN', all: '全部', refresh: '刷新', clear: '清空', lastRefresh: '刷新', global: '全局', embedded: '内嵌', readonly: '只读', actionsEnabled: '允许操作', currentFilter: '当前过滤上下文', waitingServer: '等待 Server', consoleVersionShort: 'Console', consoleVersion: 'Console 版本',
         pageTitle: 'MAF 控制台', pageSubtitle: 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件', embeddedTitle: 'MAF 执行面板', embeddedSubtitle: '可内嵌的 Agent / Workflow 执行面板',
         server: 'Server', agentsOnline: '在线 Agent', busyAgents: '忙碌 Agent', skills: 'Skills', mcps: 'MCPs', runningWorkflows: '运行中 Workflow', activeMasSessions: '活跃 MAS 会话', openTasks: '未完成任务',
         workflowFocus: 'Workflow 焦点', workflowFocusHint: '选择一个 workflow 查看执行详情', workflowDetail: 'Workflow 详情', workflowDetailHint: 'DAG 节点、执行结果和上下文',
@@ -496,7 +499,7 @@
         status: { online: '在线', offline: '离线', busy: '忙碌', dead: '死亡', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
       },
       en: {
-        htmlLang: 'en', all: 'all', refresh: 'Refresh', clear: 'Clear', lastRefresh: 'Refreshed', global: 'global', embedded: 'embedded', readonly: 'readonly', actionsEnabled: 'actions-enabled', currentFilter: 'Current filter', waitingServer: 'Waiting for Server',
+        htmlLang: 'en', all: 'all', refresh: 'Refresh', clear: 'Clear', lastRefresh: 'Refreshed', global: 'global', embedded: 'embedded', readonly: 'readonly', actionsEnabled: 'actions-enabled', currentFilter: 'Current filter', waitingServer: 'Waiting for Server', consoleVersionShort: 'Console', consoleVersion: 'Console version',
         pageTitle: 'MAF Console', pageSubtitle: 'Agent network · Workflow execution · MAS triage · Runtime events', embeddedTitle: 'MAF Execution Panel', embeddedSubtitle: 'Embeddable Agent / Workflow execution panel',
         server: 'Server', agentsOnline: 'Agents Online', busyAgents: 'Busy Agents', skills: 'Skills', mcps: 'MCPs', runningWorkflows: 'Running Workflows', activeMasSessions: 'Active MAS Sessions', openTasks: 'Open Tasks',
         workflowFocus: 'Workflow Focus', workflowFocusHint: 'Select a workflow to inspect execution details', workflowDetail: 'Workflow Detail', workflowDetailHint: 'DAG nodes, execution results, and context',
@@ -588,6 +591,7 @@
       document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.setAttribute('placeholder', t(el.dataset.i18nPlaceholder)); });
       $('lang-toggle').textContent = state.lang === 'zh' ? 'EN' : '中文';
       $('mode-label').textContent = config.embedded ? t('embedded') : t('global');
+      $('console-version').textContent = `v${CONSOLE_VERSION}`;
       $('page-title').textContent = config.embedded ? t('embeddedTitle') : t('pageTitle');
       $('page-subtitle').textContent = config.embedded ? t('embeddedSubtitle') : t('pageSubtitle');
     }
@@ -984,6 +988,7 @@
       $('runtime-context').innerHTML = `
         <div class="detail-grid single" style="margin-top:0;">
           <div class="kv"><div class="k">${t('serverUrl')}</div><div class="v mono">${escapeHtml(API)}</div></div>
+          <div class="kv"><div class="k">${t('consoleVersion')}</div><div class="v mono">v${escapeHtml(CONSOLE_VERSION)}</div></div>
           <div class="kv"><div class="k">${t('serverVersion')}</div><div class="v">${escapeHtml(state.health?.server_version || '-')}</div></div>
           <div class="kv"><div class="k">${t('clientMinimum')}</div><div class="v">${escapeHtml(state.health?.client_min_version || '-')}</div></div>
           <div class="kv"><div class="k">${t('registry')}</div><div class="v">${escapeHtml(stringifySmall(registry, 120))}</div></div>
