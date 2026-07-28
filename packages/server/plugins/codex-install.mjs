@@ -164,11 +164,37 @@ maf_has_remote_arg=0
 maf_session_pid="$$"
 maf_cleanup_enabled=0
 maf_cleanup_done=0
+maf_spawn_app_server_cleanup() {
+  if [[ -z "$maf_remote" || ! -f "$APP_SERVER_HELPER" ]]; then
+    return 0
+  fi
+  printf '%s [codex-wrapper] spawn app-server cleanup cwd=%s hook_cwd=%s remote=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" >> "$LOG"
+  if command -v setsid >/dev/null 2>&1; then
+    MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" MAF_CODEX_SESSION_PID="$maf_session_pid" setsid node "$APP_SERVER_HELPER" --cleanup </dev/null >/dev/null 2>>"$LOG" &
+  else
+    (
+      trap '' INT TERM HUP
+      MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" MAF_CODEX_SESSION_PID="$maf_session_pid" node "$APP_SERVER_HELPER" --cleanup </dev/null >/dev/null 2>>"$LOG"
+    ) &
+  fi
+  maf_cleanup_pid=$!
+  disown "$maf_cleanup_pid" 2>/dev/null || true
+  printf '%s [codex-wrapper] app-server cleanup pid=%s remote=%s\n' "$(date -Is)" "$maf_cleanup_pid" "$maf_remote" >> "$LOG"
+}
 maf_cleanup() {
-  if [[ "$maf_cleanup_enabled" != "1" || "$maf_cleanup_done" == "1" || ! -f "$HOOK" ]]; then
+  if [[ "$maf_cleanup_enabled" != "1" || "$maf_cleanup_done" == "1" ]]; then
     return 0
   fi
   maf_cleanup_done=1
+  # Once cleanup starts, do not let repeated Ctrl-C/TERM/HUP kill the cleanup
+  # hook itself.  Children inherit ignored signals, so the hook can still
+  # disconnect the receiver and stop the owned app-server.
+  trap '' INT TERM HUP
+  trap - EXIT
+  maf_spawn_app_server_cleanup
+  if [[ ! -f "$HOOK" ]]; then
+    return 0
+  fi
   {
     printf '%s [codex-wrapper] cleanup cwd=%s hook_cwd=%s remote=%s\n' "$(date -Is)" "$PWD" "$maf_hook_cwd" "$maf_remote" >> "$LOG"
     MAF_CODEX_WRAPPER_ACTIVE=1 CODEX_CWD="$maf_hook_cwd" MAF_CODEX_APP_SERVER_URL="$maf_remote" MAF_CODEX_SESSION_PID="$maf_session_pid" node "$HOOK" <<JSON
@@ -177,7 +203,9 @@ JSON
   } >/dev/null 2>>"$LOG" || true
 }
 trap 'maf_status=130; maf_cleanup; exit "$maf_status"' INT
+trap 'maf_status=129; maf_cleanup; exit "$maf_status"' HUP
 trap 'maf_status=143; maf_cleanup; exit "$maf_status"' TERM
+trap 'maf_status=$?; maf_cleanup; exit "$maf_status"' EXIT
 
 if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-}" != "1" && -f "$HOOK" ]]; then
   maf_args=("$@")
@@ -204,7 +232,7 @@ if [[ "\${MAF_CODEX_WRAPPER_DISABLE:-}" != "1" && "\${MAF_CODEX_WRAPPER_ACTIVE:-
   fi
   {
     if [[ -z "$maf_remote" && -f "$APP_SERVER_HELPER" ]]; then
-      maf_auto_remote="$(MAF_CODEX_REAL_BIN="$REAL_CODEX" CODEX_CWD="$maf_hook_cwd" node "$APP_SERVER_HELPER" --real "$REAL_CODEX" --cwd "$maf_hook_cwd" -- "$@" 2>>"$LOG" || true)"
+      maf_auto_remote="$(MAF_CODEX_REAL_BIN="$REAL_CODEX" CODEX_CWD="$maf_hook_cwd" MAF_CODEX_SESSION_PID="$maf_session_pid" node "$APP_SERVER_HELPER" --real "$REAL_CODEX" --cwd "$maf_hook_cwd" -- "$@" 2>>"$LOG" || true)"
       if [[ -n "$maf_auto_remote" ]]; then
         maf_remote="$maf_auto_remote"
         printf '%s [codex-wrapper] auto remote url=%s cwd=%s\n' "$(date -Is)" "$maf_remote" "$maf_hook_cwd" >> "$LOG"

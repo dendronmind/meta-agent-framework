@@ -306,7 +306,7 @@ function findCodexRemote(hookEvent) {
   return "";
 }
 
-function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, appServerCmd }) {
+function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, appServerCmd, sessionPid = "" }) {
   if (process.env.MAF_CODEX_ATTACHED_RECEIVER_DISABLE === "1" || process.env.MAF_CODEX_AUTO_ATTACHED_RECEIVER === "0") {
     log("attached receiver autostart disabled");
     return false;
@@ -321,7 +321,6 @@ function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, app
 
   const pidFile = receiverPidFile(agentName);
   const metaFile = receiverMetaFile(agentName);
-  const sessionPid = String(process.env.MAF_CODEX_SESSION_PID || "").trim();
   let oldPid = "";
   try { oldPid = readFileSync(pidFile, "utf-8").trim(); } catch {}
   if (processAlive(oldPid)) {
@@ -346,6 +345,7 @@ function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, app
     MAF_CODEX_RECEIVER_PID_FILE: pidFile,
   };
   if (sessionPid) env.MAF_CODEX_SESSION_PID = sessionPid;
+  else delete env.MAF_CODEX_SESSION_PID;
   if (appServerUrl && !env.MAF_CODEX_APP_SERVER_URL) env.MAF_CODEX_APP_SERVER_URL = appServerUrl;
   if (appServerCmd && !env.MAF_CODEX_APP_SERVER_CMD) env.MAF_CODEX_APP_SERVER_CMD = appServerCmd;
 
@@ -422,6 +422,45 @@ async function stopAttachedReceiver({ agentName, port, sessionPid = "" }) {
   }
   removeReceiverMeta(agentName);
   return true;
+}
+
+async function stopOwnedAppServer({ agentName, appServerUrl, sessionPid = "" }) {
+  if (!appServerUrl) return false;
+  const helperScript = join(PLUGIN_ROOT, "scripts", "maf-codex-app-server.mjs");
+  if (!isFile(helperScript)) {
+    log(`app-server cleanup skipped: helper missing ${helperScript}`);
+    return false;
+  }
+  return await new Promise(resolve => {
+    const args = ["--cleanup", "--agent", agentName, "--url", appServerUrl];
+    if (sessionPid) args.push("--session-pid", sessionPid);
+    const child = spawn(process.execPath, [helperScript, ...args], {
+      cwd: process.env.CODEX_CWD || process.cwd(),
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        MAF_AGENT_NAME: agentName,
+        MAF_CODEX_APP_SERVER_URL: appServerUrl,
+        MAF_CODEX_SESSION_PID: sessionPid,
+      },
+    });
+    const timeoutMs = parseInt(process.env.MAF_CODEX_APP_SERVER_CLEANUP_TIMEOUT_MS || "0", 10) || 8000;
+    const timer = setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch {}
+      resolve(false);
+    }, timeoutMs);
+    timer.unref?.();
+    child.on("close", code => {
+      clearTimeout(timer);
+      log(`app-server cleanup helper exited: agent=${agentName} url=${appServerUrl} code=${code}`);
+      resolve(code === 0);
+    });
+    child.on("error", err => {
+      clearTimeout(timer);
+      log(`app-server cleanup helper failed: agent=${agentName} ${err.message}`);
+      resolve(false);
+    });
+  });
 }
 
 function findDaemonScript() {
@@ -525,11 +564,14 @@ async function main() {
       log(`cleanup skipped: no valid MAF Codex agent for ${startDir}`);
       return;
     }
+    const sessionPid = String(hookEvent?.sessionPid || process.env.MAF_CODEX_SESSION_PID || "");
+    const appServerUrl = findCodexRemote(hookEvent) || process.env.MAF_CODEX_APP_SERVER_URL || "";
     await stopAttachedReceiver({
       agentName: inferred.agentName,
       port,
-      sessionPid: String(hookEvent?.sessionPid || process.env.MAF_CODEX_SESSION_PID || ""),
+      sessionPid,
     });
+    await stopOwnedAppServer({ agentName: inferred.agentName, appServerUrl, sessionPid });
     return;
   }
 
@@ -555,12 +597,14 @@ async function main() {
 
   const appServerUrl = findCodexRemote(hookEvent);
   const appServerCmd = process.env.MAF_CODEX_APP_SERVER_CMD || "";
+  const startSessionPid = String(hookEvent?.sessionPid || (eventName === "WrapperStart" ? process.env.MAF_CODEX_SESSION_PID : "") || "").trim();
   const receiver = startAttachedReceiver({
     agentName: inferred.agentName,
     projectPath,
     port,
     appServerUrl,
     appServerCmd,
+    sessionPid: startSessionPid,
   });
 
   if (!isServerIdentity) {
