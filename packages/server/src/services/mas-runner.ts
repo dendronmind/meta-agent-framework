@@ -15,7 +15,7 @@
  * Meta-Agent-Server 每次被调用时能看到完整历史。
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -54,6 +54,8 @@ interface MASSubmitOptions {
 // ============================================================
 
 export class MASRunner {
+  private activeChildren = new Set<ChildProcessWithoutNullStreams>();
+  private shuttingDown = false;
 
   /**
    * 提交任务 → 创建会话 → 开始第一轮
@@ -357,12 +359,18 @@ failure_policy 可选：
     args: string[],
     options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs?: number },
   ): Promise<string> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error(`${label} skipped: MAS runner is shutting down`));
+    }
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: options.env,
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
       });
+      this.activeChildren.add(child);
 
       let stdout = '';
       let stderr = '';
@@ -371,8 +379,8 @@ failure_policy 可选：
       const timeoutMs = options.timeoutMs || MAS_RUN_TIMEOUT_MS;
       const timer = setTimeout(() => {
         timedOut = true;
-        try { child.kill('SIGTERM'); } catch {}
-        setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 2000).unref();
+        this.killChild(child, 'SIGTERM');
+        setTimeout(() => this.killChild(child, 'SIGKILL'), 2000).unref();
       }, timeoutMs);
 
       child.stdout?.on('data', d => { stdout += d; });
@@ -381,14 +389,20 @@ failure_policy 可选：
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.activeChildren.delete(child);
         reject(new Error(`${label} spawn failed: ${e.message}`));
       });
       child.on('close', code => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.activeChildren.delete(child);
         const output = stdout.trim();
         const errOutput = stderr.trim();
+        if (this.shuttingDown) {
+          reject(new Error(`${label} terminated during server shutdown`));
+          return;
+        }
         if (timedOut) {
           reject(new Error(`${label} timed out after ${timeoutMs}ms${errOutput ? `: ${errOutput}` : ''}`));
           return;
@@ -406,6 +420,35 @@ failure_policy 可选：
         child.stdin?.end();
       }
     });
+  }
+
+  private killChild(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+    const pid = child.pid;
+    if (!pid) return;
+    // detached=true 让子进程成为进程组 leader；优先杀进程组，兜底杀单进程。
+    try { process.kill(-pid, signal); return; } catch {}
+    try { child.kill(signal); } catch {}
+  }
+
+  shutdown(reason = 'Server shutdown'): void {
+    this.shuttingDown = true;
+    const now = new Date().toISOString();
+    for (const session of sessions.values()) {
+      if (session.status === 'active' || session.status === 'waiting') {
+        session.status = 'failed';
+        session.completed_at = now;
+        session.rounds.push({
+          round: session.rounds.length + 1,
+          mas_input: '',
+          mas_output: `ERROR: ${reason}`,
+          timestamp: now,
+        });
+      }
+    }
+    for (const child of this.activeChildren) this.killChild(child, 'SIGTERM');
+    setTimeout(() => {
+      for (const child of this.activeChildren) this.killChild(child, 'SIGKILL');
+    }, 2000).unref();
   }
 
   private async runCodex(prompt: string, mafHome: string): Promise<string> {

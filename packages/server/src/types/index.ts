@@ -437,7 +437,8 @@ export interface SSEEvent {
         'workflow_node_failed' | 'workflow_completed' | 'workflow_failed' |
         'agent_launched' | 'agent_execute' |
         'evolve_started' | 'evolve_completed' | 'evolve_failed' |
-        'proposal_created' | 'proposal_reviewed' | 'proposal_applied';
+        'proposal_created' | 'proposal_reviewed' | 'proposal_applied' |
+        'server_shutdown';
   data: Record<string, unknown>;
   timestamp: string;
 }

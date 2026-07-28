@@ -2,10 +2,14 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import type { Server } from 'http';
 import { initDb, getDb, closeDb } from './db/database';
 import { healthMonitor } from './services/health-monitor';
 import { getRegistry } from './services/registry';
 import { agentRegistry } from './services/agent-registry';
+import { eventBus } from './services/event-bus';
+import { workflowEngine } from './services/workflow-engine';
+import { masRunner } from './services/mas-runner';
 import { SERVER_VERSION, CLIENT_MIN_VERSION } from './types';
 import agentsRouter from './routes/agents';
 import tasksRouter from './routes/tasks';
@@ -61,6 +65,8 @@ const LOCAL_IP = getLocalIP();
 const SERVER_URL = `http://${LOCAL_IP}:${PORT}`;
 
 const app = express();
+let httpServer: Server | null = null;
+let shuttingDown = false;
 
 // --- Middleware ---
 app.use(express.json());
@@ -209,7 +215,7 @@ async function start(): Promise<void> {
   healthMonitor.start();
 
   // 先启动 HTTP server（不等外部注册表）
-  app.listen(PORT, HOST, async () => {
+  httpServer = app.listen(PORT, HOST, async () => {
     const registryLabel = registryEnabled ? `✅ ${(registry as any).constructor.name}` : '⚠️  disabled';
     console.log('');
     console.log('  ╔══════════════════════════════════════════════════════╗');
@@ -234,6 +240,11 @@ async function start(): Promise<void> {
 
     // 2. 数据就绪后，再广播 ping（此时 DB 里有完整的 endpoint 列表）
     broadcastPing();
+  });
+
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`[Server] HTTP server error: ${err.message}`);
+    if (err.code === 'EADDRINUSE') process.exit(1);
   });
 }
 
@@ -271,15 +282,58 @@ async function broadcastPing(): Promise<void> {
   console.log(`[Broadcast] 完成: ${responded}/${endpoints.length} 响应`);
 }
 
-// --- Graceful shutdown ---
-function shutdown(): void {
-  console.log('\n[Server] Shutting down...');
-  healthMonitor.stop();
-  closeDb();
-  process.exit(0);
+function closeHttpServer(): Promise<void> {
+  return new Promise(resolve => {
+    if (!httpServer) { resolve(); return; }
+    const server = httpServer;
+    httpServer = null;
+    server.close(err => {
+      if (err) console.error(`[Server] HTTP close error: ${err.message}`);
+      resolve();
+    });
+  });
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+// --- Graceful shutdown ---
+async function shutdown(signal = 'SIGTERM'): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[Server] Shutting down (${signal})...`);
 
-start();
+  const forceTimer = setTimeout(() => {
+    console.error('[Server] Graceful shutdown timeout, forcing exit');
+    process.exit(1);
+  }, 8_000);
+  forceTimer.unref();
+
+  try {
+    healthMonitor.stop();
+    workflowEngine.shutdown(`Server shutdown: ${signal}`);
+    masRunner.shutdown(`Server shutdown: ${signal}`);
+    eventBus.closeAll(`Server shutdown: ${signal}`);
+    await closeHttpServer();
+    closeDb();
+  } catch (err: any) {
+    console.error(`[Server] Shutdown error: ${err?.message || err}`);
+  } finally {
+    clearTimeout(forceTimer);
+    logStream.end(() => process.exit(0));
+    setTimeout(() => process.exit(0), 500).unref();
+  }
+}
+
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('uncaughtException', err => {
+  console.error('[Server] uncaughtException:', err);
+  void shutdown('uncaughtException');
+});
+process.on('unhandledRejection', err => {
+  console.error('[Server] unhandledRejection:', err);
+  void shutdown('unhandledRejection');
+});
+
+start().catch(err => {
+  console.error('[Server] Failed to start:', err);
+  void shutdown('startup_error');
+});

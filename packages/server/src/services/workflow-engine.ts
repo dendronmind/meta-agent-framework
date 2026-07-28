@@ -244,6 +244,38 @@ export class WorkflowEngine {
     );
   }
 
+  /**
+   * Server 退出时清理所有工作流等待器和节点超时器。
+   *
+   * 当前工作流是内存态；退出时的目标是不要留下 timeout handle、
+   * 不要让 MAS Runner 一直等待，并尽力通知 Daemon 释放 workflow 引用。
+   */
+  shutdown(reason = 'Server shutdown'): void {
+    for (const timer of nodeTimeouts.values()) clearTimeout(timer);
+    nodeTimeouts.clear();
+
+    const now = new Date().toISOString();
+    for (const workflow of workflows.values()) {
+      if (workflow.status !== 'running') continue;
+      workflow.status = 'failed';
+      workflow.completed_at = now;
+      for (const node of workflow.nodes) {
+        if (node.status === 'running' || node.status === 'pending') {
+          node.status = 'failed';
+          node.result = reason;
+          node.completed_at = now;
+        }
+      }
+      this.notifyRelease(workflow, true);
+    }
+
+    for (const cb of completionCallbacks.values()) {
+      cb.reject(new Error(reason));
+    }
+    completionCallbacks.clear();
+    workflowAgentSessions.clear();
+  }
+
   // ============================================================
   // 内部逻辑
   // ============================================================

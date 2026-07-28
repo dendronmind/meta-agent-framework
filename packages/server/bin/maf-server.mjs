@@ -39,6 +39,7 @@ const PID_FILE = join(STATE_DIR, "server.pid");
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "server.log");
 const CONFIG_FILE = join(MAF_HOME, "maf.config.json");
+let stopServerOnTuiExit = false;
 
 // 确保目录
 mkdirSync(STATE_DIR, { recursive: true });
@@ -176,14 +177,93 @@ function getServerPid() {
   }
 }
 
+function sleepSync(ms) {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function pidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function getProcessGroupId(pid) {
+  try {
+    const raw = execSync(`ps -o pgid= -p ${pid}`, { encoding: "utf-8", timeout: 2000 }).trim();
+    const pgid = parseInt(raw, 10);
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getCurrentProcessGroupId() {
+  return getProcessGroupId(process.pid);
+}
+
+function signalProcessTree(pid, signal) {
+  const pgid = getProcessGroupId(pid);
+  const selfPgid = getCurrentProcessGroupId();
+  if (pgid && pgid !== selfPgid) {
+    try { process.kill(-pgid, signal); return true; } catch {}
+  }
+  try { process.kill(pid, signal); return true; } catch {}
+  return false;
+}
+
+function findServerPidByPort(port) {
+  try {
+    const ssOut = execSync(`ss -ltnp 'sport = :${port}' 2>/dev/null`, { encoding: "utf-8", timeout: 3000 });
+    const match = ssOut.match(/pid=(\d+)/);
+    if (match) return parseInt(match[1], 10);
+  } catch {}
+  try {
+    const out = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null | head -n1`, { encoding: "utf-8", timeout: 3000 }).trim();
+    const pid = parseInt(out, 10);
+    if (pid) return pid;
+  } catch {}
+  return null;
+}
+
 function isServerRunning() {
   const port = getPort();
   try {
-    execSync(`curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}/api/health`, { timeout: 3000, stdio: "pipe" });
+    execSync(`curl --max-time 1 -s -o /dev/null -w "%{http_code}" http://localhost:${port}/api/health`, { timeout: 2000, stdio: "pipe" });
     return true;
   } catch {
     return false;
   }
+}
+
+function stopServerProcessSync(pid, label) {
+  if (!pid) return false;
+  const port = getPort();
+  const target = `${label || "PID"} ${pid}`;
+  if (!pidAlive(pid)) return !isServerRunning();
+
+  signalProcessTree(pid, "SIGTERM");
+  for (let i = 0; i < 30; i++) {
+    sleepSync(200);
+    if (!isServerRunning()) {
+      try { unlinkSync(PID_FILE); } catch {}
+      console.log(`✅ Server 已停止 (${target})`);
+      return true;
+    }
+  }
+
+  console.warn(`⚠️  Server 未在 SIGTERM 后退出，发送 SIGKILL (${target})`);
+  signalProcessTree(pid, "SIGKILL");
+  for (let i = 0; i < 15; i++) {
+    sleepSync(200);
+    if (!isServerRunning() && !findServerPidByPort(port)) {
+      try { unlinkSync(PID_FILE); } catch {}
+      console.log(`✅ Server 已强制停止 (${target})`);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // ============================================================
@@ -272,6 +352,18 @@ async function cmdStart() {
     },
   });
   child.unref();
+  stopServerOnTuiExit = process.env.MAF_SERVER_KEEP_ALIVE_ON_TUI_EXIT !== "1";
+  if (stopServerOnTuiExit) {
+    const cleanupOwnedServer = (signal) => {
+      if (!stopServerOnTuiExit) return;
+      stopServerOnTuiExit = false;
+      console.log(`\n🧹 收到 ${signal}，停止本次 maf-server start 拉起的后台 Server...`);
+      cmdStop();
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    };
+    process.once("SIGINT", () => cleanupOwnedServer("SIGINT"));
+    process.once("SIGTERM", () => cleanupOwnedServer("SIGTERM"));
+  }
 
   // 写 PID（先用 spawn PID，稍后从端口查真实 PID）
   writeFileSync(PID_FILE, String(child.pid));
@@ -307,25 +399,13 @@ function cmdStop() {
   // 先尝试从 PID 文件杀
   const pid = getServerPid();
   if (pid) {
-    try {
-      process.kill(pid, "SIGTERM");
-      console.log(`✅ Server 已停止 (PID: ${pid})`);
-      try { unlinkSync(PID_FILE); } catch {}
-      return;
-    } catch {}
+    if (stopServerProcessSync(pid, "PID")) return;
+    console.warn(`⚠️  PID 文件中的 Server 未能停止，继续按端口 ${port} 查找`);
   }
 
   // PID 文件不靠谱，从端口查
-  try {
-    const ssOut = execSync(`ss -tlnp 2>/dev/null | grep ":${port} "`, { encoding: "utf-8", timeout: 3000 });
-    const match = ssOut.match(/pid=(\d+)/);
-    if (match) {
-      process.kill(parseInt(match[1]), "SIGTERM");
-      console.log(`✅ Server 已停止 (PID: ${match[1]}, port ${port})`);
-      try { unlinkSync(PID_FILE); } catch {}
-      return;
-    }
-  } catch {}
+  const portPid = findServerPidByPort(port);
+  if (portPid && stopServerProcessSync(portPid, `port ${port} PID`)) return;
 
   console.log("ℹ️  Server 未在运行");
 }
@@ -482,6 +562,7 @@ function cmdTui() {
   if (!isServerRunning()) {
     console.log("⚠️  Server 未运行，先启动...");
     execSync(`node "${join(PACKAGE_ROOT, "bin", "maf-server.mjs")}" start`, { stdio: "inherit" });
+    process.exit(0);
   }
 
   const runtime = detectRuntime();
@@ -498,6 +579,7 @@ function cmdTui() {
   console.log(`📂 工作目录: ${MAF_HOME}`);
   console.log(`🤖 运行时:   ${runtime}`);
 
+  let exitCode = 0;
   try {
     if (runtime === "opencode") {
       const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${extraArgs}`.trim();
@@ -509,11 +591,18 @@ function cmdTui() {
       const cmd = `claude ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
     }
-  } catch {
+  } catch (err) {
     // 用户退出 TUI
+    exitCode = err?.signal === "SIGINT" ? 130 : (typeof err?.status === "number" ? err.status : 0);
+  } finally {
+    if (stopServerOnTuiExit) {
+      stopServerOnTuiExit = false;
+      console.log("\n🧹 TUI 已退出，停止本次 maf-server start 拉起的后台 Server...");
+      cmdStop();
+    }
   }
 
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 function cmdResume() {

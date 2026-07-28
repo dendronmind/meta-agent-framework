@@ -281,11 +281,15 @@ export function getDb(): DatabaseLike {
         try { sqlJsDb.run(`PRAGMA ${str}`); } catch {}
         return undefined;
       },
-      close(): void {
-        persistDb();
-        if (sqlJsDb) {
-          sqlJsDb.close();
-          sqlJsDb = null;
+	      close(): void {
+	        if (saveTimer) {
+	          clearTimeout(saveTimer);
+	          saveTimer = null;
+	        }
+	        persistDb();
+	        if (sqlJsDb) {
+	          sqlJsDb.close();
+	          sqlJsDb = null;
         }
         dbInstance = null;
       }

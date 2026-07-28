@@ -32,6 +32,21 @@ export class EventBus {
   get subscriberCount(): number {
     return this.clients.size;
   }
+
+  /** Server 退出时主动关闭所有 SSE 连接，避免 keep-alive 连接拖住进程 */
+  closeAll(reason = 'server_shutdown'): void {
+    const event: SSEEvent = {
+      type: 'server_shutdown',
+      data: { reason },
+      timestamp: new Date().toISOString(),
+    } as SSEEvent;
+    const data = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+    for (const client of this.clients) {
+      try { client.write(data); } catch {}
+      try { client.end(); } catch {}
+    }
+    this.clients.clear();
+  }
 }
 
 export const eventBus = new EventBus();
