@@ -1,4 +1,3 @@
-import { getDb } from '../db/database';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import { workflowEngine } from './workflow-engine';
@@ -7,14 +6,6 @@ const HEARTBEAT_TIMEOUT_MS = 5_000;    // 5s 无心跳 → offline（心跳间�
 const DEAD_TIMEOUT_MS = 30_000;        // 30s 无心跳 → dead
 const LAUNCHING_GRACE_MS = 90_000;     // 90s — busy 的 opencode agent 宽限期（Daemon 自动拉起 serve 需要时间）
 const CHECK_INTERVAL_MS = 3_000;       // 3s 检查一次（心跳 1s，超时 5s，3s 间隔确保及时发现）
-const MAX_RESTART_ATTEMPTS = 3;
-
-const restartAttempts: Map<string, number> = new Map();
-
-/** 用户键（用于去重） */
-function userKey(userId: string, hostUser: string): string {
-  return `${userId}@${hostUser}`;
-}
 
 export class HealthMonitor {
   private timer: NodeJS.Timeout | null = null;

@@ -284,6 +284,7 @@ function installCodex() {
     ".codex-plugin/plugin.json",
     "hooks.json",
     "README.md",
+    "scripts/maf-codex-common.mjs",
     "scripts/maf-codex-hook.mjs",
     "scripts/maf-codex-attached-receiver.mjs",
     "scripts/maf-codex-app-server.mjs",

@@ -22,7 +22,6 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { workflowEngine, WorkflowSummary } from './workflow-engine';
-import { eventBus } from './event-bus';
 import { getConfig } from '../config';
 import type { Agent, MASSession, SessionRound } from '../types';
 

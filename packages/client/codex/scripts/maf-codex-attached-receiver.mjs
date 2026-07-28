@@ -16,11 +16,10 @@
 
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
+import { HOME, MAF_HOME, processAlive, sleep } from "./maf-codex-common.mjs";
 
-const HOME = homedir();
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100", 10) || 4100;
 const DAEMON_URL = process.env.MAF_DAEMON_URL || `http://127.0.0.1:${NODE_PORT}`;
 const AGENT_NAME = process.env.MAF_AGENT_NAME || process.env.MAF_CODEX_AGENT || "";
@@ -30,7 +29,7 @@ const APP_SERVER_CMD = process.env.MAF_CODEX_APP_SERVER_CMD || "";
 const THREAD_ID_ENV = process.env.MAF_CODEX_THREAD_ID || "";
 const TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS || "0", 10) || 10 * 60 * 1000;
 const WAIT_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_WAIT_TIMEOUT_MS || "0", 10) || 15_000;
-const LOG_DIR = join(HOME, ".meta-agent-framework", "logs");
+const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
 const PID_FILE = process.env.MAF_CODEX_RECEIVER_PID_FILE || "";
 const THREAD_WAIT_MS = parseInt(process.env.MAF_CODEX_THREAD_WAIT_MS || "0", 10) || 120_000;
@@ -50,14 +49,6 @@ function log(msg) {
     mkdirSync(LOG_DIR, { recursive: true });
     appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-attached-receiver] ${msg}\n`);
   } catch {}
-}
-
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-
-function processAlive(pid) {
-  const n = Number(pid || 0);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  try { process.kill(n, 0); return true; } catch { return false; }
 }
 
 function sessionStillAlive() {

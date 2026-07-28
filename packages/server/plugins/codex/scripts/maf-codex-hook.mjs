@@ -11,16 +11,14 @@
  * Codex TUI startup is not polluted.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, appendFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { basename, dirname, join, resolve, parse as parsePath } from "node:path";
-import { homedir } from "node:os";
+import { mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { HOME, MAF_HOME, inferAgent, isDir, isFile, processAlive, readMafConfig, safeName, validAgentName } from "./maf-codex-common.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(__dirname);
-const HOME = homedir();
-const MAF_HOME = join(HOME, ".meta-agent-framework");
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
 const DEFAULT_PORT = 4100;
@@ -35,14 +33,6 @@ function log(message) {
     mkdirSync(LOG_DIR, { recursive: true });
     appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-hook] ${message}\n`);
   } catch {}
-}
-
-function isDir(path) {
-  try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; }
-}
-
-function isFile(path) {
-  try { return existsSync(path) && statSync(path).isFile(); } catch { return false; }
 }
 
 function safeJson(raw) {
@@ -117,158 +107,12 @@ function findBestStartDir(hookEvent) {
   return "";
 }
 
-function parentDirs(start) {
-  const dirs = [];
-  let cur = resolve(start);
-  const root = parsePath(cur).root;
-  while (cur && cur !== root) {
-    dirs.push(cur);
-    const next = dirname(cur);
-    if (next === cur) break;
-    cur = next;
-  }
-  dirs.push(root);
-  return dirs;
-}
-
-function validAgentName(name) {
-  return typeof name === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(name);
-}
-
-function isHomeDir(dir) {
-  return resolve(dir) === resolve(HOME);
-}
-
-function isGitRoot(dir) {
-  const dotGit = join(dir, ".git");
-  if (isDir(dotGit)) return isFile(join(dotGit, "HEAD"));
-  if (!isFile(dotGit)) return false;
-  try { return /^gitdir:\s*.+/i.test(readFileSync(dotGit, "utf-8")); } catch { return false; }
-}
-
-function findGitRoot(startDir) {
-  for (const dir of parentDirs(startDir)) {
-    if (isHomeDir(dir)) break;
-    if (isGitRoot(dir)) return dir;
-  }
-  return "";
-}
-
-function findCodexAgentRoot(startDir) {
-  for (const dir of parentDirs(startDir)) {
-    if (isHomeDir(dir)) break;
-    if (isDir(join(dir, ".codex", "agents"))) return dir;
-  }
-  return "";
-}
-
-function inferProjectRoot(startDir) {
-  const codexRoot = findCodexAgentRoot(startDir);
-  if (codexRoot) return codexRoot;
-  const gitRoot = findGitRoot(startDir);
-  if (gitRoot) return gitRoot;
-  return resolve(startDir);
-}
-
-function unescapeTomlBasicString(value) {
-  try { return JSON.parse(`"${value}"`); } catch { return value.replace(/\\"/g, '"').replace(/\\\\/g, "\\"); }
-}
-
-function parseTomlString(raw, key) {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^\\s*${escaped}\\s*=\\s*(?:\"\"\"([\\s\\S]*?)\"\"\"|'''([\\s\\S]*?)'''|\"((?:\\\\.|[^\"\\\\])*)\"|'([^']*)'|([^\\n#]+))`, "m");
-  const m = raw.match(re);
-  if (!m) return "";
-  if (m[1] != null) return m[1].replace(/^\n/, "").trim();
-  if (m[2] != null) return m[2].replace(/^\n/, "").trim();
-  if (m[3] != null) return unescapeTomlBasicString(m[3]).trim();
-  if (m[4] != null) return m[4].trim();
-  return String(m[5] || "").trim().replace(/\s+#.*$/, "");
-}
-
-function readCodexAgentToml(file) {
-  try {
-    const raw = readFileSync(file, "utf-8");
-    const fileName = basename(file, ".toml");
-    const name = parseTomlString(raw, "name");
-    const description = parseTomlString(raw, "description");
-    return {
-      path: file,
-      fileName,
-      name: validAgentName(name) ? name : "",
-      description,
-    };
-  } catch {}
-  return null;
-}
-
-function listProjectCodexAgents(projectRoot) {
-  const dir = join(projectRoot, ".codex", "agents");
-  try {
-    if (!isDir(dir)) return [];
-    return readdirSync(dir)
-      .filter(f => f.endsWith(".toml") && !f.startsWith("."))
-      .sort()
-      .map(f => readCodexAgentToml(join(dir, f)))
-      .filter(Boolean);
-  } catch {}
-  return [];
-}
-
-function pickCodexAgent(projectRoot) {
-  const projectName = basename(projectRoot);
-  const agents = listProjectCodexAgents(projectRoot);
-
-  const matching = agents.find(a => a.fileName === projectName || a.name === projectName);
-  if (matching) return matching.name || (validAgentName(matching.fileName) ? matching.fileName : "");
-
-  if (agents.length === 1) {
-    const only = agents[0];
-    return only.name || (validAgentName(only.fileName) ? only.fileName : "");
-  }
-
-  return validAgentName(projectName) ? projectName : "";
-}
-
-function inferAgent(startDir) {
-  const projectRoot = inferProjectRoot(startDir);
-  if (isHomeDir(projectRoot)) return { agentName: "", projectPath: projectRoot };
-
-  if (validAgentName(process.env.MAF_AGENT_NAME)) {
-    return { agentName: process.env.MAF_AGENT_NAME, projectPath: projectRoot };
-  }
-
-  return { agentName: pickCodexAgent(projectRoot), projectPath: projectRoot };
-}
-
-function readMafConfig(projectPath) {
-  const files = [
-    join(MAF_HOME, "maf.config.json"),
-    join(projectPath, "maf.config.json"),
-  ];
-  let cfg = {};
-  for (const file of files) {
-    try {
-      if (isFile(file)) cfg = { ...cfg, ...JSON.parse(readFileSync(file, "utf-8")) };
-    } catch {}
-  }
-  return cfg;
-}
-
-function processAlive(pid) {
-  const n = Number(pid || 0);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  try { process.kill(n, 0); return true; } catch { return false; }
-}
-
 function receiverPidFile(agentName) {
-  const safe = String(agentName || "codex").replace(/[^A-Za-z0-9_.-]/g, "_");
-  return join(MAF_HOME, `codex-attached-receiver-${safe}.pid`);
+  return join(MAF_HOME, `codex-attached-receiver-${safeName(agentName)}.pid`);
 }
 
 function receiverMetaFile(agentName) {
-  const safe = String(agentName || "codex").replace(/[^A-Za-z0-9_.-]/g, "_");
-  return join(MAF_HOME, `codex-attached-receiver-${safe}.json`);
+  return join(MAF_HOME, `codex-attached-receiver-${safeName(agentName)}.json`);
 }
 
 function readReceiverMeta(agentName) {

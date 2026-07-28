@@ -77,7 +77,7 @@ export class WorkflowEngine {
    * 返回一个 Promise，工作流全部完成后 resolve（阻塞式，用于 MAS Runner）
    */
   async run(title: string, nodes: Omit<WorkflowNode, 'status'>[], options: WorkflowStartOptions = {}): Promise<WorkflowSummary> {
-    const { workflow_id, promise } = this.startWorkflow(title, nodes, options);
+    const { promise } = this.startWorkflow(title, nodes, options);
     return promise;
   }
 

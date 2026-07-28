@@ -76,7 +76,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
   // long-poll：等待工作流完成或超时
   const timeout = parseInt(req.query.timeout as string) || 60_000;
-  const result = await Promise.race([
+  await Promise.race([
     workflowEngine.waitForCompletion(wf.id),
     new Promise<null>(resolve => setTimeout(() => resolve(null), timeout)),
   ]);

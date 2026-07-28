@@ -138,8 +138,6 @@ export class AgentRegistry {
     // 策略：外部注册表管理的 agent 不能随意删除
     //   - 受管理的 agent：UPDATE（更新 endpoint/status/skills/mcps）
     //   - 动态 agent：先删旧的再 INSERT（全量同步）
-    const incomingNames = new Set(clientAgentInfos.map(a => a.agent_name));
-
     // 不再删除旧 agent——多个 Client（opencode + Claude Code）可能各自注册不同 agent
     // 每个 agent 通过下面的 upsert/insert 更新，不在列表里的保持原样（靠心跳超时自然下线）
 

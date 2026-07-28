@@ -16,7 +16,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import type {
-  Agent, AgentRuntime, EvolveCommand, EvolveAction, EvolveFile, EvolveResult,
+  Agent, EvolveCommand, EvolveAction, EvolveFile, EvolveResult,
 } from '../types';
 
 // ============================================================

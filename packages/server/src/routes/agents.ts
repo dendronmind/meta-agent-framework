@@ -116,7 +116,7 @@ router.post('/clients/plugin-register', (req: Request, res: Response) => {
 
 /** POST /api/clients/plugin-event — 接收插件事件 */
 router.post('/clients/plugin-event', (req: Request, res: Response) => {
-  const { user_id, event_type, serverUrl, directory, data } = req.body;
+  const { user_id, event_type, serverUrl } = req.body;
   console.log(`[Plugin] Event: ${event_type} from ${user_id} (${serverUrl})`);
   res.json({ received: true });
 });
