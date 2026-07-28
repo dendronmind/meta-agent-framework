@@ -22,7 +22,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { homedir, networkInterfaces } from "node:os";
+import { homedir } from "node:os";
 import { execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -139,19 +139,6 @@ function syncWorkspace() {
 // ============================================================
 // 工具函数
 // ============================================================
-
-function getLocalIP() {
-  for (const ifaces of Object.values(networkInterfaces())) {
-    for (const iface of ifaces || []) {
-      if (!iface.internal && iface.family === "IPv4") return iface.address;
-    }
-  }
-  return "127.0.0.1";
-}
-
-function hasCommand(cmd) {
-  try { execSync(`command -v ${cmd}`, { stdio: "ignore", timeout: 2000 }); return true; } catch { return false; }
-}
 
 function readConfig() {
   try {
