@@ -6,7 +6,8 @@
     "maf-client": "./bin/maf-client"
   },
   "scripts": {
-    "postinstall": "node bin/maf-install.mjs --auto"
+    "postinstall": "node bin/maf-install.mjs --auto",
+    "prepack": "if [ -f ../../scripts/sync-client-pkg.sh ]; then bash ../../scripts/sync-client-pkg.sh >&2; fi"
   },
   "files": [
     "bin/maf-client",

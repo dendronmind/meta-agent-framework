@@ -172,6 +172,13 @@ print('  ✅ packages/server/src/types/index.ts')
 fi  # end of RETRY==false block
 
 # ============================================================
+# 同步 Client 分发副本
+# ============================================================
+echo ""
+echo -e "${CYAN}同步 Client 分发副本...${NC}"
+bash scripts/sync-client-pkg.sh
+
+# ============================================================
 # 2. 编译检查
 # ============================================================
 echo ""
@@ -226,7 +233,6 @@ else
   echo "$CLIENT_PUB" | tail -10
   exit 1
 fi
-node bin/restore-symlinks.mjs 2>/dev/null
 cd "$PROJECT_ROOT"
 
 # ============================================================

@@ -15,10 +15,13 @@ echo "同步 Plugin 源文件到 Client 包..."
 mkdir -p "$DST/daemon"
 cp "$SRC/node-daemon/daemon.mjs" "$DST/daemon/"
 # opencode
+mkdir -p "$DST/opencode"
 cp "$SRC/opencode-plugin-meta-agent-framework/index.js" "$DST/opencode/"
 cp "$SRC/opencode-plugin-meta-agent-framework/package.json" "$DST/opencode/"
 
 # claude-code
+mkdir -p "$DST/claude-code"
+rm -rf "$DST/claude-code/.claude-plugin" "$DST/claude-code/hooks" "$DST/claude-code/scripts"
 cp -r "$SRC/claude-code-plugin-maf/.claude-plugin" "$DST/claude-code/"
 cp -r "$SRC/claude-code-plugin-maf/hooks" "$DST/claude-code/"
 cp -r "$SRC/claude-code-plugin-maf/scripts" "$DST/claude-code/"
@@ -28,3 +31,7 @@ rm -rf "$DST/codex"
 cp -r "$SRC/codex" "$DST/codex"
 
 echo "✅ 同步完成"
+
+if [[ "${MAF_SKIP_CLIENT_SYNC_CHECK:-0}" != "1" ]]; then
+  bash "$SCRIPT_DIR/scripts/check-client-sync.sh"
+fi

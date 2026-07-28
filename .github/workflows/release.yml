@@ -20,6 +20,9 @@ jobs:
       - name: Install server dependencies
         run: cd packages/server && npm ci --registry https://registry.npmjs.org
 
+      - name: Sync client package files
+        run: bash scripts/sync-client-pkg.sh
+
       - name: Pack server
         run: cd packages/server && npm pack
 
