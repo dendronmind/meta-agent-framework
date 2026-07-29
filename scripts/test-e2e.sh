@@ -1389,6 +1389,36 @@ assert "agent-A 已被 disconnect" "no" "$HAS_A_AFTER"
 curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
   -d "{\"agent_name\":\"$SWITCH_AGENT_B\",\"plugin_pid\":$SWITCH_PID}" >/dev/null 2>&1
 
+# 同名新实例退出时，如果旧后台/任务仍在执行，不能删除 taskQueue，避免 workflow 上下文丢失
+DUP_AGENT="same-agent-context"
+DUP_PID_1=91001
+DUP_PID_2=91002
+DUP_TASK="same-agent-task-001"
+DUP_WF="same-agent-wf-001"
+DUP_NODE="same-agent-node-001"
+
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$DUP_PID_1,\"directory\":\"/tmp\"}" >/dev/null 2>&1
+curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
+  -d "{\"task_id\":\"$DUP_TASK\",\"workflow_id\":\"$DUP_WF\",\"node_id\":\"$DUP_NODE\",\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"title\":\"same agent context test\",\"description\":\"same agent context test\"}" >/dev/null 2>&1
+DUP_WAIT=$(curl -s "$DAEMON_URL/tasks/wait?agent=$DUP_AGENT" 2>/dev/null)
+assert "同名测试任务已分发" "$DUP_TASK" "$DUP_WAIT"
+
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$DUP_PID_2,\"directory\":\"/tmp\"}" >/dev/null 2>&1
+DUP_DISCONNECT=$(curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\",\"plugin_pid\":$DUP_PID_2}" 2>/dev/null)
+assert "同名当前实例断开时保留执行中队列" '"deferred":true' "$DUP_DISCONNECT"
+
+curl -s -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\",\"task_id\":\"$DUP_TASK\",\"status\":\"completed\",\"result\":\"same agent preserved result\",\"duration_ms\":1}" >/dev/null 2>&1
+DUP_COMPLETED=$(curl -s "$DAEMON_URL/workflows/completed?limit=10" 2>/dev/null)
+assert "同名断开后 workflow 上下文仍保留" "$DUP_WF" "$DUP_COMPLETED"
+assert "同名断开后结果仍保留" "same agent preserved result" "$DUP_COMPLETED"
+
+curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\"}" >/dev/null 2>&1
+
 fi
 
 

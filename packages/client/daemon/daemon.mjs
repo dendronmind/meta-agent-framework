@@ -427,6 +427,60 @@ function cleanIdleServes() {
   }
 }
 
+function taskQueueHasActiveWork(q) {
+  return Boolean(q && (q.executingTaskId || q.lastExecuted || q.pending.length > 0));
+}
+
+function closeWaitingResponse(q, payload = { task: null }) {
+  if (!q?.waitingResponse) return false;
+  try {
+    q.waitingResponse.writeHead(200, { "Content-Type": "application/json" });
+    q.waitingResponse.end(JSON.stringify(payload));
+  } catch {}
+  q.waitingResponse = null;
+  return true;
+}
+
+function closeServeScreen(agentName, reason = "") {
+  const info = serveProcesses.get(agentName);
+  if (!info) return false;
+  log(`🗑 关闭旧 agent screen: ${agentName} (${info.screenName})${reason ? ` — ${reason}` : ""}`);
+  try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
+  serveProcesses.delete(agentName);
+  return true;
+}
+
+function closeCodexTaskScreensForAgent(agentName, reason = "") {
+  let closed = 0;
+  for (const [taskId, info] of codexTaskScreens) {
+    if (info.agentName !== agentName) continue;
+    log(`🗑 关闭旧 Codex task screen: ${agentName} task=${taskId} (${info.screenName})${reason ? ` — ${reason}` : ""}`);
+    try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
+    codexTaskScreens.delete(taskId);
+    closed++;
+  }
+  return closed;
+}
+
+function retireIdleSameAgentInstance(agentName, existing, incomingPid) {
+  if (!existing || !incomingPid) return;
+  const existingPid = existing.pluginPid || 0;
+  if (existingPid === incomingPid) return;
+
+  const q = taskQueues.get(agentName);
+  if (closeWaitingResponse(q)) {
+    log(`🔌 同名 agent 新实例接管，已唤醒旧 long-poll: ${agentName}`);
+  }
+
+  if (taskQueueHasActiveWork(q)) {
+    log(`ℹ️ 同名 agent 新实例接管但已有任务上下文，保留队列/后台执行: ${agentName} oldPid=${existingPid || "?"} newPid=${incomingPid}`);
+    return;
+  }
+
+  closeServeScreen(agentName, "same-agent reconnect");
+  closeCodexTaskScreensForAgent(agentName, "same-agent reconnect");
+}
+
 /** 清理所有 screen 进程（Daemon 退出时） */
 function cleanAllServes() {
   for (const [name, info] of serveProcesses) {
@@ -1597,9 +1651,11 @@ const httpServer = createServer(async (req, res) => {
     }
 
     const existing = agents.get(name);
+    const incomingPid = body.plugin_pid || 0;
+    retireIdleSameAgentInstance(name, existing, incomingPid);
     const info = {
       runtime: body.runtime || existing?.runtime || "opencode",
-      pluginPid: body.plugin_pid || existing?.pluginPid || 0,
+      pluginPid: incomingPid || existing?.pluginPid || 0,
       directory: body.directory || existing?.directory || DIRECTORY,
       registered: false,
       sessionId: body.session_id || existing?.sessionId || "",
@@ -1636,10 +1692,24 @@ const httpServer = createServer(async (req, res) => {
         json(200, { ok: true, ignored: true, agents: [...agents.keys()] });
         return;
       }
+      const q = taskQueues.get(name);
+      if (taskQueueHasActiveWork(q)) {
+        // 前台同名实例退出时，后台 screen/exec 可能仍在执行并依赖 lastExecuted/workflow 元数据回报。
+        // 这时不能删除 taskQueue，否则 /tasks/done 会丢失 workflow_id/node_id 上下文。
+        closeWaitingResponse(q);
+        agents.set(name, {
+          ...info,
+          pluginPid: 0,
+          lastSeen: Date.now(),
+        });
+        log(`🔌 agent 接收端断开但任务仍在，保留队列上下文: ${name} (executing=${q?.executingTaskId || "none"}, pending=${q?.pending.length || 0})`);
+        if (info.runtime === "codex" && q?.pending.length > 0) scheduleCodexQueue(name);
+        json(200, { ok: true, deferred: true, active_task: q?.executingTaskId || "", pending: q?.pending.length || 0, agents: [...agents.keys()] });
+        return;
+      }
       await reportAgentStatusToServer(name, "offline");
       agents.delete(name);
       // 清理任务队列
-      const q = taskQueues.get(name);
       if (q?.waitingResponse) {
         try { q.waitingResponse.writeHead(200, { "Content-Type": "application/json" }); q.waitingResponse.end('{"task":null}'); } catch {}
       }
