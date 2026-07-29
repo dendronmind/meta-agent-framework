@@ -167,7 +167,6 @@ start_mock_opencode() {
   META_AGENT_SERVER="$E2E_SERVER" \
   MAF_USER_ID="e2e-testuser" \
   MAF_NODE_PORT=$NODE_PORT \
-  MAF_CODEX_DELIVERY="detached" \
   node "$ROOT_DIR/scripts/mock-opencode.mjs" "$AGENT_NAME" &>/dev/null &
   MOCK_PID=$!
   disown $MOCK_PID
@@ -1324,6 +1323,7 @@ assert "Server Codex plugin source" '"name": "maf"' "$(cat "$SCRIPT_DIR/plugins/
 assert "Server Codex installer source" "Server-served Codex client installer" "$(head -n 8 "$SCRIPT_DIR/plugins/codex-install.mjs" 2>/dev/null || true)"
 assert "Server install.sh detects Codex" "HAS_CODEX" "$(grep 'HAS_CODEX' "$SCRIPT_DIR/plugins/install.sh" 2>/dev/null || true)"
 assert "sync-client-pkg syncs Codex" 'cp -r "$SRC/codex" "$DST/codex"' "$(grep 'SRC/codex' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
+assert "Codex default delivery is auto" 'MAF_CODEX_DELIVERY || "auto"' "$(grep 'MAF_CODEX_DELIVERY || "auto"' "$ROOT_DIR/packages/server/plugins/node-daemon/daemon.mjs" 2>/dev/null || true)"
 assert "sync-client-pkg verifies copies" "check-client-sync.sh" "$(grep 'check-client-sync.sh' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
 assert "GitHub release syncs client package" "sync-client-pkg.sh" "$(grep 'sync-client-pkg.sh' "$ROOT_DIR/.github/workflows/release.yml" 2>/dev/null || true)"
 assert "Client prepack syncs package" "sync-client-pkg.sh" "$(grep 'sync-client-pkg.sh' "$ROOT_DIR/packages/client/package.json" 2>/dev/null || true)"

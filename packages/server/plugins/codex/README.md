@@ -55,6 +55,7 @@ commands pass through to the real Codex binary without auto-remote conversion.
 
 Useful environment variables:
 
+- `MAF_CODEX_DELIVERY=auto|attached|detached`: task delivery policy; default `auto` uses the attached receiver when present and falls back to Daemon-managed screen/TUI execution when no current Codex session is attached.
 - `MAF_AGENT_NAME=<agent>`: explicit temporary MAF agent-name override.
 - `MAF_CODEX_APP_SERVER_URL=ws://127.0.0.1:<port>`: explicit app-server URL.
 - `MAF_CODEX_APP_SERVER_CMD='codex app-server --stdio'`: start/connect via stdio command.

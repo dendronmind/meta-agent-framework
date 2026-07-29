@@ -19,7 +19,7 @@
  *   MAF_DIRECTORY      — 工作目录
  *   MAF_PLUGIN_DIR     — Plugin 安装目录
  *   MAF_PARENT_PID     — 仅 Claude Code 首次拉起时使用（不再跟随退出）
- *   MAF_CODEX_DELIVERY  — Codex 投递语义：attached（默认）| detached | auto
+ *   MAF_CODEX_DELIVERY  — Codex 投递语义：auto（默认）| attached | detached
  */
 
 import { createServer } from "node:http";
@@ -136,7 +136,7 @@ const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
-const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "attached");
+const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "auto");
 const codexQueueRunners = new Set();
 const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
 
@@ -249,8 +249,8 @@ function getAgentStatuses() {
   for (const [name, info] of agents) {
     const q = taskQueues.get(name);
 
-    // Codex：默认 attached 语义下，只有当前 TUI 接收器存在才 online；
-    // detached/auto 是显式允许 Daemon 通过 screen/exec 兜底执行。
+    // Codex：默认 auto 语义下，有 attached receiver 就注入当前 TUI；否则由 Daemon 通过 screen/exec 兜底执行。
+    // 只有显式 attached 时，才要求当前 TUI 接收器在线。
     if (info.runtime === "codex") {
       if (q?.executingTaskId) {
         statuses[name] = "busy";
@@ -1766,7 +1766,7 @@ const httpServer = createServer(async (req, res) => {
       });
     }
 
-    // Codex runtime：默认只接受 attached 当前 TUI；detached/auto 才由 Daemon screen/exec 托管执行。
+    // Codex runtime：默认 auto；有 attached receiver 就注入当前 TUI，否则由 Daemon screen/exec 托管执行。
     if (runtime === "codex") {
       const existing = agents.get(targetAgent);
       const directory = projectPath || existing?.directory || DIRECTORY;
