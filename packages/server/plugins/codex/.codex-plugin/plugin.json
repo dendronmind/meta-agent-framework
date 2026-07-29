@@ -1,6 +1,5 @@
 {
   "name": "maf",
-  "version": "0.4.10",
   "description": "Meta-Agent Framework bridge for Codex. Starts the MAF Node Daemon and registers the current project agent on SessionStart.",
   "author": {
     "name": "Meta-Agent-Framework"

@@ -1,6 +1,5 @@
 {
   "name": "opencode-plugin-meta-agent-framework",
-  "version": "0.4.10",
   "description": "Meta-Agent-Framework Bridge — 让 opencode 自动接入分布式 Agent 网络",
   "type": "module",
   "main": "index.js",

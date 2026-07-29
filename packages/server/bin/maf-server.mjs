@@ -33,6 +33,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PACKAGE_ROOT = resolve(__dirname, "..");  // npm 包的根目录
 
+function readVersionFromPackageTree(startDir) {
+  let dir = startDir;
+  for (;;) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+      if (pkg.version) return pkg.version;
+    } catch {}
+    const parent = dirname(dir);
+    if (parent === dir) return "";
+    dir = parent;
+  }
+}
+
+const PACKAGE_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(PACKAGE_ROOT) || "0.0.0";
+
 const MAF_HOME = process.env.MAF_HOME || join(homedir(), ".meta-agent-framework");
 const STATE_DIR = join(MAF_HOME, "state");
 const PID_FILE = join(STATE_DIR, "server.pid");
@@ -674,12 +689,7 @@ function cmdResume() {
 }
 
 function cmdVersion() {
-  try {
-    const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8"));
-    console.log(`maf-server v${pkg.version}`);
-  } catch {
-    console.log("maf-server (version unknown)");
-  }
+  console.log(`maf-server v${PACKAGE_VERSION}`);
 }
 
 function cmdUninstall() {

@@ -65,6 +65,15 @@ function writeCodexPluginManifestVersion(pluginDir) {
   }
 }
 
+function readDownloadedPluginVersion(pluginDir) {
+  try {
+    const manifest = safeJson(readFileSync(join(pluginDir, ".codex-plugin", "plugin.json"), "utf-8"), null);
+    return manifest?.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 function upsertCodexMarketplace() {
   mkdirSync(dirname(CODEX_MARKETPLACE_JSON), { recursive: true });
   let marketplace = null;
@@ -299,9 +308,10 @@ function installCodex() {
     }
   }
 
+  const pluginVersion = readDownloadedPluginVersion(CODEX_PLUGIN_SOURCE_DIR);
   writeFileSync(join(CODEX_PLUGIN_SOURCE_DIR, "package.json"), JSON.stringify({
     name: "@maf/codex-plugin",
-    version: "0.0.0-server",
+    version: pluginVersion,
     type: "module",
   }, null, 2) + "\n");
   writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);

@@ -24,10 +24,10 @@ jobs:
         run: bash scripts/sync-client-pkg.sh
 
       - name: Pack server
-        run: cd packages/server && npm pack
+        run: node scripts/pack-package.mjs server --pack-destination packages/server
 
       - name: Pack client
-        run: cd packages/client && npm pack
+        run: node scripts/pack-package.mjs client --pack-destination packages/client
 
       # Rename tgz to fixed names for stable download URLs
       - name: Rename packages
@@ -35,7 +35,7 @@ jobs:
           mv packages/server/*.tgz packages/server/meta-agent-server.tgz
           mv packages/client/*.tgz packages/client/meta-agent-client.tgz
 
-      # Create versioned release (e.g. v0.4.0)
+      # Create versioned release (e.g. vX.Y.Z)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

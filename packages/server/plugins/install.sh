@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Meta-Agent Framework Client 一键安装 (v0.4.0 — Node Daemon)
+# Meta-Agent Framework Client 一键安装（Node Daemon）
 #
 # 自动检测 opencode / Claude Code / Codex，安装对应的 Plugin。
 # 此脚本由 Server 动态注入地址，远端直接执行：
@@ -10,6 +10,7 @@
 set -uo pipefail
 
 SERVER="__SERVER_URL__"
+MAF_VERSION="__PACKAGE_VERSION__"
 
 echo ""
 echo "╔══════════════════════════════════════╗"
@@ -53,6 +54,9 @@ echo "📥 安装 Node Daemon..."
 MAF_HOME="${HOME}/.meta-agent-framework"
 mkdir -p "${MAF_HOME}"
 if curl -fsSL "${SERVER}/plugins/daemon.mjs" -o "${MAF_HOME}/daemon.mjs"; then
+  cat > "${MAF_HOME}/package.json" << EOF
+{"name":"@maf/meta-agent-daemon","version":"${MAF_VERSION}","type":"module"}
+EOF
   echo "  ✅ daemon.mjs → ~/.meta-agent-framework/"
 else
   echo "  ❌ daemon.mjs 下载失败（Node Daemon 将无法拉起）"

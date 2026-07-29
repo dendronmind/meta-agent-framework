@@ -72,6 +72,17 @@ let shuttingDown = false;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+
+function sendJsonWithVersion(res: express.Response, filePath: string): void {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    manifest.version = SERVER_VERSION;
+    res.type('application/json').send(JSON.stringify(manifest, null, 2) + '\n');
+  } catch {
+    res.status(500).send('manifest not found');
+  }
+}
+
 // --- API Routes ---
 // agentsRouter 同时挂载 /api/clients/* 和 /api/agents/*
 app.use('/api', agentsRouter);
@@ -99,7 +110,7 @@ app.get('/install.sh', (_req, res) => {
   const scriptPath = path.join(__dirname, '..', 'plugins', 'install.sh');
   try {
     let script = fs.readFileSync(scriptPath, 'utf-8');
-    script = script.replace(/__SERVER_URL__/g, SERVER_URL);
+    script = script.replace(/__SERVER_URL__/g, SERVER_URL).replace(/__PACKAGE_VERSION__/g, SERVER_VERSION);
     res.type('text/plain').send(script);
   } catch {
     res.status(500).send('# install.sh not found');
@@ -122,7 +133,11 @@ app.get('/plugins/:file', (req, res) => {
   const filePath = file === 'daemon.mjs'
     ? path.join(__dirname, '..', 'plugins', 'node-daemon', 'daemon.mjs')
     : path.join(__dirname, '..', 'plugins', 'opencode-plugin-meta-agent-framework', file);
-  res.sendFile(filePath);
+  if (file === 'package.json') {
+    sendJsonWithVersion(res, filePath);
+  } else {
+    res.sendFile(filePath);
+  }
 });
 
 // GET /codex-install.mjs — install.sh 用它在远端安装 Codex plugin + launcher wrapper
@@ -143,7 +158,11 @@ app.get('/cc-plugins/{*path}', (req, res) => {
   if (!relPath || relPath.includes('..')) { res.status(400).send('Bad request'); return; }
   const filePath = path.join(__dirname, '..', 'plugins', 'claude-code-plugin-maf', relPath);
   if (fs.existsSync(filePath)) {
-    res.sendFile(filePath, { dotfiles: 'allow' });
+    if (relPath === '.claude-plugin/plugin.json') {
+      sendJsonWithVersion(res, filePath);
+    } else {
+      res.sendFile(filePath, { dotfiles: 'allow' });
+    }
   } else {
     res.status(404).send('Not found');
   }
@@ -157,7 +176,11 @@ app.get('/codex-plugins/{*path}', (req, res) => {
   if (!relPath || relPath.includes('..')) { res.status(400).send('Bad request'); return; }
   const filePath = path.join(__dirname, '..', 'plugins', 'codex', relPath);
   if (fs.existsSync(filePath)) {
-    res.sendFile(filePath, { dotfiles: 'allow' });
+    if (relPath === '.codex-plugin/plugin.json') {
+      sendJsonWithVersion(res, filePath);
+    } else {
+      res.sendFile(filePath, { dotfiles: 'allow' });
+    }
   } else {
     res.status(404).send('Not found');
   }

@@ -193,7 +193,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 从 package.json 读取版本号
-EXPECTED_VERSION=$(python3 -c "import json;print(json.load(open('$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/package.json')).get('version',''))" 2>/dev/null)
+EXPECTED_VERSION=$(python3 -c "import json;print(json.load(open('$ROOT_DIR/package.json')).get('version',''))" 2>/dev/null)
 
 # Plugin 目录副本
 PLUGIN_DIR="/tmp/maf-e2e-plugin"
@@ -1326,11 +1326,15 @@ assert "sync-client-pkg syncs Codex" 'cp -r "$SRC/codex" "$DST/codex"' "$(grep '
 assert "Codex default delivery is auto" 'MAF_CODEX_DELIVERY || "auto"' "$(grep 'MAF_CODEX_DELIVERY || "auto"' "$ROOT_DIR/packages/server/plugins/node-daemon/daemon.mjs" 2>/dev/null || true)"
 assert "sync-client-pkg verifies copies" "check-client-sync.sh" "$(grep 'check-client-sync.sh' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
 assert "GitHub release syncs client package" "sync-client-pkg.sh" "$(grep 'sync-client-pkg.sh' "$ROOT_DIR/.github/workflows/release.yml" 2>/dev/null || true)"
-assert "Client prepack syncs package" "sync-client-pkg.sh" "$(grep 'sync-client-pkg.sh' "$ROOT_DIR/packages/client/package.json" 2>/dev/null || true)"
+assert "版本只保留根 package.json" "package.json" "$(git -C "$ROOT_DIR" grep -l '"version": "'$EXPECTED_VERSION'"' -- ':!package.json' ':!node_modules' ':!package-lock.json' ':!packages/server/package-lock.json' 2>/dev/null || echo package.json)"
+assert "pack staging 注入版本" "pkg.version = version" "$(grep 'pkg.version = version' "$ROOT_DIR/scripts/pack-package.mjs" 2>/dev/null || true)"
 assert "Codex ACK notification default off" 'MAF_CODEX_NOTIFY_ACK === "1"' "$(grep 'MAF_CODEX_NOTIFY_ACK' "$ROOT_DIR/packages/client/codex/scripts/maf-codex-attached-receiver.mjs" 2>/dev/null || true)"
 assert "Server Codex installer route" "Server-served Codex client installer" "$(curl -s "$E2E_SERVER/codex-install.mjs" 2>/dev/null || true)"
+assert "Server opencode plugin route injects version" '"version": "'$EXPECTED_VERSION'"' "$(curl -s "$E2E_SERVER/plugins/package.json" 2>/dev/null || true)"
 assert "Server Codex plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/codex-plugins/.codex-plugin/plugin.json" 2>/dev/null || true)"
+assert "Server Codex plugin route injects version" '"version": "'$EXPECTED_VERSION'"' "$(curl -s "$E2E_SERVER/codex-plugins/.codex-plugin/plugin.json" 2>/dev/null || true)"
 assert "Server Claude dotfile plugin route" '"name": "maf"' "$(curl -s "$E2E_SERVER/cc-plugins/.claude-plugin/plugin.json" 2>/dev/null || true)"
+assert "Server Claude plugin route injects version" '"version": "'$EXPECTED_VERSION'"' "$(curl -s "$E2E_SERVER/cc-plugins/.claude-plugin/plugin.json" 2>/dev/null || true)"
 
 # 验证 Server agent 资产已拆到非隐藏源码目录，安装时再物化为 runtime 隐藏布局
 assert "Server common_agent source layout" "common_agent/" "$(grep 'common_agent/' "$SCRIPT_DIR/package.json" 2>/dev/null || true)"

@@ -5,7 +5,7 @@ description: Meta-Agent 分布式网络的 Client 协议 — 定义远端 Agent 
 
 # Meta-Agent Client Protocol
 
-> Version: 0.4.0
+> Version: follows root package.json
 > Runtime: opencode, claude-code
 > Trigger: 当你作为 Meta-Agent 网络中的远端 Client Agent 运行时，自动遵守本协议。
 > Reference: reference/playbook-spec.md — Playbook 格式详细规范

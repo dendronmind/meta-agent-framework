@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# release.sh — 统一修改版本号并发布所有 npm 包
+# release.sh — 只修改根 package.json 版本并发布所有 npm 包
 #
 # 用法：
 #   bash scripts/release.sh <version>
-#   bash scripts/release.sh 0.4.10
-#   bash scripts/release.sh patch    # 自动 +1 patch（0.4.5 → 0.4.6）
-#   bash scripts/release.sh minor    # 自动 +1 minor（0.3.5 → 0.4.0）
+#   bash scripts/release.sh x.y.z
+#   bash scripts/release.sh patch    # 自动 +1 patch（x.y.z → x.y.z+1）
+#   bash scripts/release.sh minor    # 自动 +1 minor（x.y.z → x.y+1.0）
 #   bash scripts/release.sh --retry  # 版本号已改好，从编译检查开始继续发布
 #
 # 流程：
 #   1. 计算新版本号
-#   2. 更新所有 package.json
+#   2. 只更新根 package.json version
 #   3. 编译检查
 #   4. e2e 测试
 #   5. 发布 @maf/meta-agent-server + @maf/meta-agent-client
@@ -32,7 +32,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 # ============================================================
 # 读取当前版本
 # ============================================================
-CURRENT_VERSION=$(python3 -c "import json;print(json.load(open('packages/server/package.json'))['version'])")
+CURRENT_VERSION=$(node -p "require('./package.json').version")
 echo ""
 echo -e "${CYAN}当前版本: ${CURRENT_VERSION}${NC}"
 
@@ -54,7 +54,7 @@ if [[ "$RETRY" == "false" ]]; then
     echo ""
     echo "用法: bash scripts/release.sh <version|patch|minor|major|--retry>"
     echo ""
-    echo "  bash scripts/release.sh 0.4.10    # 指定版本"
+    echo "  bash scripts/release.sh x.y.z    # 指定版本"
     echo "  bash scripts/release.sh patch    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2"."$3+1}')"
     echo "  bash scripts/release.sh minor    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2+1".0"}')"
     echo "  bash scripts/release.sh major    # ${CURRENT_VERSION} → $(echo "$CURRENT_VERSION" | awk -F. '{print $1+1".0.0"}')"
@@ -87,17 +87,7 @@ if [[ "$RETRY" == "false" ]]; then
   # ============================================================
   # 确认
   # ============================================================
-  echo "将要更新以下文件的版本号:"
-  echo "  - package.json (本地 file:out/*.tgz 依赖引用)"
-  echo "  - packages/server/package.json (@maf/meta-agent-server)"
-  echo "  - packages/server/src/types/index.ts (CLIENT_MIN_VERSION)"
-  echo "  - packages/server/plugins/opencode-plugin-meta-agent-framework/package.json"
-  echo "  - packages/server/plugins/claude-code-plugin-maf/.claude-plugin/plugin.json"
-  echo "  - packages/server/plugins/codex/.codex-plugin/plugin.json"
-  echo "  - packages/client/package.json (@maf/meta-agent-client)"
-  echo "  - packages/client/opencode/package.json"
-  echo "  - packages/client/claude-code/.claude-plugin/plugin.json"
-  echo "  - packages/client/codex/.codex-plugin/plugin.json"
+  echo "将只更新根 package.json 的 version；其它 package/plugin 版本在 pack/publish staging 中临时生成。"
   echo ""
   read -p "确认发布 ${CURRENT_VERSION} → ${NEW_VERSION}? (y/N) " confirm
   if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -111,64 +101,9 @@ if [[ "$RETRY" == "false" ]]; then
   echo ""
   echo -e "${CYAN}[1/6] 更新版本号...${NC}"
 
-# 主 package.json + npm package/plugin metadata
-python3 -c "
-import json
-version = '${NEW_VERSION}'
-for f in [
-  'packages/server/package.json',
-  'packages/server/plugins/opencode-plugin-meta-agent-framework/package.json',
-  'packages/client/package.json',
-  'packages/client/opencode/package.json',
-]:
-    try:
-        d = json.load(open(f))
-        d['version'] = version
-        json.dump(d, open(f, 'w'), indent=2, ensure_ascii=False)
-        open(f, 'a').write('\n')
-        print(f'  ✅ {f}')
-    except Exception as e:
-        print(f'  ❌ {f}: {e}')
+  node -e "const fs=require('fs'); const p='package.json'; const d=JSON.parse(fs.readFileSync(p,'utf8')); d.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(d,null,2)+'\n');" "${NEW_VERSION}"
 
-root = 'package.json'
-d = json.load(open(root))
-deps = d.setdefault('dependencies', {})
-deps['@maf/meta-agent-server'] = f'file:out/maf-meta-agent-server-{version}.tgz'
-deps['@maf/meta-agent-client'] = f'file:out/maf-meta-agent-client-{version}.tgz'
-json.dump(d, open(root, 'w'), indent=2, ensure_ascii=False)
-open(root, 'a').write('\n')
-print(f'  ✅ {root}')
-"
-
-# runtime plugin.json
-python3 -c "
-import json
-version = '${NEW_VERSION}'
-for f in [
-  'packages/server/plugins/claude-code-plugin-maf/.claude-plugin/plugin.json',
-  'packages/server/plugins/codex/.codex-plugin/plugin.json',
-  'packages/client/claude-code/.claude-plugin/plugin.json',
-  'packages/client/codex/.codex-plugin/plugin.json',
-]:
-    d = json.load(open(f))
-    d['version'] = version
-    json.dump(d, open(f, 'w'), indent=2, ensure_ascii=False)
-    open(f, 'a').write('\n')
-    print(f'  ✅ {f}')
-"
-
-# Client 最低版本：低版本 client 会触发 OTA
-python3 -c "
-from pathlib import Path
-p = Path('packages/server/src/types/index.ts')
-s = p.read_text()
-import re
-s2 = re.sub(r\"export const CLIENT_MIN_VERSION = '[^']+';\", \"export const CLIENT_MIN_VERSION = '${NEW_VERSION}';\", s)
-p.write_text(s2)
-print('  ✅ packages/server/src/types/index.ts')
-"
-
-  echo -e "  ${GREEN}版本号已更新为 ${NEW_VERSION}${NC}"
+  echo -e "  ${GREEN}根 package.json 版本号已更新为 ${NEW_VERSION}${NC}"
 fi  # end of RETRY==false block
 
 # ============================================================
@@ -210,7 +145,7 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}[4/6] 发布 @maf/meta-agent-server@${NEW_VERSION}...${NC}"
-SERVER_PUB=$(cd packages/server && npm publish 2>&1)
+SERVER_PUB=$(node scripts/pack-package.mjs server --publish 2>&1)
 if echo "$SERVER_PUB" | grep -q "@maf/meta-agent-server@${NEW_VERSION}"; then
   echo -e "  ${GREEN}✅ Server 发布成功${NC}"
 else
@@ -224,8 +159,7 @@ fi
 # ============================================================
 echo ""
 echo -e "${CYAN}[5/6] 发布 @maf/meta-agent-client@${NEW_VERSION}...${NC}"
-cd packages/client
-CLIENT_PUB=$(npm publish 2>&1)
+CLIENT_PUB=$(node scripts/pack-package.mjs client --publish 2>&1)
 if echo "$CLIENT_PUB" | grep -q "@maf/meta-agent-client@${NEW_VERSION}"; then
   echo -e "  ${GREEN}✅ Client 发布成功${NC}"
 else

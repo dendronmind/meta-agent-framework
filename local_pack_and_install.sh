@@ -55,8 +55,8 @@ rm -f "$OUT_DIR"/maf-meta-agent-client-*.tgz
 echo ""
 
 echo "▶ Packing server..."
-cd "$SERVER_DIR"
-npm pack --pack-destination "$OUT_DIR"
+cd "$ROOT_DIR"
+node "$ROOT_DIR/scripts/pack-package.mjs" server --pack-destination "$OUT_DIR"
 SERVER_TGZ="$(ls -t "$OUT_DIR"/maf-meta-agent-server-*.tgz | head -n 1)"
 if [[ -z "${SERVER_TGZ:-}" || ! -f "$SERVER_TGZ" ]]; then
   echo "❌ Server package was not generated" >&2
@@ -66,8 +66,8 @@ echo "  server package: $SERVER_TGZ"
 echo ""
 
 echo "▶ Packing client..."
-cd "$CLIENT_DIR"
-npm pack --pack-destination "$OUT_DIR"
+cd "$ROOT_DIR"
+node "$ROOT_DIR/scripts/pack-package.mjs" client --pack-destination "$OUT_DIR"
 CLIENT_TGZ="$(ls -t "$OUT_DIR"/maf-meta-agent-client-*.tgz | head -n 1)"
 if [[ -z "${CLIENT_TGZ:-}" || ! -f "$CLIENT_TGZ" ]]; then
   echo "❌ Client package was not generated" >&2

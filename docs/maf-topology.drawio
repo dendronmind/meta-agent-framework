@@ -1,5 +1,5 @@
 <mxfile>
-  <diagram name="MAF v0.4.0 交互拓扑" id="topology">
+  <diagram name="MAF 交互拓扑" id="topology">
     <mxGraphModel dx="1400" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1800" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0"/>
@@ -217,7 +217,7 @@
         </mxCell>
 
         <!-- 版本标注 -->
-        <mxCell id="version" value="MAF v0.4.0 · 2025-01" style="text;html=1;fontSize=10;align=right;fontColor=#999999;" vertex="1" parent="1">
+        <mxCell id="version" value="MAF architecture" style="text;html=1;fontSize=10;align=right;fontColor=#999999;" vertex="1" parent="1">
           <mxGeometry x="1050" y="830" width="150" height="20" as="geometry"/>
         </mxCell>
 

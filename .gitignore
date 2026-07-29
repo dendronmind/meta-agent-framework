@@ -13,3 +13,6 @@ auth.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Root package has no install-time deps; package locks live in package subdirs.
+/package-lock.json

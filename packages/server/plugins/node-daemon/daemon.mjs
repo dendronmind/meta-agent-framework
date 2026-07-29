@@ -54,10 +54,20 @@ const META_AGENT_SERVER = process.env.META_AGENT_SERVER || _mafCfg.server?.url |
 if (!META_AGENT_SERVER) {
   console.error("[node-daemon] ❌ META_AGENT_SERVER 未配置！运行 npm run init 或设置环境变量 META_AGENT_SERVER");
 }
-const CLIENT_VERSION = (() => {
-  try { return JSON.parse(readFileSync(join(PLUGIN_DIR, "package.json"), "utf-8")).version || "0.0.0"; }
-  catch { return "0.0.0"; }
-})();
+function readVersionFromPackageTree(startDir) {
+  let dir = startDir;
+  for (;;) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+      if (pkg.version) return pkg.version;
+    } catch {}
+    const parent = dirname(dir);
+    if (parent === dir) return "";
+    dir = parent;
+  }
+}
+
+const CLIENT_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(PLUGIN_DIR) || "0.0.0";
 const HEARTBEAT_INTERVAL = 1_000;
 const POLL_INTERVAL = 1_000;
 const STATE_DIR = join(homedir(), ".meta-agent-framework");

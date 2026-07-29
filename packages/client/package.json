@@ -1,13 +1,11 @@
 {
   "name": "@maf/meta-agent-client",
-  "version": "0.4.10",
   "description": "Meta-Agent Framework Client — opencode + Claude Code + Codex 一键接入",
   "bin": {
     "maf-client": "./bin/maf-client"
   },
   "scripts": {
-    "postinstall": "node bin/maf-install.mjs --auto",
-    "prepack": "if [ -f ../../scripts/sync-client-pkg.sh ]; then bash ../../scripts/sync-client-pkg.sh >&2; fi"
+    "postinstall": "node bin/maf-install.mjs --auto"
   },
   "files": [
     "bin/maf-client",

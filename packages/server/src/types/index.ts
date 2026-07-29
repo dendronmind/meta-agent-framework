@@ -3,18 +3,26 @@
 // ============================================================
 
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
-/** Server 版本号 — 从 package.json 读取（唯一版本源） */
-export const SERVER_VERSION: string = (() => {
-  try {
-    const pkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
-    return pkg.version || '0.0.0';
-  } catch { return '0.0.0'; }
-})();
+function readVersionFromPackageTree(startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
+      if (pkg.version) return pkg.version;
+    } catch {}
+    const parent = dirname(dir);
+    if (parent === dir) return '';
+    dir = parent;
+  }
+}
 
-/** Client 最低兼容版本（低于此版本自动触发 OTA，需手动管理） */
-export const CLIENT_MIN_VERSION = '0.4.10';
+/** Server 版本号 — 源码态读取仓库根 package.json，发布态读取 npm 包 package.json */
+export const SERVER_VERSION: string = process.env.MAF_VERSION || readVersionFromPackageTree(__dirname) || '0.0.0';
+
+/** Client 最低兼容版本（默认跟随 Server 版本；必要时可用环境变量覆盖） */
+export const CLIENT_MIN_VERSION = process.env.MAF_CLIENT_MIN_VERSION || SERVER_VERSION;
 
 // --- Agent（一行 = 一个 agent，用户信息内联） ---
 

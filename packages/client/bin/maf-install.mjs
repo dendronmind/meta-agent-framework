@@ -35,10 +35,23 @@ const CODEX_PLUGIN_SOURCE_DIR = join(HOME, "plugins", CODEX_PLUGIN_NAME);
 const CODEX_MARKETPLACE_JSON = join(HOME, ".agents", "plugins", "marketplace.json");
 const CODEX_WRAPPER = join(HOME, ".local", "bin", "codex");
 
-function readPackageInfo() {
-  try { return JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf-8")); } catch { return {}; }
+function readPackageInfo(dir = PKG_ROOT) {
+  try { return JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")); } catch { return {}; }
 }
+
+function readVersionFromPackageTree(startDir) {
+  let dir = startDir;
+  for (;;) {
+    const pkg = readPackageInfo(dir);
+    if (pkg.version) return pkg.version;
+    const parent = dirname(dir);
+    if (parent === dir) return "";
+    dir = parent;
+  }
+}
+
 const CLIENT_PKG = readPackageInfo();
+const CLIENT_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(PKG_ROOT) || "0.0.0";
 
 // ============================================================
 // 工具函数
@@ -84,7 +97,7 @@ function installStandaloneDaemon() {
   copyFile(DAEMON_SRC, STANDALONE_DAEMON);
   writeFileSync(join(MAF_HOME, "package.json"), JSON.stringify({
     name: "@maf/meta-agent-daemon",
-    version: CLIENT_PKG.version || "0.0.0",
+    version: CLIENT_VERSION,
     type: "module",
   }, null, 2) + "\n");
   ok("daemon.mjs → ~/.meta-agent-framework/（runtime-neutral）");
@@ -105,8 +118,11 @@ function installOpencode() {
   copyFile(join(srcDir, "index.js"), join(pluginDir, "index.js"));
   ok("index.js — opencode Plugin（任务执行桥梁）");
 
-  // package.json — Plugin 的 npm 包描述（opencode 加载时需要）
-  copyFile(join(srcDir, "package.json"), join(pluginDir, "package.json"));
+  // package.json — Plugin 的 npm 包描述（opencode 加载时需要）；安装态注入当前 Client 版本
+  const opencodePkg = readPackageInfo(srcDir);
+  opencodePkg.version = CLIENT_VERSION;
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(join(pluginDir, "package.json"), JSON.stringify(opencodePkg, null, 2) + "\n");
   ok("package.json");
 
   // 入口 re-export — opencode 只扫描 plugins/*.js，这个文件转发到子目录
@@ -132,8 +148,11 @@ function installClaudeCode() {
   const pluginSrcDir = join(marketplaceDir, "claude-code-plugin-maf");
   const ccSrcDir = join(PKG_ROOT, "claude-code");
 
-  // plugin.json — Plugin 元信息（名称、版本、描述），Claude Code plugin 体系需要
-  copyFile(join(ccSrcDir, ".claude-plugin", "plugin.json"), join(pluginSrcDir, ".claude-plugin", "plugin.json"));
+  // plugin.json — Plugin 元信息（名称、版本、描述），Claude Code plugin 体系需要；安装态注入当前 Client 版本
+  const claudeManifest = JSON.parse(readFileSync(join(ccSrcDir, ".claude-plugin", "plugin.json"), "utf-8"));
+  claudeManifest.version = CLIENT_VERSION;
+  mkdirSync(join(pluginSrcDir, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(pluginSrcDir, ".claude-plugin", "plugin.json"), JSON.stringify(claudeManifest, null, 2) + "\n");
   ok("plugin.json — Plugin 元信息");
 
   // hooks.json — 两个 SessionStart hook：--daemon（拉起 Node Daemon）+ --wait（asyncRewake 等任务）
@@ -193,7 +212,7 @@ function installClaudeCode() {
 // 安装 Codex Plugin
 // ============================================================
 function codexPluginVersion() {
-  const base = CLIENT_PKG.version || "0.0.0";
+  const base = CLIENT_VERSION;
   const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
   return `${base}+codex.local-${stamp}`;
 }
@@ -257,7 +276,7 @@ function installCodex() {
   cpSync(srcDir, CODEX_PLUGIN_SOURCE_DIR, { recursive: true, force: true });
   writeFileSync(join(CODEX_PLUGIN_SOURCE_DIR, "package.json"), JSON.stringify({
     name: "@maf/codex-plugin",
-    version: CLIENT_PKG.version || "0.0.0",
+    version: CLIENT_VERSION,
     type: "module",
   }, null, 2) + "\n");
   writeCodexPluginManifestVersion(CODEX_PLUGIN_SOURCE_DIR);
@@ -864,7 +883,7 @@ const args = process.argv.slice(2);
 const cmd = args[0] || "--auto";
 
 if (cmd === "--version" || cmd === "version" || cmd === "-v") {
-  console.log(`maf-client v${CLIENT_PKG.version || "0.0.0"}`);
+  console.log(`maf-client v${CLIENT_VERSION}`);
   process.exit(0);
 }
 
@@ -997,7 +1016,7 @@ function writeMafConfig(cfg) {
 // install 或 --auto（postinstall）
 console.log("");
 console.log("╔══════════════════════════════════════╗");
-console.log(`║  Meta-Agent Framework Client v${CLIENT_PKG.version || "0.0.0"}  ║`);
+console.log(`║  Meta-Agent Framework Client v${CLIENT_VERSION}  ║`);
 console.log("╚══════════════════════════════════════╝");
 console.log("");
 
