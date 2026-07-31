@@ -27,8 +27,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const MAF_HOME = process.env.MAF_HOME || path.join(os.homedir(), '.meta-agent-framework');
 const LOG_DIR = path.join(MAF_HOME, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'server.log');
+const LOG_MAX_BYTES = parseLogInt(process.env.MAF_LOG_MAX_BYTES, 20 * 1024 * 1024);
+const LOG_BACKUPS = parseLogInt(process.env.MAF_LOG_BACKUPS, 2);
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
 const origLog = console.log;
 const origError = console.error;
 /** 本地时间戳（YYYY-MM-DD HH:mm:ss） */
@@ -37,15 +38,49 @@ function localTimestamp(): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
+
+function parseLogInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function rotateLogIfNeeded(incomingBytes: number): void {
+  if (LOG_MAX_BYTES <= 0) return;
+  try {
+    const currentSize = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : 0;
+    if (currentSize + incomingBytes <= LOG_MAX_BYTES) return;
+    if (LOG_BACKUPS <= 0) {
+      try { fs.unlinkSync(LOG_FILE); } catch {}
+      return;
+    }
+    for (let i = LOG_BACKUPS; i >= 1; i -= 1) {
+      const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+      const dst = `${LOG_FILE}.${i}`;
+      if (!fs.existsSync(src)) continue;
+      try { if (fs.existsSync(dst)) fs.unlinkSync(dst); } catch {}
+      try { fs.renameSync(src, dst); } catch {}
+    }
+  } catch {}
+}
+
+function appendLogLine(line: string): void {
+  try {
+    const content = `${line}\n`;
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    fs.appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 console.log = (...args: any[]) => {
   const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
   origLog(...args);
-  logStream.write(`${localTimestamp()} ${msg}\n`);
+  appendLogLine(`${localTimestamp()} ${msg}`);
 };
 console.error = (...args: any[]) => {
   const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
   origError(...args);
-  logStream.write(`${localTimestamp()} [ERROR] ${msg}\n`);
+  appendLogLine(`${localTimestamp()} [ERROR] ${msg}`);
 };
 
 /** 探测本机局域网 IP */
@@ -340,8 +375,7 @@ async function shutdown(signal = 'SIGTERM'): Promise<void> {
     console.error(`[Server] Shutdown error: ${err?.message || err}`);
   } finally {
     clearTimeout(forceTimer);
-    logStream.end(() => process.exit(0));
-    setTimeout(() => process.exit(0), 500).unref();
+    process.exit(0);
   }
 }
 

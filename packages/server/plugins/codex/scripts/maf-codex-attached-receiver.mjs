@@ -15,7 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, statSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { HOME, MAF_HOME, processAlive, sleep } from "./maf-codex-common.mjs";
@@ -31,6 +31,29 @@ const TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS 
 const WAIT_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_WAIT_TIMEOUT_MS || "0", 10) || 15_000;
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 const PID_FILE = process.env.MAF_CODEX_RECEIVER_PID_FILE || "";
 const THREAD_WAIT_MS = parseInt(process.env.MAF_CODEX_THREAD_WAIT_MS || "0", 10) || 120_000;
 const THREAD_POLL_MS = parseInt(process.env.MAF_CODEX_THREAD_POLL_MS || "0", 10) || 1000;
@@ -45,10 +68,7 @@ const SERVER_AGENT_NAME = "Meta-Agent-Server";
 const IS_SERVER_IDENTITY = AGENT_NAME === SERVER_AGENT_NAME;
 
 function log(msg) {
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-attached-receiver] ${msg}\n`);
-  } catch {}
+  appendLogLine(`${new Date().toISOString()} [codex-attached-receiver] ${msg}\n`);
 }
 
 function sessionStillAlive() {

@@ -7,7 +7,7 @@
  * websocket URL; diagnostics go to ~/.meta-agent-framework/logs/codex-plugin.log.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, openSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, openSync, unlinkSync, statSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -15,6 +15,29 @@ import { HOME, MAF_HOME, inferAgent, isFile, processAlive, safeName, sleep, vali
 
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 const STATE_DIR = join(MAF_HOME, "state");
 const DEFAULT_PORT_START = 47891;
 const DEFAULT_PORT_END = 47990;
@@ -32,10 +55,7 @@ const NON_TUI_COMMANDS = new Set([
 ]);
 
 function log(message) {
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-app-server] ${message}\n`);
-  } catch {}
+  appendLogLine(`${new Date().toISOString()} [codex-app-server] ${message}\n`);
 }
 
 function shellArgs() {
@@ -409,6 +429,7 @@ async function startAppServer({ realCodex, agentName, projectPath, sessionPid })
   let fd = "ignore";
   try {
     mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(0);
     fd = openSync(LOG_FILE, "a");
   } catch {}
 

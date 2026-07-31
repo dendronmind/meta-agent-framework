@@ -11,7 +11,7 @@
  *   2. node maf-agent.mjs --wait     （asyncRewake hook，后台等任务）
  */
 
-import { readFileSync, existsSync, mkdirSync, readdirSync, appendFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, appendFileSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -21,6 +21,29 @@ const STATE_DIR = join(homedir(), ".meta-agent-framework");
 const LOG_DIR = join(STATE_DIR, "logs");
 const MODE = process.argv.includes("--daemon") ? "daemon" : "wait";
 const LOG_FILE = join(LOG_DIR, "claude-plugin.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 
 /** 读取 maf.config.json */
 function loadMafConfig() {
@@ -42,8 +65,8 @@ const DAEMON_URL = `http://127.0.0.1:${NODE_PORT}`;
 mkdirSync(LOG_DIR, { recursive: true });
 
 function log(msg) {
-  const line = `${new Date().toISOString().slice(11, 23)} [cc-${MODE}] ${msg}`;
-  try { appendFileSync(LOG_FILE, line + "\n"); } catch {}
+  const line = `${new Date().toISOString().slice(11, 23)} [cc-${MODE}] ${msg}\n`;
+  appendLogLine(line);
 }
 
 // ============================================================

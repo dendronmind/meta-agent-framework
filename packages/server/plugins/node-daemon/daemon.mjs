@@ -24,7 +24,7 @@
 
 import { createServer } from "node:http";
 import { spawn, execSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, userInfo, networkInterfaces } from "node:os";
 import { createHash } from "node:crypto";
@@ -85,11 +85,34 @@ mkdirSync(STATE_DIR, { recursive: true });
 // ============================================================
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_FILE = join(LOG_DIR, "client-daemon.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 mkdirSync(LOG_DIR, { recursive: true });
 function log(msg) {
-  const line = `${new Date().toISOString().slice(11, 23)} [node-daemon] ${msg}`;
+  const line = `${new Date().toISOString().slice(11, 23)} [node-daemon] ${msg}\n`;
   // 只写文件，不用 console.error（detached 进程 stderr 可能 EPIPE）
-  try { appendFileSync(LOG_FILE, line + "\n"); } catch {}
+  appendLogLine(line);
 }
 
 // ============================================================
@@ -2362,5 +2385,5 @@ process.on("SIGINT", () => { cleanAllServes(); process.exit(0); });
 process.on("SIGTERM", () => { cleanAllServes(); process.exit(0); });
 process.on("uncaughtException", (err) => {
   // 只写文件，绝不写 stdout/stderr（防 EPIPE 死循环）
-  try { appendFileSync(LOG_FILE, `${new Date().toISOString().slice(11, 23)} [node-daemon] 异常: ${err.message}\n`); } catch {}
+  appendLogLine(`${new Date().toISOString().slice(11, 23)} [node-daemon] 异常: ${err.message}\n`);
 });

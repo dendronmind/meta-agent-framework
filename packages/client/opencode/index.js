@@ -9,7 +9,7 @@
  *   3. 任务执行桥梁：long-poll Daemon 等任务 → fetch opencode HTTP API 执行 → session.idle 收结果
  */
 
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, userInfo, networkInterfaces } from "node:os";
 import { spawn, execSync } from "node:child_process";
@@ -23,14 +23,37 @@ const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
 const LOG_DIR = join(STATE_DIR, "logs");
 const LOG_FILE = join(LOG_DIR, "opencode-plugin.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 const STANDALONE_DAEMON = join(STATE_DIR, "daemon.mjs");
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100");
 
 mkdirSync(LOG_DIR, { recursive: true });
 
 function log(msg) {
-  const line = `${new Date().toISOString().slice(11, 23)} [plugin] ${msg}`;
-  try { appendFileSync(LOG_FILE, line + "\n"); } catch {}
+  const line = `${new Date().toISOString().slice(11, 23)} [plugin] ${msg}\n`;
+  appendLogLine(line);
 }
 
 /** 获取本机可达 IP */

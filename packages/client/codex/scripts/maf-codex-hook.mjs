@@ -11,7 +11,7 @@
  * Codex TUI startup is not polluted.
  */
 
-import { mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, statSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,29 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(__dirname);
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
+
+const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
+const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+
+function rotateLogIfNeeded(incomingBytes = 0) {
+  try {
+    if (statSync(LOG_FILE).size + incomingBytes <= LOG_MAX_BYTES) return;
+  } catch { return; }
+  for (let i = Math.max(0, LOG_BACKUPS); i >= 1; i--) {
+    const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+    const dst = `${LOG_FILE}.${i}`;
+    try { unlinkSync(dst); } catch {}
+    try { renameSync(src, dst); } catch {}
+  }
+}
+
+function appendLogLine(content) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    rotateLogIfNeeded(Buffer.byteLength(content));
+    appendFileSync(LOG_FILE, content);
+  } catch {}
+}
 const DEFAULT_PORT = 4100;
 const SERVER_AGENT_NAME = "Meta-Agent-Server";
 
@@ -29,10 +52,7 @@ function isServerAgentName(name) {
 }
 
 function log(message) {
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(LOG_FILE, `${new Date().toISOString()} [codex-hook] ${message}\n`);
-  } catch {}
+  appendLogLine(`${new Date().toISOString()} [codex-hook] ${message}\n`);
 }
 
 function safeJson(raw) {

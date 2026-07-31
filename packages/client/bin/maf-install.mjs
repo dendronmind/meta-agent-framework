@@ -28,6 +28,7 @@ const PKG_ROOT = join(__dirname, "..");
 const HOME = homedir();
 const BASHRC = join(HOME, ".bashrc");
 const MAF_HOME = join(HOME, ".meta-agent-framework");
+const MAF_LOG_DIR = join(MAF_HOME, "logs");
 const STANDALONE_DAEMON = join(MAF_HOME, "daemon.mjs");
 const DAEMON_SRC = join(PKG_ROOT, "daemon", "daemon.mjs");
 const CODEX_PLUGIN_NAME = "maf";
@@ -94,6 +95,7 @@ function detectEnv() {
 // ============================================================
 function installStandaloneDaemon() {
   console.log("\n📥 安装 Node Daemon...");
+  mkdirSync(MAF_LOG_DIR, { recursive: true });
   copyFile(DAEMON_SRC, STANDALONE_DAEMON);
   writeFileSync(join(MAF_HOME, "package.json"), JSON.stringify({
     name: "@maf/meta-agent-daemon",

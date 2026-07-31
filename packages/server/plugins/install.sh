@@ -52,7 +52,7 @@ echo ""
 # ---- 安装 runtime-neutral Node Daemon ----
 echo "📥 安装 Node Daemon..."
 MAF_HOME="${HOME}/.meta-agent-framework"
-mkdir -p "${MAF_HOME}"
+mkdir -p "${MAF_HOME}" "${MAF_HOME}/logs"
 if curl -fsSL "${SERVER}/plugins/daemon.mjs" -o "${MAF_HOME}/daemon.mjs"; then
   cat > "${MAF_HOME}/package.json" << EOF
 {"name":"@maf/meta-agent-daemon","version":"${MAF_VERSION}","type":"module"}
