@@ -266,6 +266,17 @@ function buildNotificationTurnPrompt(text) {
   return [effectivePrefix.trim(), "", text].filter(Boolean).join("\n");
 }
 
+function attachedTurnPolicy(projectDir) {
+  return {
+    approvalPolicy: "never",
+    sandboxPolicy: {
+      type: "workspaceWrite",
+      writableRoots: [projectDir],
+      networkAccess: true,
+    },
+  };
+}
+
 function enqueueNotification(text, key = "") {
   if (!text) return;
   if (key) {
@@ -292,7 +303,7 @@ async function injectPendingNotifications(client, threadId) {
         text_elements: [],
       }],
       cwd: PROJECT_DIR,
-      approvalPolicy: "never",
+      ...attachedTurnPolicy(PROJECT_DIR),
     }, 30_000);
     turnStarted = true;
     const turnId = started?.turn?.id || "";
@@ -744,12 +755,13 @@ function observeThreadTurn(readResult, turnId, fallbackText) {
 
 async function runTurn(client, threadId, task) {
   const inputText = taskPrompt(task);
+  const projectDir = resolve(String(task.project_path || PROJECT_DIR).replace(/^~/, HOME));
   const result = await client.request("turn/start", {
     threadId,
     clientUserMessageId: `maf-${task.id || task.task_id || Date.now()}`,
     input: [{ type: "text", text: inputText, text_elements: [] }],
-    cwd: task.project_path || PROJECT_DIR,
-    approvalPolicy: "never",
+    cwd: projectDir,
+    ...attachedTurnPolicy(projectDir),
   }, 30_000);
 
   const turnId = result?.turn?.id;

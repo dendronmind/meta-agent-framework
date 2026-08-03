@@ -11,6 +11,7 @@ import { appendFileSync } from "node:fs";
 const THREAD_ID = process.env.MOCK_CODEX_THREAD_ID || "mock-thread-1";
 const NO_TURN_COMPLETED = process.env.MOCK_CODEX_NO_TURN_COMPLETED === "1" || process.env.MOCK_CODEX_NO_TURN_COMPLETED === "true";
 const TURN_STATUS_OBJECT = process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "1" || process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "true";
+const REQUIRE_WORKSPACE_WRITE = process.env.MOCK_CODEX_REQUIRE_WORKSPACE_WRITE === "1" || process.env.MOCK_CODEX_REQUIRE_WORKSPACE_WRITE === "true";
 let nextTurn = 0;
 const turns = [];
 
@@ -67,6 +68,18 @@ function responseFor(msg, send) {
     return;
   }
   if (method === "turn/start") {
+    const writableRoots = Array.isArray(params.sandboxPolicy?.writableRoots)
+      ? params.sandboxPolicy.writableRoots
+      : [];
+    if (REQUIRE_WORKSPACE_WRITE && (
+      params.approvalPolicy !== "never"
+      || params.sandboxPolicy?.type !== "workspaceWrite"
+      || params.sandboxPolicy?.networkAccess !== true
+      || !writableRoots.includes(params.cwd)
+    )) {
+      send({ id, error: { code: -32602, message: "turn/start requires never + workspaceWrite/networkAccess for cwd" } });
+      return;
+    }
     const turnId = `mock-turn-${++nextTurn}`;
     const prompt = (params.input || []).map(i => i.text || "").join("\n");
     if (process.env.MOCK_CODEX_TURN_LOG) {
