@@ -26,7 +26,7 @@ bash scripts/poll-workflow.sh <workflow_id>
 
 注意：所有 agent 即使 offline/dead 也会通过标准 Workflow 进入 Daemon 处理，Daemon 会按 runtime 能力尝试拉起或唤醒。只有 Daemon 不可达才是真正的基础设施失败。
 
-失败后可 `curl -s http://localhost:3000/api/agents` 确认 agent 当前状态，决定是否建议重试。
+失败后可 `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/agents` 确认 agent 当前状态，决定是否建议重试。
 
 ## 脚本退出码
 

@@ -391,6 +391,7 @@ export class FeishuRegistry implements ExternalRegistry {
 
       agents.push({
         id: '',
+        client_id: '',
         user_id: extractTextValue(f['用户']) || '',
         host_user: extractTextValue(f['宿主机用户名']) || '',
         client_endpoint: endpoint,

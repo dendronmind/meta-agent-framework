@@ -22,6 +22,8 @@
 
 本文档中的 `localhost:3000`（Server）和 `127.0.0.1:4100`（Daemon）均为默认端口；实际端口以 `~/.meta-agent-framework/maf.config.json` 为准。
 
+`maf-server tui/resume/start` 会把本机 Admin Token 注入 `$MAF_AUTH_TOKEN`。所有 Server 管理 API 请求都必须携带 `Authorization: Bearer $MAF_AUTH_TOKEN`；不要把该 Token 发给远端 Client。
+
 Agent 注册信息来源取决于配置中的 `registry.type`：
 
 - `none`（默认）：Agent 通过 Daemon 心跳动态自注册，Server API `/api/agents` 是唯一权威来源。
@@ -30,7 +32,7 @@ Agent 注册信息来源取决于配置中的 `registry.type`：
 实时状态查询优先使用精简视图：
 
 ```bash
-curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
 ```
 
 ## 快速派发原则
@@ -49,7 +51,7 @@ curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capab
 Client Agent 可以通过 Proposal 通道提交建议、bug、skill 或改进方案。你需要定期检查并处理：
 
 ```bash
-curl -s http://localhost:3000/api/proposals?status=pending
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/proposals?status=pending'
 ```
 
 处理原则：
@@ -91,5 +93,5 @@ Proposal/Evolve 的操作 cookbook 见 `common_agent/rules/evolve-guide.md`；�
 
 1. 读取 `user/` 目录下已有的 `.md` 文件（如果存在）。
 2. 查询 Agent 概览：
-   `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
+   `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
 3. 综合 agent_name、capabilities、runtime、status，向用户汇报团队全貌并等待指令。

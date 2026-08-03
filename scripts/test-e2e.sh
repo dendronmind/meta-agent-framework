@@ -41,6 +41,10 @@
 #   40 Workflow all_settled waits for parallel branches
 #   41 maf-init required input and incomplete config resume
 #   42 Server 控制面身份不计入 Agent 看板
+#   43 管理鉴权 + Client 机器身份自动注册
+#   44 错 task_id / execution_id / status 回报拒绝
+#   45 OpenCode HTTP 失败、超时、空结果、旧结果不得误报成功
+#   46 MAS headless runtime 空输出不得误报成功
 #
 set -uo pipefail
 
@@ -50,13 +54,14 @@ cd "$SCRIPT_DIR"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 PASS=0; FAIL=0; TOTAL=0
-SERVER_PID=""; MOCK_PID=""
+SERVER_PID=""; MOCK_PID=""; CC_KEEPALIVE_PID=""
 
 E2E_STATE_DIR="/tmp/maf-e2e-state"
 E2E_MAF_HOME="/tmp/maf-e2e-home"
 E2E_USER_HOME="/tmp/maf-e2e-user"
 E2E_DB_PATH="/tmp/maf-e2e.db"
 E2E_BIN="/tmp/maf-e2e-bin"
+MAS_RUNTIME_MOCK="$E2E_BIN/mas-runtime-mock"
 DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/logs/client-daemon.log"
 
 # 测试端口（与真实环境隔离）
@@ -64,11 +69,19 @@ E2E_SERVER_PORT=13000
 NODE_PORT=14100
 E2E_SERVER="http://localhost:$E2E_SERVER_PORT"
 DAEMON_URL="http://127.0.0.1:$NODE_PORT"
+export MAF_AUTH_TOKEN="maf-e2e-auth-token-0123456789abcdef0123456789abcdef"
+export MAF_LOCAL_TOKEN="$MAF_AUTH_TOKEN"
+
+# 测试默认走已鉴权链路；鉴权负例使用 command curl 绕过此包装。
+curl() {
+  command curl -H "Authorization: Bearer ${MAF_AUTH_TOKEN}" "$@"
+}
+export -f curl
 
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -95,7 +108,7 @@ NEED_DAEMON=false
 NEED_CC=false
 for c in "${RUN_CASES[@]}"; do
   NEED_SERVER=true
-  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]]; then NEED_DAEMON=true; fi
+  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]]; then NEED_DAEMON=true; fi
   if [[ $c -eq 5 || $c -eq 7 || $c -eq 8 || $c -eq 9 || $c -eq 10 || $c -eq 11 || $c -eq 13 || $c -eq 18 ]]; then NEED_CC=true; fi
 done
 
@@ -128,10 +141,64 @@ wait_until() {
   return 1
 }
 
+stop_e2e_server() {
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+  fi
+}
+
+start_e2e_server() {
+  local runtime=${1:-opencode}
+  local server_log="/tmp/maf-e2e-server-${runtime}.log"
+  MAF_HOME="$E2E_MAF_HOME" PORT=$E2E_SERVER_PORT DB_PATH="$E2E_DB_PATH" FEISHU_SYNC_DISABLED=1 \
+    MAF_SERVER_RUNTIME="$runtime" OPENCODE_BIN="$MAS_RUNTIME_MOCK" \
+    CLAUDE_BIN="$MAS_RUNTIME_MOCK" CODEX_BIN="$MAS_RUNTIME_MOCK" \
+    node --import tsx src/index.ts >"$server_log" 2>&1 &
+  SERVER_PID=$!
+  disown $SERVER_PID
+  wait_until 10 "command curl -s $E2E_SERVER/api/health 2>/dev/null" "server_version"
+}
+
 get_agent_field() {
   local field=$1 name=${2:-$AGENT_NAME}
   curl -s $E2E_SERVER/api/agents 2>/dev/null | \
     python3 -c "import json,sys;[print(a.get('$field','')) for a in json.load(sys.stdin) if a['agent_name']=='$name']" 2>/dev/null
+}
+
+client_signed_fetch() {
+  local url=$1 method=${2:-GET} body=${3:-}
+  MAF_SIGNED_URL="$url" MAF_SIGNED_METHOD="$method" MAF_SIGNED_BODY="$body" node <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const url = process.env.MAF_SIGNED_URL;
+const method = process.env.MAF_SIGNED_METHOD || "GET";
+const body = process.env.MAF_SIGNED_BODY || "";
+const authDir = path.join(os.homedir(), ".meta-agent-framework", "auth");
+const clientId = fs.readFileSync(path.join(authDir, "client-id"), "utf8").trim();
+const privateKey = fs.readFileSync(path.join(authDir, "client-private.pem"), "utf8");
+const timestamp = String(Date.now());
+const nonce = crypto.randomBytes(18).toString("base64url");
+const parsed = new URL(url);
+const target = `${parsed.pathname}${parsed.search}`;
+const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+const canonical = Buffer.from([method.toUpperCase(), target, timestamp, nonce, bodyHash].join("\n"));
+const signature = crypto.sign(null, canonical, privateKey).toString("base64url");
+const headers = {
+  "X-MAF-Role": "client",
+  "X-MAF-ID": clientId,
+  "X-MAF-Timestamp": timestamp,
+  "X-MAF-Nonce": nonce,
+  "X-MAF-Signature": signature,
+};
+if (body) headers["Content-Type"] = "application/json";
+fetch(url, { method, headers, body: body || undefined })
+  .then(async res => process.stdout.write(`HTTP:${res.status}\n${await res.text()}`))
+  .catch(err => { console.error(err.message); process.exit(1); });
+NODE
 }
 
 create_codex_agent_toml() {
@@ -160,6 +227,19 @@ start_cc_agent() {
   disown $!
 }
 
+start_cc_wait_keepalive() {
+  [[ -n "$CC_KEEPALIVE_PID" ]] && kill "$CC_KEEPALIVE_PID" 2>/dev/null || true
+  HOME="$E2E_USER_HOME" MAF_AGENT_NAME="$CC_AGENT" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT=$NODE_PORT \
+  node plugins/claude-code-plugin-maf/scripts/maf-agent.mjs --wait &>/tmp/cc-keepalive.log &
+  CC_KEEPALIVE_PID=$!
+}
+
+stop_cc_wait_keepalive() {
+  [[ -n "$CC_KEEPALIVE_PID" ]] && kill "$CC_KEEPALIVE_PID" 2>/dev/null || true
+  CC_KEEPALIVE_PID=""
+}
+
 start_mock_opencode() {
   HOME="$E2E_USER_HOME" MOCK_OPENCODE_PORT=$MOCK_PORT \
   MOCK_PLUGIN_DIR="$PLUGIN_DIR" \
@@ -167,6 +247,7 @@ start_mock_opencode() {
   META_AGENT_SERVER="$E2E_SERVER" \
   MAF_USER_ID="e2e-testuser" \
   MAF_NODE_PORT=$NODE_PORT \
+  MAF_OPENCODE_IDLE_TIMEOUT_MS=500 \
   node "$ROOT_DIR/scripts/mock-opencode.mjs" "$AGENT_NAME" &>/dev/null &
   MOCK_PID=$!
   disown $MOCK_PID
@@ -176,19 +257,20 @@ cleanup() {
   echo -e "\n${YELLOW}清理...${NC}"
   [[ -n "$MOCK_PID" ]] && kill -9 "$MOCK_PID" 2>/dev/null
   [[ -n "$SERVER_PID" ]] && kill -9 "$SERVER_PID" 2>/dev/null
+  stop_cc_wait_keepalive
   local DAEMON_PID
   DAEMON_PID=$(ss -tlnp 2>/dev/null | grep ":${NODE_PORT} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$DAEMON_PID" ]] && kill -9 "$DAEMON_PID" 2>/dev/null || true
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14937 14938 14940; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14937 14938 14940; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project
 }
 trap cleanup EXIT
 
@@ -216,7 +298,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14937 14938 14940; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14937 14938 14940; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -265,6 +347,34 @@ export MOCK_DIRECTORY="\$PWD"
 exec node "$ROOT_DIR/scripts/mock-opencode.mjs" "\$agent"
 OPENCODEMOCK
 chmod +x "$E2E_BIN/opencode"
+
+cat > "$MAS_RUNTIME_MOCK" << 'MASRUNTIMEMOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+mode_file="${MAF_HOME}/state/mas-runtime-mode"
+mode=$(cat "$mode_file" 2>/dev/null || echo normal)
+if [[ "$mode" == "empty" ]]; then
+  printf '  \n'
+  exit 0
+fi
+
+result="MAS ${MAF_RUNTIME:-unknown} mock result"
+if [[ "${MAF_RUNTIME:-}" == "codex" ]]; then
+  output_file=""
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output-last-message" ]]; then
+      output_file="${2:-}"
+      break
+    fi
+    shift
+  done
+  [[ -n "$output_file" ]] || { echo "missing --output-last-message" >&2; exit 3; }
+  printf '%s\n' "$result" > "$output_file"
+else
+  printf '%s\n' "$result"
+fi
+MASRUNTIMEMOCK
+chmod +x "$MAS_RUNTIME_MOCK"
 
 # e2e 使用隔离 HOME，避免依赖开发机真实 HOME；所有 runtime 和断言都应基于同一个 HOME。
 export HOME="$E2E_USER_HOME"
@@ -365,11 +475,7 @@ fi
 
 # 启动 Server（所有 case 都需要）
 if $NEED_SERVER; then
-  MAF_HOME="$E2E_MAF_HOME" PORT=$E2E_SERVER_PORT DB_PATH="$E2E_DB_PATH" FEISHU_SYNC_DISABLED=1 node --import tsx src/index.ts &>/dev/null &
-  SERVER_PID=$!
-  disown $SERVER_PID
-  sleep 3
-  curl -s $E2E_SERVER/api/health >/dev/null 2>&1 || { echo -e "${RED}❌ Server 启动失败${NC}"; exit 1; }
+  start_e2e_server opencode || { echo -e "${RED}❌ Server 启动失败${NC}"; exit 1; }
   echo "  Server OK (port $E2E_SERVER_PORT)"
 fi
 
@@ -473,7 +579,7 @@ echo "  OTA 前: PID=$PID_BEFORE hash=$HASH_BEFORE"
 OTA_SELF=$(python3 -c "
 import json, urllib.request
 payload = json.dumps({'files': [{'path': 'plugin/daemon.mjs', 'content': open('plugins/node-daemon/daemon.mjs').read()}]})
-req = urllib.request.Request('$DAEMON_URL/ota', data=payload.encode(), headers={'Content-Type':'application/json'}, method='POST')
+req = urllib.request.Request('$DAEMON_URL/ota', data=payload.encode(), headers={'Content-Type':'application/json','Authorization':'Bearer $MAF_AUTH_TOKEN'}, method='POST')
 try: resp = urllib.request.urlopen(req, timeout=10); print(resp.read().decode())
 except: print('{}')
 " 2>/dev/null || echo "{}")
@@ -503,6 +609,8 @@ fi
 # ============================================================
 if should_run 8; then
 echo -e "${YELLOW}[8] 单 agent 正常退出${NC}"
+start_cc_wait_keepalive
+wait_until 5 "get_agent_field status $CC_AGENT" "online" || true
 assert "杀前 OC online" "online" "$(get_agent_field status)"
 assert "杀前 CC online" "online" "$(get_agent_field status $CC_AGENT)"
 kill "$MOCK_PID" 2>/dev/null; MOCK_PID=""
@@ -512,6 +620,7 @@ echo ""
 assert "OC agent offline" "offline" "$(get_agent_field status)"
 assert "CC agent 仍 online" "online" "$(get_agent_field status $CC_AGENT)"
 assert "Daemon 未退出" '"ok":true' "$(curl -s $DAEMON_URL/health 2>/dev/null || echo '{}')"
+stop_cc_wait_keepalive
 fi
 
 # ============================================================
@@ -519,6 +628,8 @@ fi
 # ============================================================
 if should_run 9; then
 echo -e "${YELLOW}[9] 单 agent 异常退出（无 disconnect）${NC}"
+start_cc_wait_keepalive
+wait_until 5 "get_agent_field status $CC_AGENT" "online" || true
 start_mock_opencode
 wait_until 8 "get_agent_field status" "online" || true
 assert "OC 重新上线" "online" "$(get_agent_field status)"
@@ -529,6 +640,7 @@ echo ""
 assert "OC 异常退出后 offline" "offline" "$(get_agent_field status)"
 assert "CC 不受影响" "online" "$(get_agent_field status $CC_AGENT)"
 assert "Daemon 依然存活" '"ok":true' "$(curl -s $DAEMON_URL/health 2>/dev/null || echo '{}')"
+stop_cc_wait_keepalive
 fi
 
 # ============================================================
@@ -559,13 +671,10 @@ fi
 if should_run 11; then
 echo -e "${YELLOW}[11] Server 重启${NC}"
 wait_until 5 "curl -s $DAEMON_URL/health 2>/dev/null" '"ok":true' || true
-kill "$SERVER_PID" 2>/dev/null; SERVER_PID=""
+stop_e2e_server
 sleep 2
 assert "Server 已停止" "false" "$(curl -s --max-time 1 $E2E_SERVER/api/health &>/dev/null && echo true || echo false)"
-MAF_HOME="$E2E_MAF_HOME" PORT=$E2E_SERVER_PORT DB_PATH="$E2E_DB_PATH" FEISHU_SYNC_DISABLED=1 ./node_modules/.bin/tsx src/index.ts &>/dev/null &
-SERVER_PID=$!
-disown $SERVER_PID
-wait_until 10 "curl -s $E2E_SERVER/api/health 2>/dev/null" "server_version" || true
+start_e2e_server opencode || true
 assert "Server 重启 health" "server_version" "$(curl -s $E2E_SERVER/api/health 2>/dev/null)"
 wait_until 8 "get_agent_field status" "online" || true
 wait_until 5 "get_agent_field status $CC_AGENT" "online" || true
@@ -748,9 +857,10 @@ WF_RES=$(curl -s -X POST $E2E_SERVER/api/workflows \
   -d "{\"title\":\"SSE 测试 workflow\",\"nodes\":[{\"id\":\"sse-1\",\"agent_name\":\"$AGENT_NAME\",\"prompt\":\"SSE test\",\"scope\":\"project\",\"intent\":\"query\"}]}" 2>/dev/null)
 WF_ID=$(echo "$WF_RES" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id','') or d.get('id',''))" 2>/dev/null)
 sleep 1
+WF_EXEC_ID=$(curl -s "$E2E_SERVER/api/workflows/$WF_ID" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(n.get('execution_id','') for n in d.get('nodes',[]) if n.get('id')=='sse-1'))")
 curl -s -X POST "$E2E_SERVER/api/workflows/$WF_ID/nodes/sse-1/result" \
   -H 'Content-Type: application/json' \
-  -d '{"execution_id":"e2e-sse","status":"completed","result":"SSE e2e result OK","duration_ms":100}' >/dev/null 2>&1
+  -d "{\"execution_id\":\"$WF_EXEC_ID\",\"agent_name\":\"$AGENT_NAME\",\"status\":\"completed\",\"result\":\"SSE e2e result OK\",\"duration_ms\":100}" >/dev/null 2>&1
 sleep 2
 assert "SSE workflow_started" "true" "$(grep -q 'workflow_started' "$SSE_OUTPUT" 2>/dev/null && echo true || echo false)"
 assert "SSE 含 workflow_id" "true" "$(grep -q "$WF_ID" "$SSE_OUTPUT" 2>/dev/null && echo true || echo false)"
@@ -1414,8 +1524,9 @@ DUP_DISCONNECT=$(curl -s -X POST "$DAEMON_URL/agents/disconnect" -H 'Content-Typ
   -d "{\"agent_name\":\"$DUP_AGENT\",\"plugin_pid\":$DUP_PID_2}" 2>/dev/null)
 assert "同名当前实例断开时保留执行中队列" '"deferred":true' "$DUP_DISCONNECT"
 
-curl -s -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$DUP_AGENT\",\"task_id\":\"$DUP_TASK\",\"status\":\"completed\",\"result\":\"same agent preserved result\",\"duration_ms\":1}" >/dev/null 2>&1
+DUP_DONE=$(curl -s -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$DUP_AGENT\",\"task_id\":\"$DUP_TASK\",\"status\":\"completed\",\"result\":\"same agent preserved result\",\"duration_ms\":1}" 2>/dev/null)
+assert "同名断开后任务回报仍被接受" '"ok":true' "$DUP_DONE"
 DUP_COMPLETED=$(curl -s "$DAEMON_URL/workflows/completed?limit=10" 2>/dev/null)
 assert "同名断开后 workflow 上下文仍保留" "$DUP_WF" "$DUP_COMPLETED"
 assert "同名断开后结果仍保留" "same agent preserved result" "$DUP_COMPLETED"
@@ -1578,10 +1689,10 @@ fi
 
 
 # ============================================================
-# Case 36: Codex attached 默认不伪装 online
+# Case 36: Codex 显式 attached 不伪装 online
 # ============================================================
 if should_run 36; then
-echo -e "\n${YELLOW}Case 36: Codex attached 默认不伪装 online${NC}"
+echo -e "\n${YELLOW}Case 36: Codex 显式 attached 不伪装 online${NC}"
 
 CODEX_ATT_AGENT="codex-attached-agent"
 CODEX_ATT_HOME="/tmp/e2e-codex-attached-home"
@@ -1602,6 +1713,7 @@ AGENTEOF
 
 HOME="$CODEX_ATT_HOME" XDG_CONFIG_HOME="$CODEX_ATT_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_ATT_PORT" MAF_DIRECTORY="$CODEX_ATT_PROJECT" \
+  MAF_CODEX_DELIVERY="attached" \
   node "$CODEX_ATT_HOME/.meta-agent-framework/daemon.mjs" >/tmp/e2e-codex-attached-daemon.log 2>&1 &
 CODEX_ATT_PID=$!
 disown $CODEX_ATT_PID
@@ -1614,7 +1726,7 @@ curl -s -X POST "$CODEX_ATT_DAEMON/agents/connect" -H 'Content-Type: application
 
 wait_until 10 "get_agent_field runtime $CODEX_ATT_AGENT" "codex" || true
 assert "Codex attached runtime" "codex" "$(get_agent_field runtime $CODEX_ATT_AGENT)"
-assert "Codex attached default offline" "offline" "$(get_agent_field status $CODEX_ATT_AGENT)"
+assert "Codex explicit attached offline" "offline" "$(get_agent_field status $CODEX_ATT_AGENT)"
 
 ATT_EXEC=$(curl -s -w '\nHTTP:%{http_code}' -X POST "$CODEX_ATT_DAEMON/execute" \
   -H 'Content-Type: application/json' \
@@ -1730,9 +1842,10 @@ NOTIFY_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
 NOTIFY_WF_ID=$(echo "$NOTIFY_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
 assert "Codex origin notify workflow 创建" "true" "$([ -n "$NOTIFY_WF_ID" ] && echo true || echo false)"
 sleep 1
+NOTIFY_EXEC_ID=$(curl -s "$E2E_SERVER/api/workflows/$NOTIFY_WF_ID" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(n.get('execution_id','') for n in d.get('nodes',[]) if n.get('id')=='notify-1'))")
 curl -s -X POST "$E2E_SERVER/api/workflows/$NOTIFY_WF_ID/nodes/notify-1/result" \
   -H 'Content-Type: application/json' \
-  -d '{"execution_id":"codex-notify-manual","status":"completed","result":"codex origin notification result"}' >/dev/null
+  -d "{\"execution_id\":\"$NOTIFY_EXEC_ID\",\"agent_name\":\"$CODEX_NOTIFY_AGENT\",\"status\":\"completed\",\"result\":\"codex origin notification result\"}" >/dev/null
 wait_until 10 "cat '$CODEX_RECV_TURN_LOG' 2>/dev/null" "\\[MAF 后台任务结果通知\\]" || true
 assert "Codex origin workflow notification injected" "\\[MAF 后台任务结果通知\\]" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
 assert "Codex origin workflow notification result" "codex origin notification result" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
@@ -1931,9 +2044,12 @@ SETTLED_WF_ID=$(echo "$SETTLED_WF" | python3 -c "import json,sys;d=json.load(sys
 assert "all_settled workflow 创建" "true" "$([ -n "$SETTLED_WF_ID" ] && echo true || echo false)"
 
 sleep 1
+SETTLED_WF_JSON=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID")
+SETTLED_EXEC_A=$(echo "$SETTLED_WF_JSON" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(n.get('execution_id','') for n in d.get('nodes',[]) if n.get('id')=='a'))")
+SETTLED_EXEC_B=$(echo "$SETTLED_WF_JSON" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(n.get('execution_id','') for n in d.get('nodes',[]) if n.get('id')=='b'))")
 curl -s -X POST "$E2E_SERVER/api/workflows/$SETTLED_WF_ID/nodes/a/result" \
   -H 'Content-Type: application/json' \
-  -d '{"execution_id":"manual-a","status":"failed","result":"branch A failed intentionally"}' >/dev/null
+  -d "{\"execution_id\":\"$SETTLED_EXEC_A\",\"agent_name\":\"$SETTLED_AGENT_A\",\"status\":\"failed\",\"result\":\"branch A failed intentionally\"}" >/dev/null
 
 sleep 1
 SETTLED_STATUS_AFTER_A=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -1943,7 +2059,7 @@ assert "all_settled blocked dependent skipped" "skipped" "$SETTLED_NODE_C_STATUS
 
 curl -s -X POST "$E2E_SERVER/api/workflows/$SETTLED_WF_ID/nodes/b/result" \
   -H 'Content-Type: application/json' \
-  -d '{"execution_id":"manual-b","status":"completed","result":"branch B completed"}' >/dev/null
+  -d "{\"execution_id\":\"$SETTLED_EXEC_B\",\"agent_name\":\"$SETTLED_AGENT_B\",\"status\":\"completed\",\"result\":\"branch B completed\"}" >/dev/null
 
 for i in $(seq 1 10); do
   SETTLED_FINAL_STATUS=$(curl -s "$E2E_SERVER/api/workflows/$SETTLED_WF_ID" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
@@ -2142,6 +2258,216 @@ assert "Agent stats online 排除 Server" "$EXPECTED_ONLINE" "$AGENTS_ONLINE"
 INVENTORY_TOTAL=$(curl -s "$E2E_SERVER/api/agents/inventory" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('total_agents',''))" 2>/dev/null)
 EXPECTED_INVENTORY_TOTAL=$((BASE_INVENTORY_TOTAL + 1))
 assert "Inventory total 排除 Server" "$EXPECTED_INVENTORY_TOTAL" "$INVENTORY_TOTAL"
+fi
+
+# ============================================================
+# Case 43: 管理鉴权 + Client 机器身份自动注册
+# ============================================================
+if should_run 43; then
+echo -e "\n${YELLOW}Case 43: 管理鉴权 + Client 自动注册${NC}"
+
+assert "Server health 匿名可访问" "200" "$(command curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/health")"
+assert "Server 管理 API 拒绝匿名" "401" "$(command curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/agents")"
+assert "Server 管理 API 拒绝错误 Token" "401" "$(command curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-token-value-012345678901234567890' "$E2E_SERVER/api/agents")"
+assert "Server 管理 API 接受 Admin Token" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/agents")"
+
+assert "Daemon health 匿名可访问" "200" "$(command curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/health")"
+assert "Daemon 控制 API 拒绝匿名" "401" "$(command curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/status")"
+assert "Daemon 控制 API 拒绝错误 Token" "401" "$(command curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-token-value-012345678901234567890' "$DAEMON_URL/status")"
+assert "Daemon 控制 API 接受本机 Token" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/status")"
+
+CLIENT_ID=$(command curl -s "$DAEMON_URL/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
+assert "Client 自动生成机器 ID" "true" "$([ -n "$CLIENT_ID" ] && echo true || echo false)"
+assert "Client 自动准入 active" "active" "$(command curl -s "$DAEMON_URL/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('enrollment_status',''))")"
+assert "Client 私钥权限 0600" "600" "$(stat -c '%a' "$E2E_USER_HOME/.meta-agent-framework/auth/client-private.pem")"
+assert "Client 本机 Token 权限 0600" "600" "$(stat -c '%a' "$E2E_USER_HOME/.meta-agent-framework/auth/local-token")"
+assert "Server 保存 Client 公钥身份" "$CLIENT_ID" "$(curl -s "$E2E_SERVER/api/auth/clients")"
+assert "Dashboard 提供 Client 审批入口" "data-client-action" "$(command curl -s "$E2E_SERVER/")"
+
+CLIENT_IDENTITY_JSON=$(curl -s "$E2E_SERVER/api/auth/clients" | python3 -c "import json,sys;print(json.dumps(next(i for i in json.load(sys.stdin) if i['client_id']=='$CLIENT_ID')))" 2>/dev/null)
+ENROLL_REPLAY=$(MAF_REPLAY_IDENTITY="$CLIENT_IDENTITY_JSON" META_AGENT_SERVER="$E2E_SERVER" node <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const identity = JSON.parse(process.env.MAF_REPLAY_IDENTITY);
+const authDir = path.join(os.homedir(), ".meta-agent-framework", "auth");
+const publicKey = fs.readFileSync(path.join(authDir, "client-public.pem"), "utf8");
+const privateKey = fs.readFileSync(path.join(authDir, "client-private.pem"), "utf8");
+const url = `${process.env.META_AGENT_SERVER}/api/auth/enroll`;
+const body = JSON.stringify({
+  client_id: identity.client_id,
+  public_key: publicKey,
+  client_endpoint: identity.client_endpoint,
+  hostname: identity.hostname,
+  user_id: identity.user_id,
+  host_user: identity.host_user,
+});
+const timestamp = String(Date.now());
+const nonce = crypto.randomBytes(18).toString("base64url");
+const target = new URL(url).pathname;
+const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+const canonical = Buffer.from(["POST", target, timestamp, nonce, bodyHash].join("\n"));
+const headers = {
+  "Content-Type": "application/json",
+  "X-MAF-Role": "client",
+  "X-MAF-ID": identity.client_id,
+  "X-MAF-Timestamp": timestamp,
+  "X-MAF-Nonce": nonce,
+  "X-MAF-Signature": crypto.sign(null, canonical, privateKey).toString("base64url"),
+};
+(async () => {
+  const first = await fetch(url, { method: "POST", headers, body });
+  const second = await fetch(url, { method: "POST", headers, body });
+  process.stdout.write(`${first.status},${second.status}`);
+})().catch(err => { console.error(err); process.exit(1); });
+NODE
+)
+assert "Enrollment nonce 防重放" "200,401" "$ENROLL_REPLAY"
+
+SIGNED_POLL=$(client_signed_fetch "$E2E_SERVER/api/tasks/poll?agent_name=$AGENT_NAME&user_id=e2e-testuser")
+assert "Client 签名可访问 Client API" "HTTP:200" "$SIGNED_POLL"
+SIGNED_ADMIN=$(client_signed_fetch "$E2E_SERVER/api/agents")
+assert "Client 签名不能访问管理 API" "HTTP:403" "$SIGNED_ADMIN"
+assert "旧 pairing 接口已移除" "404" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/auth/pair")"
+assert "安装器不要求配对码" "not_found" "$(rg -o 'MAF_PAIRING_CODE|Pairing Code|配对码' "$SCRIPT_DIR/plugins/install.sh" "$ROOT_DIR/packages/client/bin/maf-install.mjs" 2>/dev/null || echo not_found)"
+
+LATE_HOME="/tmp/maf-e2e-late-client"
+LATE_PORT=14143
+LATE_DAEMON="http://127.0.0.1:$LATE_PORT"
+mkdir -p "$LATE_HOME/.meta-agent-framework"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$LATE_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$LATE_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+env -u MAF_AUTH_TOKEN -u MAF_LOCAL_TOKEN HOME="$LATE_HOME" META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$LATE_PORT" \
+  node "$LATE_HOME/.meta-agent-framework/daemon.mjs" >/tmp/maf-e2e-late-client.log 2>&1 &
+LATE_PID=$!
+disown $LATE_PID
+wait_until 10 "command curl -s $LATE_DAEMON/health 2>/dev/null" '"enrollment_status":"active"' || true
+LATE_HEALTH=$(command curl -s "$LATE_DAEMON/health" 2>/dev/null)
+assert "晚启动 Client 无配对信息自动准入" '"enrollment_status":"active"' "$LATE_HEALTH"
+LATE_CLIENT_ID=$(echo "$LATE_HEALTH" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
+assert "晚启动 Client 进入 Server 身份表" "$LATE_CLIENT_ID" "$(curl -s "$E2E_SERVER/api/auth/clients")"
+kill -9 "$LATE_PID" 2>/dev/null || true
+wait "$LATE_PID" 2>/dev/null || true
+rm -f "$LATE_HOME/.meta-agent-framework/auth/client-public.pem"
+env -u MAF_AUTH_TOKEN -u MAF_LOCAL_TOKEN HOME="$LATE_HOME" META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$LATE_PORT" \
+  node "$LATE_HOME/.meta-agent-framework/daemon.mjs" >/tmp/maf-e2e-late-client-repair.log 2>&1 &
+LATE_REPAIR_PID=$!
+disown $LATE_REPAIR_PID
+wait_until 10 "command curl -s $LATE_DAEMON/health 2>/dev/null" '"enrollment_status":"active"' || true
+LATE_REPAIRED_ID=$(command curl -s "$LATE_DAEMON/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
+assert "Client 公钥缺失后从私钥恢复" "$LATE_CLIENT_ID" "$LATE_REPAIRED_ID"
+kill -9 "$LATE_REPAIR_PID" 2>/dev/null || true
+fi
+
+# ============================================================
+# Case 44: task / execution / status 严格关联
+# ============================================================
+if should_run 44; then
+echo -e "\n${YELLOW}Case 44: task / execution / status 严格关联${NC}"
+
+STRICT_AGENT="strict-result-agent-$$"
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$STRICT_AGENT\",\"runtime\":\"claude-code\",\"directory\":\"/tmp\",\"user_id\":\"e2e-testuser\"}" >/dev/null
+wait_until 10 "get_agent_field status $STRICT_AGENT" "online" || true
+
+curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
+  -d "{\"task_id\":\"strict-task-1\",\"agent_name\":\"$STRICT_AGENT\",\"runtime\":\"claude-code\",\"prompt\":\"strict task id test\"}" >/dev/null
+TAKEN=$(curl -s -X POST "$DAEMON_URL/tasks/take?agent=$STRICT_AGENT")
+assert "严格校验测试任务已领取" "strict-task-1" "$TAKEN"
+assert "错误 task_id 返回 409" "409" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' -d "{\"agent_name\":\"$STRICT_AGENT\",\"task_id\":\"wrong-task\",\"status\":\"completed\",\"result\":\"bad\"}")"
+assert "非法 task status 返回 422" "422" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' -d "{\"agent_name\":\"$STRICT_AGENT\",\"task_id\":\"strict-task-1\",\"status\":\"success\",\"result\":\"bad\"}")"
+assert "错误回报后正确任务仍可完成" "200" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' -d "{\"agent_name\":\"$STRICT_AGENT\",\"task_id\":\"strict-task-1\",\"status\":\"completed\",\"result\":\"correct\"}")"
+
+STRICT_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' \
+  -d "{\"title\":\"strict workflow result e2e\",\"nodes\":[{\"id\":\"strict-node\",\"agent_name\":\"$STRICT_AGENT\",\"prompt\":\"strict workflow result\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+STRICT_WF_ID=$(echo "$STRICT_WF" | python3 -c "import json,sys;print(json.load(sys.stdin).get('workflow_id',''))")
+wait_until 10 "curl -s -X POST '$DAEMON_URL/tasks/take?agent=$STRICT_AGENT'" "execution_id" || true
+STRICT_TASK=$(curl -s "$DAEMON_URL/tasks/pending?agent=$STRICT_AGENT" 2>/dev/null || true)
+STRICT_WF_JSON=$(curl -s "$E2E_SERVER/api/workflows/$STRICT_WF_ID")
+STRICT_EXEC_ID=$(echo "$STRICT_WF_JSON" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['nodes'][0].get('execution_id',''))")
+
+WRONG_EXEC=$(curl -s -w '\nHTTP:%{http_code}' -X POST "$E2E_SERVER/api/workflows/$STRICT_WF_ID/nodes/strict-node/result" -H 'Content-Type: application/json' \
+  -d "{\"execution_id\":\"wrong-execution\",\"agent_name\":\"$STRICT_AGENT\",\"status\":\"completed\",\"result\":\"bad\"}")
+assert "错误 execution_id 返回 409" "HTTP:409" "$WRONG_EXEC"
+assert "错误 agent 返回 409" "409" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/workflows/$STRICT_WF_ID/nodes/strict-node/result" -H 'Content-Type: application/json' -d "{\"execution_id\":\"$STRICT_EXEC_ID\",\"agent_name\":\"wrong-agent\",\"status\":\"completed\",\"result\":\"bad\"}")"
+assert "非法 workflow status 返回 422" "422" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/workflows/$STRICT_WF_ID/nodes/strict-node/result" -H 'Content-Type: application/json' -d "{\"execution_id\":\"$STRICT_EXEC_ID\",\"agent_name\":\"$STRICT_AGENT\",\"status\":\"success\",\"result\":\"bad\"}")"
+assert "错误 workflow 回报后节点仍 running" "running" "$(curl -s "$E2E_SERVER/api/workflows/$STRICT_WF_ID" | python3 -c "import json,sys;print(json.load(sys.stdin)['nodes'][0]['status'])")"
+
+# take 请求已在 wait_until 中领取任务，按真实 execution_id 完成。
+assert "正确 workflow 任务回报成功" "200" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' -d "{\"agent_name\":\"$STRICT_AGENT\",\"task_id\":\"$STRICT_EXEC_ID\",\"status\":\"completed\",\"result\":\"strict workflow correct\"}")"
+wait_until 10 "curl -s '$E2E_SERVER/api/workflows/$STRICT_WF_ID'" '"status":"completed"' || true
+assert "Workflow 最终 completed" "completed" "$(curl -s "$E2E_SERVER/api/workflows/$STRICT_WF_ID" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+assert "迟到回报返回 422" "422" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/workflows/$STRICT_WF_ID/nodes/strict-node/result" -H 'Content-Type: application/json' -d "{\"execution_id\":\"$STRICT_EXEC_ID\",\"agent_name\":\"$STRICT_AGENT\",\"status\":\"completed\",\"result\":\"late\"}")"
+fi
+
+# ============================================================
+# Case 45: OpenCode 失败不得误报成功
+# ============================================================
+if should_run 45; then
+echo -e "\n${YELLOW}Case 45: OpenCode 失败不得误报成功${NC}"
+
+for MODE in error empty stale timeout; do
+  command curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__mock/mode" -H 'Content-Type: application/json' -d "{\"mode\":\"$MODE\"}" >/dev/null
+  MODE_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"OpenCode $MODE must fail\",\"nodes\":[{\"id\":\"mode-node\",\"agent_name\":\"$AGENT_NAME\",\"prompt\":\"OpenCode mode $MODE\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+  MODE_WF_ID=$(echo "$MODE_WF" | python3 -c "import json,sys;print(json.load(sys.stdin).get('workflow_id',''))")
+  wait_until 10 "curl -s '$E2E_SERVER/api/workflows/$MODE_WF_ID'" '"status":"failed"' || true
+  MODE_WF_JSON=$(curl -s "$E2E_SERVER/api/workflows/$MODE_WF_ID")
+  assert "OpenCode $MODE 最终 failed" "failed" "$(echo "$MODE_WF_JSON" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+  MODE_RESULT=$(echo "$MODE_WF_JSON" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['nodes'][0].get('result',''))")
+  if [[ "$MODE" == "error" ]]; then
+    assert "OpenCode HTTP error 保留原因" "HTTP 500" "$MODE_RESULT"
+  elif [[ "$MODE" == "timeout" ]]; then
+    assert "OpenCode timeout 保留原因" "超时" "$MODE_RESULT"
+  else
+    assert "OpenCode $MODE 无新结果原因" "新 assistant 结果" "$MODE_RESULT"
+  fi
+done
+
+command curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__mock/mode" -H 'Content-Type: application/json' -d '{"mode":"success"}' >/dev/null
+SUCCESS_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' \
+  -d "{\"title\":\"OpenCode success remains working\",\"nodes\":[{\"id\":\"success-node\",\"agent_name\":\"$AGENT_NAME\",\"prompt\":\"OpenCode success after failures\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+SUCCESS_WF_ID=$(echo "$SUCCESS_WF" | python3 -c "import json,sys;print(json.load(sys.stdin).get('workflow_id',''))")
+wait_until 10 "curl -s '$E2E_SERVER/api/workflows/$SUCCESS_WF_ID'" '"status":"completed"' || true
+assert "OpenCode 正常链路仍 completed" "completed" "$(curl -s "$E2E_SERVER/api/workflows/$SUCCESS_WF_ID" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+fi
+
+# ============================================================
+# Case 46: MAS headless runtime 空输出不得误报成功
+# ============================================================
+if should_run 46; then
+echo -e "\n${YELLOW}Case 46: MAS headless runtime 空输出不得误报成功${NC}"
+
+for RUNTIME in opencode claude codex; do
+  stop_e2e_server
+  start_e2e_server "$RUNTIME" || { echo -e "${RED}❌ $RUNTIME Server 启动失败${NC}"; exit 1; }
+
+  printf 'empty\n' > "$E2E_MAF_HOME/state/mas-runtime-mode"
+  EMPTY_MAS=$(curl -s -X POST "$E2E_SERVER/api/workflows/mas/task" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"MAS $RUNTIME empty output\",\"description\":\"empty output must fail\"}")
+  EMPTY_MAS_ID=$(echo "$EMPTY_MAS" | python3 -c "import json,sys;print(json.load(sys.stdin).get('session_id',''))")
+  assert "MAS $RUNTIME 空输出 session failed" "failed" "$(echo "$EMPTY_MAS" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+  EMPTY_MAS_DETAIL=$(curl -s "$E2E_SERVER/api/workflows/mas/sessions/$EMPTY_MAS_ID")
+  case "$RUNTIME" in
+    opencode) EMPTY_LABEL="opencode run" ;;
+    claude) EMPTY_LABEL="claude --print" ;;
+    codex) EMPTY_LABEL="codex exec" ;;
+  esac
+  assert "MAS $RUNTIME 空输出保留失败原因" "$EMPTY_LABEL completed without output" \
+    "$(echo "$EMPTY_MAS_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['rounds'][0].get('mas_output',''))")"
+
+  printf 'normal\n' > "$E2E_MAF_HOME/state/mas-runtime-mode"
+  SUCCESS_MAS=$(curl -s -X POST "$E2E_SERVER/api/workflows/mas/task" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"MAS $RUNTIME normal output\",\"description\":\"normal output must complete\"}")
+  SUCCESS_MAS_ID=$(echo "$SUCCESS_MAS" | python3 -c "import json,sys;print(json.load(sys.stdin).get('session_id',''))")
+  assert "MAS $RUNTIME 正常输出 session completed" "completed" "$(echo "$SUCCESS_MAS" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+  SUCCESS_MAS_DETAIL=$(curl -s "$E2E_SERVER/api/workflows/mas/sessions/$SUCCESS_MAS_ID")
+  assert "MAS $RUNTIME 正常输出保留结果" "mock result" \
+    "$(echo "$SUCCESS_MAS_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['rounds'][0].get('mas_output',''))")"
+done
 fi
 
 # ============================================================

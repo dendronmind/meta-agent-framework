@@ -17,6 +17,18 @@ import eventsRouter from './routes/events';
 import workflowsRouter from './routes/workflows';
 import evolveRouter from './routes/evolve';
 import proposalsRouter from './routes/proposals';
+import {
+  acceptSignedNonce,
+  ensureServerIdentity,
+  getAuthToken,
+  getServerPublicKey,
+  requestRawBody,
+  requireAdminAuth,
+  requireApiAuth,
+  serverAuthHeaders,
+} from './auth';
+import { verifySignedRequest } from './request-signing';
+import { clientIdentityService } from './services/client-identity-service';
 
 const PORT = parseInt(process.env.PORT || '3000');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -104,9 +116,79 @@ let httpServer: Server | null = null;
 let shuttingDown = false;
 
 // --- Middleware ---
-app.use(express.json());
+app.use(express.json({
+  verify: (req, _res, buffer) => {
+    (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+  },
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// 探活端点不包含敏感数据，保持匿名可用。
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    status: 'ok',
+    server_version: SERVER_VERSION,
+    client_min_version: CLIENT_MIN_VERSION,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Client 首次上线提交本机公钥及持有证明。私网/VPN来源默认自动准入；
+// 其他来源持久化为 pending，不依赖短期配对码。
+app.post('/api/auth/enroll', (req, res) => {
+  const payload = req.body || {};
+  const clientId = String(payload.client_id || '');
+  const publicKey = String(payload.public_key || '');
+  const timestamp = req.get('x-maf-timestamp') || '';
+  const nonce = req.get('x-maf-nonce') || '';
+  const signature = req.get('x-maf-signature') || '';
+  if (req.get('x-maf-role') !== 'client' || req.get('x-maf-id') !== clientId
+      || !verifySignedRequest(publicKey, req.method, req.originalUrl, requestRawBody(req), timestamp, nonce, signature)
+      || !acceptSignedNonce(`enroll:${clientId}`, nonce, timestamp)) {
+    res.status(401).json({ error: 'Invalid enrollment proof' });
+    return;
+  }
+  try {
+    const sourceIp = req.ip || req.socket.remoteAddress || '';
+    const { identity, created } = clientIdentityService.enroll(payload, sourceIp);
+    if (identity.status === 'revoked') {
+      res.status(403).json({ error: 'Client identity is revoked', status: identity.status });
+      return;
+    }
+    res.status(identity.status === 'active' ? (created ? 201 : 200) : 202).json({
+      client_id: identity.client_id,
+      status: identity.status,
+      server_public_key: getServerPublicKey(),
+    });
+  } catch (err: any) {
+    const code = String(err?.message || 'enrollment_failed');
+    const status = code === 'client_key_mismatch' ? 409
+      : code === 'enrollment_disabled' ? 403
+        : 400;
+    res.status(status).json({ error: code });
+  }
+});
+
+// 管理调用使用本机 Admin Bearer；Client 调用使用机器密钥签名并受路径白名单限制。
+app.use('/api', requireApiAuth);
+
+app.get('/api/auth/clients', requireAdminAuth, (_req, res) => {
+  res.json(clientIdentityService.list());
+});
+
+app.post('/api/auth/clients/:id/approve', requireAdminAuth, (req, res) => {
+  const identity = clientIdentityService.approve(req.params.id as string);
+  if (!identity) { res.status(404).json({ error: 'Client identity not found' }); return; }
+  res.json({ client_id: identity.client_id, status: identity.status });
+});
+
+app.post('/api/auth/clients/:id/revoke', requireAdminAuth, (req, res) => {
+  const identity = clientIdentityService.revoke(req.params.id as string);
+  if (!identity) { res.status(404).json({ error: 'Client identity not found' }); return; }
+  res.json({ client_id: identity.client_id, status: identity.status });
+});
 
 function sendJsonWithVersion(res: express.Response, filePath: string): void {
   try {
@@ -127,25 +209,15 @@ app.use('/api/evolve', evolveRouter);
 app.use('/api/proposals', proposalsRouter);
 app.use('/api/events', eventsRouter);
 
-// --- Health check ---
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    status: 'ok',
-    server_version: SERVER_VERSION,
-    client_min_version: CLIENT_MIN_VERSION,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
-});
-
 // --- Client 安装 ---
 // GET /install.sh — 动态注入 Server 地址，远端直接 curl 执行即可
 app.get('/install.sh', (_req, res) => {
   const scriptPath = path.join(__dirname, '..', 'plugins', 'install.sh');
   try {
     let script = fs.readFileSync(scriptPath, 'utf-8');
-    script = script.replace(/__SERVER_URL__/g, SERVER_URL).replace(/__PACKAGE_VERSION__/g, SERVER_VERSION);
+    script = script
+      .replace(/__SERVER_URL__/g, SERVER_URL)
+      .replace(/__PACKAGE_VERSION__/g, SERVER_VERSION);
     res.type('text/plain').send(script);
   } catch {
     res.status(500).send('# install.sh not found');
@@ -254,6 +326,10 @@ async function reconcileWithRegistry(): Promise<void> {
 
 // --- Start ---
 async function start(): Promise<void> {
+  // 直接运行 Server 或 maf-server start 都会自动创建管理凭证和 Server 身份密钥。
+  ensureServerIdentity();
+  getAuthToken();
+
   // 初始化数据库（sql.js 异步加载 WASM/asm）
   await initDb();
   const db = getDb();
@@ -320,10 +396,12 @@ async function broadcastPing(): Promise<void> {
   const results = await Promise.allSettled(
     endpoints.map(async ({ client_endpoint }) => {
       try {
-        const res = await fetch(`${client_endpoint}/ping`, {
+        const url = `${client_endpoint}/ping`;
+        const body = JSON.stringify({ server: `http://${HOST}:${PORT}`, timestamp: new Date().toISOString() });
+        const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ server: `http://${HOST}:${PORT}`, timestamp: new Date().toISOString() }),
+          headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+          body,
           signal: AbortSignal.timeout(3_000),
         });
         if (res.ok) {

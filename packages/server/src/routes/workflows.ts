@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { workflowEngine } from '../services/workflow-engine';
 import { masRunner } from '../services/mas-runner';
+import { agentRegistry } from '../services/agent-registry';
 import type { ExecutionResult, ExecuteScope, ExecuteIntent, WorkflowFailurePolicy } from '../types';
 
 const router = Router();
@@ -88,19 +89,43 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 /** POST /api/workflows/:wid/nodes/:nid/result — Client 回报节点结果 */
 router.post('/:wid/nodes/:nid/result', (req: Request, res: Response) => {
-  const result: ExecutionResult = {
-    ...req.body,
-    workflow_id: req.params.wid as string,
-    node_id: req.params.nid as string,
-  };
-
-  if (!result.execution_id || !result.status) {
-    res.status(400).json({ error: 'execution_id and status required' });
+  const { execution_id, status, agent_name } = req.body;
+  if (!execution_id || !status || !agent_name) {
+    res.status(400).json({ error: 'execution_id, status, and agent_name required' });
+    return;
+  }
+  if (status !== 'completed' && status !== 'failed') {
+    res.status(422).json({ error: 'status must be completed or failed' });
+    return;
+  }
+  const principal = res.locals.mafPrincipal;
+  if (principal?.role === 'client' && !agentRegistry.clientOwnsAgent(principal.id, agent_name)) {
+    res.status(403).json({ error: 'Agent does not belong to this client' });
     return;
   }
 
-  workflowEngine.reportNodeResult(result);
-  res.json({ received: true });
+  const result: ExecutionResult = {
+    ...req.body,
+    execution_id,
+    status,
+    agent_name,
+    workflow_id: req.params.wid as string,
+    node_id: req.params.nid as string,
+  };
+  const outcome = workflowEngine.reportNodeResult(result);
+  if (outcome.accepted) {
+    res.json({ received: true });
+    return;
+  }
+  if (outcome.code === 'unknown_workflow' || outcome.code === 'unknown_node') {
+    res.status(404).json({ error: outcome.message, code: outcome.code });
+    return;
+  }
+  if (outcome.code === 'invalid_state') {
+    res.status(422).json({ error: outcome.message, code: outcome.code });
+    return;
+  }
+  res.status(409).json({ error: outcome.message, code: outcome.code });
 });
 
 // ============================================================

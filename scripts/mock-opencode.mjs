@@ -30,6 +30,8 @@ console.log(`[mock-opencode] plugin=${PLUGIN_DIR}`);
 // ============================================================
 const sessions = new Map();
 let sessionCounter = 0;
+let messageMode = process.env.MOCK_OPENCODE_MESSAGE_MODE || "success";
+let pluginHooks = null;
 
 const apiServer = createServer(async (req, res) => {
   const json = (code, data) => {
@@ -40,7 +42,10 @@ const apiServer = createServer(async (req, res) => {
   // POST /session — 创建 session
   if (req.method === "POST" && req.url === "/session") {
     const id = `ses_mock_${++sessionCounter}`;
-    sessions.set(id, { id, messages: [] });
+    const messages = messageMode === "stale"
+      ? [{ id: `old-${id}`, role: "assistant", parts: [{ type: "text", text: "stale assistant result" }] }]
+      : [];
+    sessions.set(id, { id, messages });
     json(200, { id });
     console.log(`[mock-opencode] 创建 session: ${id}`);
     return;
@@ -55,23 +60,54 @@ const apiServer = createServer(async (req, res) => {
 
     let body = "";
     for await (const chunk of req) body += chunk;
-    const { content } = JSON.parse(body || "{}");
+    const payload = JSON.parse(body || "{}");
+    const content = payload.content || (payload.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
+
+    if (messageMode === "error") {
+      json(500, { error: "mock message failure" });
+      return;
+    }
 
     // 模拟 assistant 回复
-    session.messages.push({ role: "user", parts: [{ type: "text", text: content }] });
-    session.messages.push({ role: "assistant", parts: [{ type: "text", text: `[mock] 已收到: ${(content || "").substring(0, 50)}` }] });
+    session.messages.push({ id: `user-${Date.now()}`, role: "user", parts: [{ type: "text", text: content }] });
+    if (messageMode === "success") {
+      session.messages.push({ id: `assistant-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: `[mock] 已收到: ${(content || "").substring(0, 50)}` }] });
+    }
     json(200, { ok: true });
     console.log(`[mock-opencode] session ${sid} 收到消息: ${(content || "").substring(0, 60)}`);
+    if (messageMode !== "timeout") {
+      setTimeout(() => {
+        pluginHooks?.event?.({ event: { type: "session.idle", properties: { sessionID: sid } } });
+      }, 20);
+    }
     return;
   }
 
-  // GET /session/:id/messages — 读取消息
-  const msgsMatch = req.url?.match(/^\/session\/([^/]+)\/messages$/);
+  // GET /session/:id/message(s) — 读取消息
+  const msgsMatch = req.url?.match(/^\/session\/([^/]+)\/messages?$/);
   if (req.method === "GET" && msgsMatch) {
     const sid = msgsMatch[1];
     const session = sessions.get(sid);
     if (!session) { json(404, { error: "session not found" }); return; }
     json(200, { data: session.messages });
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/__mock/mode") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const data = JSON.parse(body || "{}");
+    messageMode = String(data.mode || "success");
+    if (messageMode === "stale") {
+      for (const session of sessions.values()) {
+        session.messages.push({
+          id: `stale-${Date.now()}`,
+          role: "assistant",
+          parts: [{ type: "text", text: "stale assistant result" }],
+        });
+      }
+    }
+    json(200, { mode: messageMode });
     return;
   }
 
@@ -108,6 +144,9 @@ try { mkdirSync(mockDirectory, { recursive: true }); } catch {}
 
 const hooks = await MetaAgentBridge({
   client: {
+    _client: {
+      getConfig: () => ({ baseUrl: `http://127.0.0.1:${MOCK_PORT}`, headers: {} }),
+    },
     session: {
       list: async () => ({ data: Array.from(sessions.values()) }),
       get: async ({ path }) => ({ data: sessions.get(path.id) }),
@@ -124,6 +163,7 @@ const hooks = await MetaAgentBridge({
   project: { id: "mock-project" },
   directory: mockDirectory,
 });
+pluginHooks = hooks;
 
 console.log(`[mock-opencode] Plugin 加载完成，触发 hooks`);
 

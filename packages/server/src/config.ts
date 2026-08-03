@@ -22,6 +22,9 @@ export type RegistryType = 'feishu' | 'none';
 export type ServerRuntime = 'opencode' | 'codex' | 'claude' | 'claude-code';
 
 export interface MafConfig {
+  auth: {
+    token: string;
+  };
   server: {
     url: string;
     port: number;
@@ -52,6 +55,9 @@ export interface MafConfig {
 // ============================================================
 
 const DEFAULTS: MafConfig = {
+  auth: {
+    token: '',
+  },
   server: {
     url: '',       // 必须配置
     port: 3000,
@@ -128,6 +134,7 @@ export function getConfig(projectRoot?: string): MafConfig {
 
   // 4. 环境变量覆盖（最高优先级）
   if (process.env.META_AGENT_SERVER) config.server.url = process.env.META_AGENT_SERVER;
+  if (process.env.MAF_AUTH_TOKEN) config.auth.token = process.env.MAF_AUTH_TOKEN;
   if (process.env.META_AGENT_PORT || process.env.PORT) config.server.port = parseInt(process.env.META_AGENT_PORT || process.env.PORT || '3000');
   if (process.env.MAF_SERVER_RUNTIME) config.server.runtime = process.env.MAF_SERVER_RUNTIME as ServerRuntime;
   if (process.env.MAF_NODE_PORT) config.daemon.port = parseInt(process.env.MAF_NODE_PORT);

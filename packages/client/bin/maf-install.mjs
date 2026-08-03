@@ -17,7 +17,7 @@
  *   环境变量:     META_AGENT_SERVER + MAF_NODE_PORT → ~/.bashrc
  */
 
-import { existsSync, mkdirSync, copyFileSync, cpSync, writeFileSync, readFileSync, appendFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, copyFileSync, cpSync, writeFileSync, readFileSync, appendFileSync, unlinkSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { execSync, spawn } from "node:child_process";
@@ -551,6 +551,7 @@ function uninstall() {
     let content = readFileSync(BASHRC, "utf-8");
     const before = content.length;
     content = content.replace(/^.*META_AGENT_SERVER.*\n?/gm, "");
+    content = content.replace(/^.*MAF_AUTH_TOKEN.*\n?/gm, "");
     content = content.replace(/^.*MAF_NODE_PORT.*\n?/gm, "");
     content = content.replace(/^.*# Meta-Agent Framework.*\n?/gm, "");
     content = content.replace(/^.*alias opencode=.*hostname localhost.*\n?/gm, "");
@@ -836,6 +837,7 @@ async function spawnDaemonForAgent(agentName, runtime, projectPath, serverUrl, p
       MAF_DIRECTORY: projectPath,
       MAF_PLUGIN_DIR: dirname(script),
       META_AGENT_SERVER: serverUrl || process.env.META_AGENT_SERVER || "",
+      MAF_LOCAL_TOKEN: readLocalToken(),
     },
   });
   child.unref();
@@ -864,7 +866,10 @@ async function connectAgentCommand({ agent, runtime = "codex", project }) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/agents/connect`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${readLocalToken()}`,
+      },
       body: JSON.stringify({ agent_name: agent, runtime, directory: projectPath }),
       signal: AbortSignal.timeout(3000),
     });
@@ -1008,7 +1013,14 @@ function readMafConfig() {
 function writeMafConfig(cfg) {
   const dir = join(HOME, ".meta-agent-framework");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "maf.config.json"), JSON.stringify(cfg, null, 2) + "\n");
+  const file = join(dir, "maf.config.json");
+  writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(file, 0o600); } catch {}
+}
+
+function readLocalToken() {
+  const tokenFile = join(HOME, ".meta-agent-framework", "auth", "local-token");
+  try { return readFileSync(tokenFile, "utf-8").trim(); } catch { return process.env.MAF_LOCAL_TOKEN || ""; }
 }
 
 // ============================================================
@@ -1062,15 +1074,16 @@ if (env.hasCodex) ok("Codex");
 
 // 检测已有的 Server URL（环境变量 > maf.config.json）
 let serverUrl = env.serverUrl;
+const existingCfg = readMafConfig();
 if (!serverUrl) {
-  const existingCfg = readMafConfig();
   if (existingCfg?.server?.url) {
     serverUrl = existingCfg.server.url;
   }
 }
 
-// 交互式确认/填写 Server URL
-if (process.stdin.isTTY) {
+// --auto 是 npm postinstall 路径，即使继承了调用终端也不能等待用户输入。
+// 显式 init/install 才在 TTY 中确认 Server URL。
+if (cmd !== "--auto" && process.stdin.isTTY) {
   // 有 TTY：始终让用户确认（有默认值显示，没有则必填不可跳过）
   console.log("");
   log("配置 Server 地址（运行 maf-server 的机器，例如 http://10.0.0.1:3000）");
@@ -1097,9 +1110,11 @@ if (env.hasClaude) installClaudeCode();
 if (env.hasCodex) installCodex();
 configureEnv(serverUrl);
 
-// 生成 maf.config.json（Client 角色）
+// 生成 maf.config.json（Client 角色）；机器身份由 Daemon 首次启动时自动生成。
 if (serverUrl) {
   const cfg = readMafConfig() || {};
+  cfg.role = cfg.role || "client";
+  delete cfg.auth;
   cfg.server = cfg.server || {};
   cfg.server.url = serverUrl;
   cfg.daemon = cfg.daemon || { port: parseInt(process.env.MAF_NODE_PORT || "4100") };

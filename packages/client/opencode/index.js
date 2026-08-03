@@ -12,9 +12,9 @@
 import { existsSync, readFileSync, appendFileSync, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, userInfo, networkInterfaces } from "node:os";
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, sign } from "node:crypto";
 
 // ============================================================
 // 配置
@@ -26,6 +26,7 @@ const LOG_FILE = join(LOG_DIR, "opencode-plugin.log");
 
 const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
 const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
+const OPENCODE_IDLE_TIMEOUT_MS = parseInt(process.env.MAF_OPENCODE_IDLE_TIMEOUT_MS || "", 10) || 20 * 60_000;
 
 function rotateLogIfNeeded(incomingBytes = 0) {
   try {
@@ -48,6 +49,49 @@ function appendLogLine(content) {
 }
 const STANDALONE_DAEMON = join(STATE_DIR, "daemon.mjs");
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100");
+
+function loadMafConfig() {
+  const paths = [
+    join(STATE_DIR, "maf.config.json"),
+    join(process.cwd(), "maf.config.json"),
+  ];
+  let cfg = {};
+  for (const path of paths) {
+    try { if (existsSync(path)) cfg = { ...cfg, ...JSON.parse(readFileSync(path, "utf-8")) }; } catch {}
+  }
+  return cfg;
+}
+const _mafCfg = loadMafConfig();
+const LOCAL_TOKEN_FILE = join(STATE_DIR, "auth", "local-token");
+const CLIENT_ID_FILE = join(STATE_DIR, "auth", "client-id");
+const CLIENT_PRIVATE_KEY_FILE = join(STATE_DIR, "auth", "client-private.pem");
+
+function authHeaders(headers = {}) {
+  let token = "";
+  try { token = readFileSync(LOCAL_TOKEN_FILE, "utf-8").trim(); } catch {}
+  token = token || process.env.MAF_LOCAL_TOKEN || "";
+  return { ...headers, Authorization: `Bearer ${token}` };
+}
+
+function clientSignedHeaders(method, url, body = "", headers = {}) {
+  const clientId = readFileSync(CLIENT_ID_FILE, "utf-8").trim();
+  const privateKey = readFileSync(CLIENT_PRIVATE_KEY_FILE, "utf-8");
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(18).toString("base64url");
+  const parsed = new URL(url);
+  const target = `${parsed.pathname}${parsed.search}`;
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  const canonical = Buffer.from([method.toUpperCase(), target, timestamp, nonce, bodyHash].join("\n"));
+  const signature = sign(null, canonical, privateKey).toString("base64url");
+  return {
+    ...headers,
+    "X-MAF-Role": "client",
+    "X-MAF-ID": clientId,
+    "X-MAF-Timestamp": timestamp,
+    "X-MAF-Nonce": nonce,
+    "X-MAF-Signature": signature,
+  };
+}
 
 mkdirSync(LOG_DIR, { recursive: true });
 
@@ -170,7 +214,7 @@ async function ensureNodeDaemon(directory) {
       try {
         const res = await fetch(`${daemonUrl}/shutdown`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ daemon: true, reason: "hash_mismatch" }),
           signal: AbortSignal.timeout(2000),
         });
@@ -188,13 +232,21 @@ async function ensureNodeDaemon(directory) {
 /** 通知 Node Daemon */
 async function notifyDaemon(path, body) {
   try {
-    await fetch(`${daemonUrl}${path}`, {
+    const res = await fetch(`${daemonUrl}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(2000),
     });
-  } catch {}
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Daemon ${path} HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+    }
+    return res;
+  } catch (err) {
+    log(`⚠ Daemon 通知失败 ${path}: ${err.message}`);
+    return null;
+  }
 }
 
 // ============================================================
@@ -291,20 +343,32 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
   let executingTask = null;  // 当前正在执行的任务（long-poll 期间不取新任务）
   let isRemoteTaskExecuting = false;  // 远端任务执行期间为 true → permission.ask 自动批准
 
-  async function fetchAssistantResult(baseUrl, headers, sessionID) {
-    try {
-      const msgFetch = await fetch(`${baseUrl}/session/${sessionID}/message`, { headers });
-      if (!msgFetch.ok) return "";
-      const messages = await msgFetch.json();
-      const arr = Array.isArray(messages) ? messages : (messages.data || []);
-      for (let j = arr.length - 1; j >= 0; j--) {
-        const role = arr[j].info?.role || arr[j].role;
-        if (role === "assistant") {
-          const texts = (arr[j].parts || []).filter(p => p.type === "text").map(p => p.text).join("");
-          if (texts) return texts;
-        }
-      }
-    } catch {}
+  async function fetchSessionMessages(baseUrl, headers, sessionID) {
+    const msgFetch = await fetch(`${baseUrl}/session/${sessionID}/message`, { headers });
+    const raw = await msgFetch.text();
+    if (!msgFetch.ok) {
+      throw new Error(`读取 session 消息失败: HTTP ${msgFetch.status}${raw ? ` ${raw.slice(0, 200)}` : ""}`);
+    }
+    let messages;
+    try { messages = raw ? JSON.parse(raw) : []; }
+    catch { throw new Error(`读取 session 消息失败: 非法 JSON ${raw.slice(0, 200)}`); }
+    return Array.isArray(messages) ? messages : (messages.data || []);
+  }
+
+  async function fetchAssistantResult(baseUrl, headers, sessionID, boundary) {
+    const arr = await fetchSessionMessages(baseUrl, headers, sessionID);
+    for (let j = arr.length - 1; j >= 0; j--) {
+      const message = arr[j];
+      const role = message.info?.role || message.role;
+      if (role !== "assistant") continue;
+      const messageId = message.info?.id || message.id || "";
+      const isNew = messageId
+        ? !boundary.messageIds.has(messageId)
+        : j >= boundary.messageCount;
+      if (!isNew) continue;
+      const texts = (message.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
+      if (texts.trim()) return texts;
+    }
     return "";
   }
 
@@ -314,6 +378,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
     // 通知 Daemon 开始执行（状态 → busy）
     await notifyDaemon("/tasks/executing", { agent_name: activeAgent, task_id: task.id });
     const start = Date.now();
+    let idleTimer = null;
     try {
       const baseUrl = opencodeApiUrl;
       const headers = { "Content-Type": "application/json", ...client._client.getConfig().headers };
@@ -323,7 +388,13 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
       let sessionID = currentSessionID;
       if (!sessionID) {
         const createRes = await fetch(`${baseUrl}/session`, { method: "POST", headers, body: "{}", signal: AbortSignal.timeout(5000) });
-        const sessionData = await createRes.json();
+        const createText = await createRes.text();
+        if (!createRes.ok) {
+          throw new Error(`创建 session 失败: HTTP ${createRes.status}${createText ? ` ${createText.slice(0, 200)}` : ""}`);
+        }
+        let sessionData;
+        try { sessionData = createText ? JSON.parse(createText) : {}; }
+        catch { throw new Error(`创建 session 失败: 非法 JSON ${createText.slice(0, 200)}`); }
         sessionID = sessionData.id;
         if (!sessionID) throw new Error("创建 session 失败: " + JSON.stringify(sessionData).substring(0, 200));
         log(`  创建新 session: ${sessionID}`);
@@ -331,11 +402,19 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
         log(`  复用当前 session: ${sessionID}`);
       }
 
+      const beforeMessages = await fetchSessionMessages(baseUrl, headers, sessionID);
+      const boundary = {
+        messageCount: beforeMessages.length,
+        messageIds: new Set(beforeMessages.map(m => m.info?.id || m.id).filter(Boolean)),
+      };
+
       // 两种执行模式：
       // 1. opencode TUI/serve: POST message 同步阻塞（执行完才返回 200）→ 返回后直接拉结果
       // 2. mock-opencode/旧版: POST message 立即返回 → 需要等 session.idle 事件
       const idlePromise = new Promise(resolve => { sessionIdleResolve = resolve; });
-      const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("timeout"), 20 * 60_000));
+      const timeoutPromise = new Promise(resolve => {
+        idleTimer = setTimeout(() => resolve("timeout"), OPENCODE_IDLE_TIMEOUT_MS);
+      });
 
       const postStart = Date.now();
       const msgRes = await fetch(`${baseUrl}/session/${sessionID}/message`, {
@@ -349,6 +428,9 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
       const postDuration = Date.now() - postStart;
       const msgText = await msgRes.text();
       log(`  POST message: status=${msgRes.status} (${postDuration}ms) body=${msgText.substring(0, 200)}`);
+      if (!msgRes.ok) {
+        throw new Error(`opencode message 失败: HTTP ${msgRes.status}${msgText ? ` ${msgText.slice(0, 200)}` : ""}`);
+      }
 
       if (postDuration > 5000) {
         // POST 阻塞超过 5s → 同步模式，opencode 已执行完，直接拉结果
@@ -358,19 +440,24 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
         log(`  异步模式: 等待 session.idle 事件...`);
         const signal = await Promise.race([idlePromise, timeoutPromise]);
         if (signal === "timeout") {
-          log(`  ⏰ 等待超时 (20min)`);
+          log(`  ⏰ 等待超时 (${OPENCODE_IDLE_TIMEOUT_MS}ms)`);
+          throw new Error(`等待 opencode session.idle 超时 (${OPENCODE_IDLE_TIMEOUT_MS}ms)`);
         }
       }
+      clearTimeout(idleTimer);
       sessionIdleResolve = null;
 
       // 拉取结果
-      const result = await fetchAssistantResult(baseUrl, headers, sessionID);
+      const result = await fetchAssistantResult(baseUrl, headers, sessionID, boundary);
+      if (!result.trim()) {
+        throw new Error("opencode 未返回本次任务的新 assistant 结果");
+      }
 
       const duration = Date.now() - start;
       log(`✅ 任务完成: "${task.title}" (${duration}ms, ${result.length} chars)`);
       await notifyDaemon("/tasks/done", {
         task_id: task.id, agent_name: activeAgent, status: "completed",
-        result: result || "Completed", duration_ms: duration,
+        result, duration_ms: duration,
       });
     } catch (err) {
       const duration = Date.now() - start;
@@ -380,6 +467,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
         result: err.message, duration_ms: duration,
       });
     } finally {
+      if (idleTimer) clearTimeout(idleTimer);
       sessionIdleResolve = null;
       executingTask = null;
       isRemoteTaskExecuting = false;
@@ -404,7 +492,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
         const url = agent
           ? `${daemonUrl}/tasks/wait?agent=${encodeURIComponent(agent)}`
           : `${daemonUrl}/tasks/wait`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+        const res = await fetch(url, { headers: authHeaders(), signal: AbortSignal.timeout(10_000) });
         if (!res.ok) { await new Promise(r => setTimeout(r, 3000)); continue; }
         const data = await res.json();
         if (!data.task) continue;
@@ -473,7 +561,9 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
     try {
       const res = await fetch(`${serverUrl}/api/events`, {
         signal: sseAbortController.signal,
-        headers: { "Accept": "text/event-stream" },
+        headers: activeAgent === "Meta-Agent-Server" && process.env.MAF_AUTH_TOKEN
+          ? { "Accept": "text/event-stream", Authorization: `Bearer ${process.env.MAF_AUTH_TOKEN}` }
+          : clientSignedHeaders("GET", `${serverUrl}/api/events`, "", { "Accept": "text/event-stream" }),
       });
 
       if (!res.ok || !res.body) {
@@ -609,7 +699,13 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
     if (sseAbortController) { sseAbortController.abort(); sseAbortController = null; }
     log(`通知 Node Daemon 断开 agent: ${activeAgent}`);
     try {
-      execSync(`curl -s -X POST ${daemonUrl}/agents/disconnect -H 'Content-Type: application/json' -d '{"agent_name":"${activeAgent}","plugin_pid":${process.pid}}' --max-time 1 2>/dev/null`, { timeout: 2000, stdio: "ignore" });
+      execFileSync("curl", [
+        "-s", "-X", "POST", `${daemonUrl}/agents/disconnect`,
+        "-H", "Content-Type: application/json",
+        "-H", authHeaders().Authorization,
+        "-d", JSON.stringify({ agent_name: activeAgent, plugin_pid: process.pid }),
+        "--max-time", "1",
+      ], { timeout: 2000, stdio: "ignore" });
     } catch {}
   };
   process.on("exit", disconnectAgent);
@@ -698,6 +794,7 @@ export const MetaAgentBridge = async ({ client, serverUrl, project, directory })
     "shell.env": async (_input, output) => {
       output.env.META_AGENT_DAEMON_URL = daemonUrl;
       output.env.META_AGENT_USER = userId;
+      output.env.MAF_LOCAL_TOKEN = authHeaders().Authorization.replace(/^Bearer\s+/, "");
     },
 
     // 远端任务执行期间自动批准权限请求（无人值守模式）

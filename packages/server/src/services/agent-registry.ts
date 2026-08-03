@@ -4,6 +4,7 @@ import { eventBus } from './event-bus';
 import { getRegistry } from './registry';
 import { CLIENT_MIN_VERSION, SERVER_AGENT_NAME, isServerAgentName } from '../types';
 import { getConfig } from '../config';
+import { serverAuthHeaders } from '../auth';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
 
 export interface RegistryReconcileResult {
@@ -151,14 +152,14 @@ export class AgentRegistry {
     // 外部注册表管理的 agent：不覆盖 runtime（外部源是 runtime 的权威源）
     const registry = getRegistry();
     const upsertManaged = db.prepare(`
-      UPDATE agents SET client_endpoint = ?, status = ?, last_heartbeat = ?,
+      UPDATE agents SET client_id = ?, client_endpoint = ?, status = ?, last_heartbeat = ?,
         project_path = ?, capabilities = ?, mode = ?, skills = ?, mcps = ?,
         client_version = ?, plugin_hash = ?, daemon_port = ?
       WHERE user_id = ? AND host_user = ? AND agent_name = ?
     `);
     const insertNew = db.prepare(`
-      INSERT OR REPLACE INTO agents (id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, client_version, plugin_hash, daemon_port, registered_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO agents (id, client_id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, client_version, plugin_hash, daemon_port, registered_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const agents: Agent[] = [];
@@ -169,7 +170,7 @@ export class AgentRegistry {
       if (registry.isManaged(info.agent_name)) {
         // 受管理的 agent → UPDATE（保留原记录 ID）
         upsertManaged.run(
-          payload.client_endpoint, agentStatus, now,
+          payload.client_id, payload.client_endpoint, agentStatus, now,
           info.project_path || '', info.capabilities || '',
           info.mode || 'subagent',
           JSON.stringify(info.skills || []), JSON.stringify(info.mcps || []),
@@ -182,7 +183,7 @@ export class AgentRegistry {
         if (!existing) {
           const id = uuidv4();
           insertNew.run(
-            id, payload.user_id, payload.host_user, payload.client_endpoint,
+            id, payload.client_id, payload.user_id, payload.host_user, payload.client_endpoint,
             agentStatus, now, info.agent_name, info.project_path || '',
             info.capabilities || '', info.mode || 'subagent',
             info.runtime || 'opencode',
@@ -197,7 +198,7 @@ export class AgentRegistry {
         // 动态 agent → INSERT
         const id = uuidv4();
         insertNew.run(
-          id, payload.user_id, payload.host_user, payload.client_endpoint,
+          id, payload.client_id, payload.user_id, payload.host_user, payload.client_endpoint,
           agentStatus, now, info.agent_name, info.project_path || '',
           info.capabilities || '', info.mode || 'subagent',
           info.runtime || 'opencode',
@@ -256,8 +257,9 @@ export class AgentRegistry {
   }
 
   /** 同步 agent 列表（Client 检测到文件变更后调用） */
-  syncAgents(userId: string, hostUser: string, clientEndpoint: string, agentInfos: AgentInfo[]): Agent[] {
+  syncAgents(clientId: string, userId: string, hostUser: string, clientEndpoint: string, agentInfos: AgentInfo[]): Agent[] {
     return this.registerClient({
+      client_id: clientId,
       user_id: userId,
       host_user: hostUser,
       client_endpoint: clientEndpoint,
@@ -465,6 +467,13 @@ export class AgentRegistry {
     `).all(name, SERVER_AGENT_NAME) as Agent[];
   }
 
+  clientOwnsAgent(clientId: string, agentName: string): boolean {
+    if (!clientId || !agentName || isServerAgentName(agentName)) return false;
+    return Boolean(getDb().prepare(
+      'SELECT id FROM agents WHERE client_id = ? AND agent_name = ? LIMIT 1'
+    ).get(clientId, agentName));
+  }
+
   findByCapability(keyword: string): Agent[] {
     return getDb().prepare(`
       SELECT * FROM agents WHERE capabilities LIKE ? AND status = 'online' AND agent_name <> ?
@@ -509,15 +518,17 @@ export class AgentRegistry {
 
     try {
       console.log(`[OTA] 🚀 自动推送到 ${agent.agent_name} (${daemonUrl}), ${files.length} 个文件...`);
-      const res = await fetch(`${daemonUrl}/ota`, {
+      const url = `${daemonUrl}/ota`;
+      const body = JSON.stringify({
+        files,
+        restart_agents: true,
+        target_agents: [agent.agent_name],
+        agent_info: { [agent.agent_name]: { directory: agent.project_path, session_id: null } },
+      });
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          files,
-          restart_agents: true,
-          target_agents: [agent.agent_name],
-          agent_info: { [agent.agent_name]: { directory: agent.project_path, session_id: null } },
-        }),
+        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+        body,
         signal: AbortSignal.timeout(30_000),
       });
       if (res.ok) {

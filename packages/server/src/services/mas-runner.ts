@@ -23,6 +23,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { workflowEngine, WorkflowSummary } from './workflow-engine';
 import { getConfig } from '../config';
+import { getAuthToken } from '../auth';
 import type { Agent, MASSession, SessionRound } from '../types';
 
 // ============================================================
@@ -349,6 +350,7 @@ failure_policy 可选：
       MAF_RUNTIME: runtime === 'claude' ? 'claude-code' : runtime,
       MAF_DIRECTORY: mafHome,
       META_AGENT_SERVER: this.getServerUrl(),
+      MAF_AUTH_TOKEN: getAuthToken(),
     };
   }
 
@@ -356,7 +358,13 @@ failure_policy 可选：
     label: string,
     command: string,
     args: string[],
-    options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs?: number },
+    options: {
+      cwd: string;
+      env: NodeJS.ProcessEnv;
+      input?: string;
+      timeoutMs?: number;
+      allowEmptyOutput?: boolean;
+    },
   ): Promise<string> {
     if (this.shuttingDown) {
       return Promise.reject(new Error(`${label} skipped: MAS runner is shutting down`));
@@ -406,8 +414,10 @@ failure_policy 可选：
           reject(new Error(`${label} timed out after ${timeoutMs}ms${errOutput ? `: ${errOutput}` : ''}`));
           return;
         }
-        if (code === 0) {
-          resolve(output || 'Completed (no output)');
+        if (code === 0 && (output || options.allowEmptyOutput)) {
+          resolve(output);
+        } else if (code === 0) {
+          reject(new Error(`${label} completed without output${errOutput ? `: ${errOutput}` : ''}`));
         } else {
           reject(new Error(`${label} exited ${code}: ${errOutput || output}`));
         }
@@ -466,6 +476,7 @@ failure_policy 可选：
       ], {
         cwd: mafHome,
         input: prompt,
+        allowEmptyOutput: true,
         env: {
           ...this.baseRuntimeEnv(mafHome, 'codex'),
           CODEX_CWD: mafHome,
@@ -475,7 +486,9 @@ failure_policy 可选：
         },
       });
       const final = existsSync(outputFile) ? readFileSync(outputFile, 'utf-8').trim() : '';
-      return final || stdout.trim() || 'Completed (no output)';
+      const result = final || stdout.trim();
+      if (!result) throw new Error('codex exec completed without output');
+      return result;
     } finally {
       try { rmSync(outputFile, { force: true }); } catch {}
     }

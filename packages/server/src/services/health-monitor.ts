@@ -1,6 +1,7 @@
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import { workflowEngine } from './workflow-engine';
+import { serverAuthHeaders } from '../auth';
 
 const HEARTBEAT_TIMEOUT_MS = 5_000;    // 5s 无心跳 → offline（心跳间隔 1s + 4s 裕量）
 const DEAD_TIMEOUT_MS = 30_000;        // 30s 无心跳 → dead
@@ -70,8 +71,10 @@ export class HealthMonitor {
 
   async restartClient(endpoint: string): Promise<{ success: boolean; message: string }> {
     try {
-      const res = await fetch(`${endpoint}/restart`, {
+      const url = `${endpoint}/restart`;
+      const res = await fetch(url, {
         method: 'POST',
+        headers: serverAuthHeaders('POST', url),
         signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) return { success: true, message: 'Restart signal sent' };

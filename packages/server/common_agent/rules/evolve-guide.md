@@ -7,19 +7,19 @@ Evolve 是 Meta-Agent-Server 将 skill、agent 配置、MCP 配置或自定义�
 1. 确认目标 agent 在线或 Daemon 可达：
 
 ```bash
-curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,client_endpoint,capabilities'
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,client_endpoint,capabilities'
 ```
 
 2. 如需查看全网 skill/MCP 分布：
 
 ```bash
-curl -s http://localhost:3000/api/agents/inventory
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/agents/inventory
 ```
 
 3. 如果 Evolve 来自 Proposal，先查看详情：
 
 ```bash
-curl -s http://localhost:3000/api/proposals/<proposal_id>
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/proposals/<proposal_id>
 ```
 
 ## Proposal → Evolve → Apply 闭环
@@ -27,16 +27,17 @@ curl -s http://localhost:3000/api/proposals/<proposal_id>
 ```bash
 # 1. 接受提议
 curl -s -X POST http://localhost:3000/api/proposals/<proposal_id>/review \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"status":"accepted","review_comment":"采纳并准备分发","reviewed_by":"Meta-Agent-Server"}'
 
 # 2. 执行 Evolve（按下方 skill/config/MCP/broadcast 示例之一）
 
 # 3. 确认 Evolve 结果
-curl -s http://localhost:3000/api/evolve/<evolve_id>
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/evolve/<evolve_id>
 
 # 4. 确认已落地后标记 Proposal 已应用
-curl -s -X POST http://localhost:3000/api/proposals/<proposal_id>/apply
+curl -s -X POST -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/proposals/<proposal_id>/apply
 ```
 
 不要在 Evolve 尚未成功时提前 `apply`。
@@ -45,6 +46,7 @@ curl -s -X POST http://localhost:3000/api/proposals/<proposal_id>/apply
 
 ```bash
 curl -s -X POST http://localhost:3000/api/evolve/skill \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_name": "目标 agent",
@@ -75,6 +77,7 @@ curl -s -X POST http://localhost:3000/api/evolve/skill \
 
 ```bash
 curl -s -X POST http://localhost:3000/api/evolve/agent-config \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_name": "目标 agent",
@@ -94,6 +97,7 @@ curl -s -X POST http://localhost:3000/api/evolve/agent-config \
 
 ```bash
 curl -s -X POST http://localhost:3000/api/evolve/mcp \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_name": "目标 agent",
@@ -113,6 +117,7 @@ MCP 变更通常需要结合目标 runtime 的配置格式；不确定时先派�
 
 ```bash
 curl -s -X POST http://localhost:3000/api/evolve/broadcast \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "title": "广播 skill 更新",
@@ -134,16 +139,16 @@ curl -s -X POST http://localhost:3000/api/evolve/broadcast \
 
 ```bash
 # 查看所有 evolve 记录
-curl -s http://localhost:3000/api/evolve
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/evolve
 
 # 查看单个 evolve 结果
-curl -s http://localhost:3000/api/evolve/<evolve_id>
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/evolve/<evolve_id>
 ```
 
 成功后可再次查看 inventory，确认 skill/MCP 分布已更新：
 
 ```bash
-curl -s http://localhost:3000/api/agents/inventory
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" http://localhost:3000/api/agents/inventory
 ```
 
 ## 失败处理

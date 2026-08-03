@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { proposalService } from '../services/proposal-service';
+import { agentRegistry } from '../services/agent-registry';
 import type { ProposalCreatePayload, ProposalReviewPayload, ProposalStatus } from '../types';
 
 const router = Router();
@@ -30,6 +31,11 @@ router.post('/', (req: Request, res: Response) => {
     res.status(400).json({ error: `Invalid type. Valid types: ${validTypes.join(', ')}` });
     return;
   }
+  const principal = res.locals.mafPrincipal;
+  if (principal?.role === 'client' && !agentRegistry.clientOwnsAgent(principal.id, payload.from_agent)) {
+    res.status(403).json({ error: 'Agent does not belong to this client' });
+    return;
+  }
 
   // user_id: 优先从 body 取，否则留空（Daemon 转发时会附上）
   const userId = payload.user_id || '';
@@ -50,7 +56,11 @@ router.get('/', (req: Request, res: Response) => {
   const from_agent = req.query.from_agent as string | undefined;
   const limit = parseInt(req.query.limit as string) || 50;
 
-  res.json(proposalService.list({ status, type, from_agent, limit }));
+  const principal = res.locals.mafPrincipal;
+  const proposals = proposalService.list({ status, type, from_agent, limit });
+  res.json(principal?.role === 'client'
+    ? proposals.filter(proposal => agentRegistry.clientOwnsAgent(principal.id, proposal.from_agent))
+    : proposals);
 });
 
 /**

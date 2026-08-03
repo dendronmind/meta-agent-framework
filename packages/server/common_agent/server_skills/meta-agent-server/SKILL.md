@@ -20,13 +20,13 @@ description: Use when acting as Meta-Agent-Server to dispatch MAF workflows, che
 确认 agent：
 
 ```bash
-curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
 ```
 
 异步派发最小模板：
 
 ```bash
-curl -s -X POST http://localhost:3000/api/workflows -H 'Content-Type: application/json' -d '{"title":"<概述>","origin":{"agent_name":"Meta-Agent-Server"},"notify":{"mode":"originator","include_result":true},"nodes":[{"id":"step-1","agent_name":"<agent_name>","prompt":"<忠实透传用户任务>","scope":"project","intent":"query"}]}'
+curl -s -X POST http://localhost:3000/api/workflows -H "Authorization: Bearer $MAF_AUTH_TOKEN" -H 'Content-Type: application/json' -d '{"title":"<概述>","origin":{"agent_name":"Meta-Agent-Server"},"notify":{"mode":"originator","include_result":true},"nodes":[{"id":"step-1","agent_name":"<agent_name>","prompt":"<忠实透传用户任务>","scope":"project","intent":"query"}]}'
 ```
 
 `intent` 速查：查看/说明=`query`，修改代码=`modify`，审查=`review`，诊断=`diagnose`，跑命令/测试=`execute`。修改 agent 自身配置时 `scope="agent_self"`。

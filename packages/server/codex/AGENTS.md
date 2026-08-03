@@ -13,7 +13,7 @@
 如果用户当前消息已经明确点名目标 agent 和任务，例如“让 MAF-developer 做 X”，不要先读取大段规则文件。直接走轻量派发：
 
 1. 如需确认目标是否存在，只执行一次精简查询：
-   `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
+   `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
 2. 立即 `POST /api/workflows`，带上：
    - `origin.agent_name="Meta-Agent-Server"`
    - `notify.mode="originator"`
@@ -36,5 +36,5 @@
 ## 空闲启动时可以做
 
 1. 读取 `user/` 目录下已有的 `.md` 文件（如果存在）。
-2. 用 `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 查看 Agent 概览。
+2. 用 `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 查看 Agent 概览。
 3. 向用户汇报团队状态，然后等待调度指令。

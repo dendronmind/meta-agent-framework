@@ -10,7 +10,7 @@
  * 生成 ~/.meta-agent-framework/maf.config.json
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, networkInterfaces } from "node:os";
 import { execSync } from "node:child_process";
@@ -130,6 +130,7 @@ if (process.argv.includes("--check")) {
     console.log(`  Server Runtime: ${cfg.server?.runtime || "(未设置)"}`);
   }
   console.log(`  Daemon 端口:  ${cfg.daemon?.port || 4100}`);
+  console.log("  机器身份:     首次启动时自动生成");
 
   const registryType = cfg.registry?.type || (cfg.feishu?.app_id ? 'feishu' : 'none');
   console.log(`  注册表类型:   ${registryType}`);
@@ -280,6 +281,7 @@ if (mode === "server") {
   // --- 生成配置 ---
   const config = {
     role: "server",
+    auth: existing?.auth || {},
     server: { url: serverUrl, port: serverPort, runtime },
     daemon: { port: daemonPort },
     registry: { type: registryType },
@@ -290,7 +292,8 @@ if (mode === "server") {
   };
 
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(CONFIG_PATH, 0o600); } catch {}
   console.log(`  ✅ 配置已写入: ${CONFIG_PATH}\n`);
 
   // bashrc
@@ -368,7 +371,8 @@ if (mode === "client") {
   };
 
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  try { chmodSync(CONFIG_PATH, 0o600); } catch {}
   console.log(`  ✅ 配置已写入: ${CONFIG_PATH}\n`);
 
   // bashrc

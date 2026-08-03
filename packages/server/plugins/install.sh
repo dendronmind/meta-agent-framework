@@ -27,6 +27,12 @@ if echo "$SERVER" | grep -q '__SERVER'; then
   return 1 2>/dev/null || exit 1
 fi
 
+# ---- 基础依赖 ----
+if ! command -v node &>/dev/null; then
+  echo "❌ 未检测到 node，Node Daemon 无法运行"
+  return 1 2>/dev/null || exit 1
+fi
+
 # ---- 检测运行时 ----
 HAS_OPENCODE=false
 HAS_CLAUDE=false
@@ -189,6 +195,24 @@ else
   echo "  ✅ MAF_NODE_PORT 已配置"
 fi
 export MAF_NODE_PORT="${MAF_NODE_PORT:-4100}"
+
+# 持久化 Client 配置；机器身份和本机 Token 由 Daemon 首次启动时自动生成。
+MAF_INSTALL_SERVER_URL="${SERVER}" node <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const dir = path.join(os.homedir(), ".meta-agent-framework");
+const file = path.join(dir, "maf.config.json");
+let cfg = {};
+try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+cfg.role = cfg.role || "client";
+delete cfg.auth;
+cfg.server = { ...(cfg.server || {}), url: process.env.MAF_INSTALL_SERVER_URL };
+cfg.daemon = cfg.daemon || { port: Number(process.env.MAF_NODE_PORT || 4100) };
+fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+try { fs.chmodSync(file, 0o600); } catch {}
+NODE
 
 echo ""
 echo "══════════════════════════════════════"

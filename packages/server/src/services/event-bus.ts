@@ -6,11 +6,11 @@ import type { SSEEvent } from '../types';
  * Web Dashboard 通过 GET /events 订阅，所有系统事件通过这里广播
  */
 export class EventBus {
-  private clients: Set<Response> = new Set();
+  private clients = new Map<Response, ((event: SSEEvent) => boolean) | undefined>();
 
   /** 注册一个 SSE 客户端 */
-  subscribe(res: Response): void {
-    this.clients.add(res);
+  subscribe(res: Response, filter?: (event: SSEEvent) => boolean): void {
+    this.clients.set(res, filter);
     res.on('close', () => {
       this.clients.delete(res);
     });
@@ -19,8 +19,9 @@ export class EventBus {
   /** 广播事件给所有订阅者 */
   emit(event: SSEEvent): void {
     const data = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-    for (const client of this.clients) {
+    for (const [client, filter] of this.clients) {
       try {
+        if (filter && !filter(event)) continue;
         client.write(data);
       } catch {
         this.clients.delete(client);
@@ -41,7 +42,7 @@ export class EventBus {
       timestamp: new Date().toISOString(),
     } as SSEEvent;
     const data = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-    for (const client of this.clients) {
+    for (const client of this.clients.keys()) {
       try { client.write(data); } catch {}
       try { client.end(); } catch {}
     }

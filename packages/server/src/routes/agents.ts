@@ -3,6 +3,7 @@ import { agentRegistry } from '../services/agent-registry';
 import { healthMonitor } from '../services/health-monitor';
 import { getRegistry } from '../services/registry';
 import { getConfig } from '../config';
+import { serverAuthHeaders } from '../auth';
 import type { ClientRegisterPayload, HeartbeatPayload } from '../types';
 
 const router = Router();
@@ -14,8 +15,11 @@ const router = Router();
 /** POST /api/clients/register */
 router.post('/clients/register', (req: Request, res: Response) => {
   const payload = req.body as ClientRegisterPayload;
-  if (!payload.user_id || !payload.client_endpoint) {
-    res.status(400).json({ error: 'user_id and client_endpoint are required' });
+  if (!payload.client_id && res.locals.mafPrincipal?.role === 'admin') {
+    payload.client_id = `admin-${payload.user_id || 'manual'}-${payload.host_user || 'client'}`.replace(/[^A-Za-z0-9_-]/g, '_');
+  }
+  if (!payload.client_id || !payload.user_id || !payload.client_endpoint) {
+    res.status(400).json({ error: 'client_id, user_id and client_endpoint are required' });
     return;
   }
   const agents = agentRegistry.registerClient(payload);
@@ -32,12 +36,12 @@ router.post('/clients/heartbeat', (req: Request, res: Response) => {
 
 /** POST /api/clients/sync */
 router.post('/clients/sync', (req: Request, res: Response) => {
-  const { user_id, host_user, client_endpoint, agents } = req.body;
-  if (!user_id || !Array.isArray(agents)) {
-    res.status(400).json({ error: 'user_id and agents[] required' });
+  const { client_id, user_id, host_user, client_endpoint, agents } = req.body;
+  if (!client_id || !user_id || !Array.isArray(agents)) {
+    res.status(400).json({ error: 'client_id, user_id and agents[] required' });
     return;
   }
-  const result = agentRegistry.syncAgents(user_id, host_user || '', client_endpoint || '', agents);
+  const result = agentRegistry.syncAgents(client_id, user_id, host_user || '', client_endpoint || '', agents);
   res.json({ synced: result.length, agents: result });
 });
 
@@ -362,10 +366,12 @@ router.post('/ota/push', async (req: Request, res: Response) => {
 
   // 推送到 Daemon
   try {
-    const otaRes = await fetch(`${daemonUrl}/ota`, {
+    const url = `${daemonUrl}/ota`;
+    const body = JSON.stringify({ files: otaFiles, restart_agents: restart });
+    const otaRes = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: otaFiles, restart_agents: restart }),
+      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+      body,
       signal: AbortSignal.timeout(30_000),
     });
 

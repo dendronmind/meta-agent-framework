@@ -24,10 +24,19 @@
 
 import { createServer } from "node:http";
 import { spawn, execSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir, userInfo, networkInterfaces } from "node:os";
-import { createHash } from "node:crypto";
+import { homedir, hostname, userInfo, networkInterfaces } from "node:os";
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+  sign,
+  timingSafeEqual,
+  verify,
+} from "node:crypto";
 
 // ============================================================
 // 配置（从 maf.config.json / 环境变量读取）
@@ -46,13 +55,153 @@ function loadMafConfig() {
   return cfg;
 }
 const _mafCfg = loadMafConfig();
+const STATE_DIR = join(homedir(), ".meta-agent-framework");
+const AUTH_DIR = join(STATE_DIR, "auth");
+const CLIENT_ID_FILE = join(AUTH_DIR, "client-id");
+const CLIENT_PRIVATE_KEY_FILE = join(AUTH_DIR, "client-private.pem");
+const CLIENT_PUBLIC_KEY_FILE = join(AUTH_DIR, "client-public.pem");
+const LOCAL_TOKEN_FILE = join(AUTH_DIR, "local-token");
+const SERVER_PUBLIC_KEY_FILE = join(AUTH_DIR, "server-public.pem");
+
+function readText(path) {
+  try { return readFileSync(path, "utf-8").trim(); } catch { return ""; }
+}
+
+function writeSecret(path, value, mode = 0o600) {
+  mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(path, value, { mode });
+  try { chmodSync(path, mode); } catch {}
+}
+
+function ensureMachineIdentity() {
+  mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+  let clientId = readText(CLIENT_ID_FILE);
+  let privateKey = readText(CLIENT_PRIVATE_KEY_FILE);
+  let publicKey = readText(CLIENT_PUBLIC_KEY_FILE);
+  let localToken = readText(LOCAL_TOKEN_FILE);
+  if (privateKey) {
+    try {
+      publicKey = createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString();
+      if (readText(CLIENT_PUBLIC_KEY_FILE) !== publicKey.trim()) {
+        writeSecret(CLIENT_PUBLIC_KEY_FILE, publicKey, 0o644);
+      }
+    } catch {
+      privateKey = "";
+      publicKey = "";
+    }
+  }
+  if (!privateKey) {
+    // The private key is the machine identity. If it is lost, the old client_id
+    // can no longer prove ownership, so create a fresh identity that can enroll.
+    clientId = randomUUID();
+    const pair = generateKeyPairSync("ed25519");
+    privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
+    writeSecret(CLIENT_ID_FILE, `${clientId}\n`);
+    writeSecret(CLIENT_PRIVATE_KEY_FILE, privateKey);
+    writeSecret(CLIENT_PUBLIC_KEY_FILE, publicKey, 0o644);
+  } else if (!/^[A-Za-z0-9_-]{20,128}$/.test(clientId)) {
+    clientId = randomUUID();
+    writeSecret(CLIENT_ID_FILE, `${clientId}\n`);
+  }
+  if (!localToken) {
+    localToken = process.env.MAF_LOCAL_TOKEN || randomBytes(32).toString("base64url");
+    writeSecret(LOCAL_TOKEN_FILE, `${localToken}\n`);
+  }
+  return { clientId, privateKey, publicKey, localToken };
+}
+
+const MACHINE_IDENTITY = ensureMachineIdentity();
 
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "0") || parseInt(process.env.MAF_DAEMON_PORT || "0") || _mafCfg.daemon?.port || 4100;
 const DIRECTORY = process.env.MAF_DIRECTORY || process.cwd();
 const PLUGIN_DIR = process.env.MAF_PLUGIN_DIR || dirname(new URL(import.meta.url).pathname);
 const META_AGENT_SERVER = process.env.META_AGENT_SERVER || _mafCfg.server?.url || "";
+const LOCAL_AUTH_TOKEN = String(
+  process.env.MAF_LOCAL_TOKEN
+  || readText(LOCAL_TOKEN_FILE)
+  || "",
+).trim();
 if (!META_AGENT_SERVER) {
   console.error("[node-daemon] ❌ META_AGENT_SERVER 未配置！运行 npm run init 或设置环境变量 META_AGENT_SERVER");
+}
+if (!/^[A-Za-z0-9._~+/=-]{32,512}$/.test(LOCAL_AUTH_TOKEN)) {
+  console.error("[node-daemon] ❌ 本机 Daemon 凭证初始化失败");
+  process.exit(1);
+}
+
+function localAuthHeaders(headers = {}) {
+  return { ...headers, Authorization: `Bearer ${LOCAL_AUTH_TOKEN}` };
+}
+
+function requestTarget(url) {
+  const parsed = new URL(url, "http://maf.local");
+  return `${parsed.pathname}${parsed.search}`;
+}
+
+function canonicalRequest(method, target, timestamp, nonce, body = "") {
+  const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body || "", "utf-8");
+  const bodyHash = createHash("sha256").update(bytes).digest("hex");
+  return Buffer.from([method.toUpperCase(), requestTarget(target), timestamp, nonce, bodyHash].join("\n"), "utf-8");
+}
+
+function clientAuthHeaders(method, url, body = "", headers = {}) {
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(18).toString("base64url");
+  const signature = sign(
+    null,
+    canonicalRequest(method, url, timestamp, nonce, body),
+    MACHINE_IDENTITY.privateKey,
+  ).toString("base64url");
+  return {
+    ...headers,
+    "X-MAF-Role": "client",
+    "X-MAF-ID": MACHINE_IDENTITY.clientId,
+    "X-MAF-Timestamp": timestamp,
+    "X-MAF-Nonce": nonce,
+    "X-MAF-Signature": signature,
+  };
+}
+
+let enrollmentStatus = "unknown";
+const serverNonces = new Map();
+
+function serverSignatureAuthorized(req, body = Buffer.alloc(0)) {
+  if (enrollmentStatus !== "active") return false;
+  const publicKey = readText(SERVER_PUBLIC_KEY_FILE);
+  if (!publicKey || String(req.headers["x-maf-role"] || "") !== "server") return false;
+  const timestamp = String(req.headers["x-maf-timestamp"] || "");
+  const nonce = String(req.headers["x-maf-nonce"] || "");
+  const signature = String(req.headers["x-maf-signature"] || "");
+  const now = Date.now();
+  const timestampMs = Number(timestamp);
+  if (!Number.isFinite(timestampMs) || Math.abs(now - timestampMs) > 60_000) return false;
+  for (const [key, expiresAt] of serverNonces) {
+    if (expiresAt <= now) serverNonces.delete(key);
+  }
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(nonce) || serverNonces.has(nonce)) return false;
+  try {
+    const ok = verify(
+      null,
+      canonicalRequest(req.method, req.url, timestamp, nonce, body),
+      publicKey,
+      Buffer.from(signature, "base64url"),
+    );
+    if (ok) serverNonces.set(nonce, timestampMs + 60_000);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function requestAuthorized(req, body = Buffer.alloc(0)) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ""));
+  if (match) {
+    const actual = Buffer.from(match[1]);
+    const expected = Buffer.from(LOCAL_AUTH_TOKEN);
+    if (actual.length === expected.length && timingSafeEqual(actual, expected)) return true;
+  }
+  return serverSignatureAuthorized(req, body);
 }
 function readVersionFromPackageTree(startDir) {
   let dir = startDir;
@@ -70,7 +219,6 @@ function readVersionFromPackageTree(startDir) {
 const CLIENT_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(PLUGIN_DIR) || "0.0.0";
 const HEARTBEAT_INTERVAL = 1_000;
 const POLL_INTERVAL = 1_000;
-const STATE_DIR = join(homedir(), ".meta-agent-framework");
 const SERVER_AGENT_NAME = "Meta-Agent-Server";
 
 function isServerAgentName(name) {
@@ -322,9 +470,9 @@ function getAgentStatuses() {
       if (isProcessAlive(info.pluginPid)) {
         statuses[name] = "busy";
       } else {
-        // Plugin 进程已死，但任务没有完成 → 标记 offline（靠 Server 超时处理）
+        // Plugin 进程已死，但任务没有完成 → 标记 offline（靠 Server 超时处理）。
+        // 状态采样不能清掉 active task；否则同名实例切换或后台执行的正确回报会被严格关联校验拒绝。
         log(`⚠ ${name} 正在执行任务但 Plugin(pid=${info.pluginPid}) 已死`);
-        q.executingTaskId = null;
         statuses[name] = "offline";
       }
     } else if (info.lastSeen && now - info.lastSeen > AGENT_ALIVE_TIMEOUT) {
@@ -775,30 +923,87 @@ function readAgentInstruction(name, runtime, agentDirectory) {
 // ============================================================
 // Server 通信：注册 / 心跳
 // ============================================================
+let enrollmentPromise = null;
+let lastEnrollmentAttempt = 0;
+
+async function ensureEnrollment(force = false) {
+  if (!META_AGENT_SERVER || !daemonUrl) return false;
+  if (!force && enrollmentStatus === "active" && readText(SERVER_PUBLIC_KEY_FILE)) return true;
+  if (!force && Date.now() - lastEnrollmentAttempt < 5_000) return false;
+  if (enrollmentPromise) return enrollmentPromise;
+
+  lastEnrollmentAttempt = Date.now();
+  enrollmentPromise = (async () => {
+    const url = `${META_AGENT_SERVER.replace(/\/+$/, "")}/api/auth/enroll`;
+    const body = JSON.stringify({
+      client_id: MACHINE_IDENTITY.clientId,
+      public_key: MACHINE_IDENTITY.publicKey,
+      client_endpoint: daemonUrl,
+      hostname: hostname(),
+      user_id: userId || detectUserId(),
+      host_user: hostUser,
+    });
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+        body,
+        signal: AbortSignal.timeout(5_000),
+      });
+      const data = await res.json().catch(() => ({}));
+      if ((res.ok || res.status === 202) && data.server_public_key) {
+        writeSecret(SERVER_PUBLIC_KEY_FILE, String(data.server_public_key), 0o644);
+      }
+      enrollmentStatus = String(data.status || (res.ok ? "active" : "unknown"));
+      if (enrollmentStatus === "active") {
+        log(`🔐 Client 机器身份已准入: ${MACHINE_IDENTITY.clientId}`);
+        return true;
+      }
+      if (enrollmentStatus === "pending") {
+        log(`⏳ Client 机器身份等待 Server 批准: ${MACHINE_IDENTITY.clientId}`);
+        return false;
+      }
+      log(`⚠ Client 自动注册失败: HTTP ${res.status} ${data.error || ""}`.trim());
+      return false;
+    } catch (err) {
+      enrollmentStatus = "unknown";
+      log(`⚠ Client 自动注册暂不可用: ${err.message}`);
+      return false;
+    } finally {
+      enrollmentPromise = null;
+    }
+  })();
+  return enrollmentPromise;
+}
+
 async function registerToServer() {
   // 先清理已死的 agent（Plugin 死了 + lastSeen 超时 + 无 screen）
   pruneDeadAgents();
 
   if (agents.size === 0) return;
+  if (!await ensureEnrollment()) return;
   const agentDefs = [];
   for (const [name, info] of agents) {
     agentDefs.push(findAgentDef(name, info.runtime, info.directory));
   }
 
   try {
-    const res = await fetch(`${META_AGENT_SERVER}/api/clients/register`, {
+    const url = `${META_AGENT_SERVER}/api/clients/register`;
+    const body = JSON.stringify({
+      client_id: MACHINE_IDENTITY.clientId,
+      user_id: userId,
+      host_user: hostUser,
+      client_endpoint: daemonUrl,
+      agents: agentDefs,
+      agent_statuses: getAgentStatuses(),
+      client_version: CLIENT_VERSION,
+      plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+      daemon_port: parseInt(daemonUrl.split(":").pop()),
+    });
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id: userId,
-        host_user: hostUser,
-        client_endpoint: daemonUrl,
-        agents: agentDefs,
-        agent_statuses: getAgentStatuses(),
-        client_version: CLIENT_VERSION,
-        plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
-        daemon_port: parseInt(daemonUrl.split(":").pop()),
-      }),
+      headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+      body,
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
@@ -808,6 +1013,10 @@ async function registerToServer() {
       lastInventoryFP = inventoryFP(agentDefs[0]?.skills || [], agentDefs[0]?.mcps || []);
     } else {
       log(`❌ 注册失败: HTTP ${res.status}`);
+      if (res.status === 401 || res.status === 403) {
+        enrollmentStatus = "unknown";
+        await ensureEnrollment(true);
+      }
     }
   } catch (err) {
     log(`⚠ Server 不可达: ${err.message}`);
@@ -851,10 +1060,13 @@ async function heartbeat() {
       lastInventoryFP = fp;
     }
 
-    const res = await fetch(`${META_AGENT_SERVER}/api/clients/heartbeat`, {
+    body.client_id = MACHINE_IDENTITY.clientId;
+    const url = `${META_AGENT_SERVER}/api/clients/heartbeat`;
+    const payload = JSON.stringify(body);
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: clientAuthHeaders("POST", url, payload, { "Content-Type": "application/json" }),
+      body: payload,
       signal: AbortSignal.timeout(3000),
     });
     if (!res.ok) {
@@ -868,17 +1080,20 @@ async function heartbeat() {
 async function reportAgentStatusToServer(agentName, status) {
   if (!META_AGENT_SERVER || !agentName || !userId) return false;
   try {
-    const res = await fetch(`${META_AGENT_SERVER}/api/clients/heartbeat`, {
+    const url = `${META_AGENT_SERVER}/api/clients/heartbeat`;
+    const body = JSON.stringify({
+      client_id: MACHINE_IDENTITY.clientId,
+      user_id: userId,
+      host_user: hostUser,
+      agent_statuses: { [agentName]: status },
+      client_version: CLIENT_VERSION,
+      plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+      daemon_port: parseInt(daemonUrl.split(":").pop()),
+    });
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id: userId,
-        host_user: hostUser,
-        agent_statuses: { [agentName]: status },
-        client_version: CLIENT_VERSION,
-        plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
-        daemon_port: parseInt(daemonUrl.split(":").pop()),
-      }),
+      headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+      body,
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;
@@ -963,16 +1178,18 @@ async function reportTaskResult(task, status, result, durationMs) {
     try {
       const url = `${META_AGENT_SERVER}/api/workflows/${task.workflow_id}/nodes/${task.node_id}/result`;
       log(`📤 回报 workflow: ${url}`);
+      const body = JSON.stringify({
+        execution_id: task.execution_id || task.id,
+        agent_name: task.target_agent || "",
+        status,
+        result: cleanResult.substring(0, 5000),
+        duration_ms: durationMs,
+        session_id: task.session_id || "",
+      });
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          execution_id: task.execution_id || task.id,
-          status,
-          result: cleanResult.substring(0, 5000),
-          duration_ms: durationMs,
-          session_id: task.session_id || "",
-        }),
+        headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+        body,
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) {
@@ -989,10 +1206,12 @@ async function reportTaskResult(task, status, result, durationMs) {
     }
   }
   try {
-    const res = await fetch(`${META_AGENT_SERVER}/api/tasks/${task.id}/result`, {
+    const url = `${META_AGENT_SERVER}/api/tasks/${task.id}/result`;
+    const body = JSON.stringify({ status, result: result.substring(0, 5000), duration_ms: durationMs });
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status, result: result.substring(0, 5000), duration_ms: durationMs }),
+      headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+      body,
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
@@ -1120,7 +1339,7 @@ let res;
 try {
   res = await fetch(${JSON.stringify(`http://127.0.0.1:${NODE_PORT}/tasks/done`)}, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: ${JSON.stringify({ "Content-Type": "application/json", Authorization: `Bearer ${LOCAL_AUTH_TOKEN}` })},
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(10000),
   });
@@ -1404,7 +1623,7 @@ async function pollTasks() {
     if (q.pending.length > 0) continue;
     try {
       const url = `${META_AGENT_SERVER}/api/tasks/poll?agent_name=${encodeURIComponent(name)}&user_id=${encodeURIComponent(userId)}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(url, { headers: clientAuthHeaders("GET", url), signal: AbortSignal.timeout(5000) });
       if (!res.ok) continue;
       const data = await res.json();
       if (!data.has_task) continue;
@@ -1650,9 +1869,21 @@ function executeEvolveRunCommand(action) {
 // HTTP Server
 // ============================================================
 const httpServer = createServer(async (req, res) => {
-  const readBody = () => new Promise(r => {
-    let d = ""; req.on("data", c => d += c); req.on("end", () => { try { r(JSON.parse(d)); } catch { r({}); } });
-  });
+  let rawBodyPromise = null;
+  const readRawBody = () => {
+    if (!rawBodyPromise) {
+      rawBodyPromise = new Promise(resolve => {
+        const chunks = [];
+        req.on("data", chunk => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => resolve(Buffer.concat(chunks)));
+      });
+    }
+    return rawBodyPromise;
+  };
+  const readBody = async () => {
+    const raw = await readRawBody();
+    try { return JSON.parse(raw.toString("utf-8")); } catch { return {}; }
+  };
   const json = (code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
   const urlObj = new URL(req.url, "http://localhost");
   const pathname = urlObj.pathname;
@@ -1667,7 +1898,17 @@ const httpServer = createServer(async (req, res) => {
       uptime: process.uptime(),
       version: CLIENT_VERSION,
       server: META_AGENT_SERVER,
+      enrollment_status: enrollmentStatus,
+      client_id: MACHINE_IDENTITY.clientId,
     });
+    return;
+  }
+
+  const signedBody = String(req.headers["x-maf-role"] || "") === "server"
+    ? await readRawBody()
+    : Buffer.alloc(0);
+  if (!requestAuthorized(req, signedBody)) {
+    json(401, { error: "Unauthorized" });
     return;
   }
 
@@ -1987,6 +2228,7 @@ const httpServer = createServer(async (req, res) => {
       if (q?.pending.length > 0) {
         const task = q.pending.shift();
         q.lastExecuted = task;
+        q.executingTaskId = task.id;
         json(200, { task });
       } else {
         json(200, { task: null });
@@ -1998,6 +2240,7 @@ const httpServer = createServer(async (req, res) => {
         if (q.pending.length > 0) {
           found = q.pending.shift();
           q.lastExecuted = found;
+          q.executingTaskId = found.id;
           break;
         }
       }
@@ -2098,12 +2341,22 @@ const httpServer = createServer(async (req, res) => {
     const body = await readBody();
     const agentName = body.agent_name;
     const taskId = body.task_id;
-    if (agentName) {
-      const q = getAgentQueue(agentName);
-      q.executingTaskId = taskId || "unknown";
-      touchAgent(agentName);
-      log(`🔧 ${agentName} 开始执行任务: ${taskId}`);
+    if (!agentName || !taskId) {
+      json(400, { error: "agent_name and task_id required" });
+      return;
     }
+    const q = taskQueues.get(agentName);
+    if (!q?.lastExecuted || q.lastExecuted.id !== taskId || q.executingTaskId !== taskId) {
+      json(409, {
+        error: "task_id does not match the active task",
+        reported_task_id: taskId,
+        last_task_id: q?.lastExecuted?.id || null,
+        active_task_id: q?.executingTaskId || null,
+      });
+      return;
+    }
+    touchAgent(agentName);
+    log(`🔧 ${agentName} 开始执行任务: ${taskId}`);
     json(200, { ok: true });
     return;
   }
@@ -2112,28 +2365,33 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/tasks/done") {
     const body = await readBody();
     const agentName = body.agent_name;
+    const taskId = body.task_id;
+    const status = body.status;
     log(`📬 Plugin 回报: task=${body.task_id} status=${body.status} (${body.duration_ms}ms)`);
 
-    // 清除 executing 标记
-    if (agentName && taskQueues.has(agentName)) {
-      taskQueues.get(agentName).executingTaskId = null;
+    if (!agentName || !taskId || !status) {
+      json(400, { error: "agent_name, task_id, and status required" });
+      return;
     }
+    if (status !== "completed" && status !== "failed") {
+      json(422, { error: "status must be completed or failed" });
+      return;
+    }
+    const q = taskQueues.get(agentName);
+    if (!q?.lastExecuted || q.lastExecuted.id !== taskId || q.executingTaskId !== taskId) {
+      json(409, {
+        error: "task_id does not match the active task",
+        reported_task_id: taskId,
+        last_task_id: q?.lastExecuted?.id || null,
+        active_task_id: q?.executingTaskId || null,
+      });
+      return;
+    }
+    const task = q.lastExecuted;
+    q.executingTaskId = null;
+    q.lastExecuted = null;
 
-    // 找到对应的 lastExecuted task
-    let task = null;
-    if (agentName && taskQueues.has(agentName)) {
-      task = taskQueues.get(agentName).lastExecuted;
-      taskQueues.get(agentName).lastExecuted = null;
-    }
-    if (!task) {
-      // 兼容：遍历所有队列找 lastExecuted
-      for (const [, q] of taskQueues) {
-        if (q.lastExecuted) { task = q.lastExecuted; q.lastExecuted = null; break; }
-      }
-    }
-    if (!task) task = { id: body.task_id };
-
-    const reportAck = await reportTaskResult(task, body.status, body.result || "", body.duration_ms || 0);
+    const reportAck = await reportTaskResult(task, status, body.result || "", body.duration_ms || 0);
 
     if (body.task_id && codexTaskScreens.has(body.task_id)) {
       const info = codexTaskScreens.get(body.task_id);
@@ -2171,10 +2429,12 @@ const httpServer = createServer(async (req, res) => {
     // 附上 user_id
     body.user_id = body.user_id || userId;
     try {
-      const srvRes = await fetch(`${META_AGENT_SERVER}/api/proposals`, {
+      const url = `${META_AGENT_SERVER}/api/proposals`;
+      const payload = JSON.stringify(body);
+      const srvRes = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        headers: clientAuthHeaders("POST", url, payload, { "Content-Type": "application/json" }),
+        body: payload,
         signal: AbortSignal.timeout(10000),
       });
       const data = await srvRes.json();
@@ -2191,7 +2451,9 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "GET" && pathname === "/proposals") {
     const qs = urlObj.search || "";
     try {
-      const srvRes = await fetch(`${META_AGENT_SERVER}/api/proposals${qs}`, {
+      const url = `${META_AGENT_SERVER}/api/proposals${qs}`;
+      const srvRes = await fetch(url, {
+        headers: clientAuthHeaders("GET", url),
         signal: AbortSignal.timeout(5000),
       });
       const data = await srvRes.json();
@@ -2286,10 +2548,12 @@ const httpServer = createServer(async (req, res) => {
 
     // 异步回报结果到 Server
     if (META_AGENT_SERVER) {
-      fetch(`${META_AGENT_SERVER}/api/evolve/${evolveId}/result`, {
+      const url = `${META_AGENT_SERVER}/api/evolve/${evolveId}/result`;
+      const body = JSON.stringify(evolveResult);
+      fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(evolveResult),
+        headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+        body,
         signal: AbortSignal.timeout(10_000),
       }).catch(err => log(`⚠ Evolve 回报失败: ${err.message}`));
     }
@@ -2326,7 +2590,7 @@ const httpServer = createServer(async (req, res) => {
 // ============================================================
 // 启动
 // ============================================================
-httpServer.listen(NODE_PORT, "0.0.0.0", () => {
+httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
   const addr = httpServer.address();
   const port = addr.port;
   daemonUrl = `http://${getLocalIP()}:${port}`;
@@ -2345,6 +2609,7 @@ httpServer.listen(NODE_PORT, "0.0.0.0", () => {
 
   // 初始化用户标识
   if (!userId) userId = detectUserId();
+  await ensureEnrollment();
 
   // 如果有初始 agent（Claude Code --daemon 模式传入），立即注册
   const initAgent = process.env.MAF_AGENT_NAME;
@@ -2365,6 +2630,7 @@ httpServer.listen(NODE_PORT, "0.0.0.0", () => {
   // 启动心跳 + 任务轮询 + agent 存活清理 + serve 空闲清理
   setInterval(heartbeat, HEARTBEAT_INTERVAL);
   setInterval(pollTasks, POLL_INTERVAL);
+  setInterval(() => { if (enrollmentStatus !== "active") ensureEnrollment(); }, 10_000);
   setInterval(cleanDeadAgents, 60_000);
   setInterval(cleanIdleServes, 60_000);
 });

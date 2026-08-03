@@ -58,6 +58,17 @@ function loadMafConfig() {
   return cfg;
 }
 const _mafCfg = loadMafConfig();
+const LOCAL_TOKEN_FILE = join(homedir(), ".meta-agent-framework", "auth", "local-token");
+
+function localAuthToken() {
+  let token = "";
+  try { token = readFileSync(LOCAL_TOKEN_FILE, "utf-8").trim(); } catch {}
+  return token || process.env.MAF_LOCAL_TOKEN || "";
+}
+
+function authHeaders(headers = {}) {
+  return { ...headers, Authorization: `Bearer ${localAuthToken()}` };
+}
 
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "0") || _mafCfg.daemon?.port || 4100;
 const DAEMON_URL = `http://127.0.0.1:${NODE_PORT}`;
@@ -135,6 +146,7 @@ async function spawnNodeDaemon(agentName) {
       MAF_DIRECTORY: process.env.MAF_DIRECTORY || process.cwd(),
       MAF_PLUGIN_DIR: process.env.CLAUDE_PLUGIN_ROOT || "",
       META_AGENT_SERVER: process.env.META_AGENT_SERVER || _mafCfg.server?.url || "",
+      MAF_LOCAL_TOKEN: localAuthToken(),
     },
   });
   child.unref();
@@ -153,7 +165,7 @@ async function connectAgent(agentName) {
   try {
     const res = await fetch(`${DAEMON_URL}/agents/connect`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         agent_name: agentName,
         runtime: "claude-code",
@@ -268,6 +280,7 @@ if (MODE === "daemon") {
 
     try {
       const res = await fetch(`${DAEMON_URL}/tasks/wait?agent=${encodeURIComponent(agentName)}`, {
+        headers: authHeaders(),
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -289,7 +302,7 @@ if (MODE === "daemon") {
         let task = data.task;
         try {
           const takeRes = await fetch(`${DAEMON_URL}/tasks/take?agent=${encodeURIComponent(agentName)}`, {
-            method: "POST", signal: AbortSignal.timeout(3000),
+            method: "POST", headers: authHeaders(), signal: AbortSignal.timeout(3000),
           });
           const takeData = await takeRes.json();
           if (takeData.task) task = takeData.task;
@@ -300,7 +313,7 @@ if (MODE === "daemon") {
         const msg = `[MAF 远程任务] ${task.description || task.title}
 
 执行完成后用以下命令回报结果（重要：检查响应中的 next_task 字段，如果有则继续执行下一个任务）:
-curl -s -X POST ${DAEMON_URL}/tasks/done -H 'Content-Type: application/json' -d '{"task_id":"${task.id}","agent_name":"${agentName}","status":"completed","result":"<你的执行结果>"}'
+curl -s -X POST ${DAEMON_URL}/tasks/done -H 'Content-Type: application/json' -H "Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)" -d '{"task_id":"${task.id}","agent_name":"${agentName}","status":"completed","result":"<你的执行结果>"}'
 
 回报后如果响应里有 "next_task" 字段（不为 null），说明队列里还有任务，请立即执行 next_task.description 中的内容，完成后再次用同样的 curl 回报（替换 task_id 为 next_task.id，result 为新结果）。循环直到 next_task 为 null。`;
 

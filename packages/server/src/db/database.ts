@@ -152,6 +152,7 @@ function initTables(): void {
   sqlJsDb.run(`
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL DEFAULT '',
       user_id TEXT NOT NULL DEFAULT '',
       host_user TEXT NOT NULL DEFAULT '',
       client_endpoint TEXT NOT NULL,
@@ -171,6 +172,7 @@ function initTables(): void {
       UNIQUE(user_id, host_user, agent_name)
     )
   `);
+  try { sqlJsDb.run("ALTER TABLE agents ADD COLUMN client_id TEXT NOT NULL DEFAULT ''"); } catch {}
 
   sqlJsDb.run(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -230,9 +232,27 @@ function initTables(): void {
     )
   `);
 
+  sqlJsDb.run(`
+    CREATE TABLE IF NOT EXISTS client_identities (
+      client_id TEXT PRIMARY KEY,
+      public_key TEXT NOT NULL,
+      public_key_fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      client_endpoint TEXT NOT NULL DEFAULT '',
+      hostname TEXT NOT NULL DEFAULT '',
+      user_id TEXT NOT NULL DEFAULT '',
+      host_user TEXT NOT NULL DEFAULT '',
+      source_ip TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      approved_at TEXT NOT NULL DEFAULT '',
+      last_seen_at TEXT NOT NULL
+    )
+  `);
+
   // 索引
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_agents_client_id ON agents(client_id)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent_id)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_feedback_agent ON feedback(agent_id)");
@@ -240,6 +260,7 @@ function initTables(): void {
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_proposals_agent ON proposals(from_agent)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(type)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_client_identities_status ON client_identities(status)");
 }
 
 // ============================================================

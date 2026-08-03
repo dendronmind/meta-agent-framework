@@ -15,15 +15,48 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync, statSync, renameSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, statSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
+import { createHash, randomBytes, sign } from "node:crypto";
 import { HOME, MAF_HOME, processAlive, sleep } from "./maf-codex-common.mjs";
 
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "4100", 10) || 4100;
 const DAEMON_URL = process.env.MAF_DAEMON_URL || `http://127.0.0.1:${NODE_PORT}`;
 const AGENT_NAME = process.env.MAF_AGENT_NAME || process.env.MAF_CODEX_AGENT || "";
 const PROJECT_DIR = resolve((process.env.MAF_DIRECTORY || process.env.CODEX_CWD || process.cwd()).replace(/^~/, HOME));
+const LOCAL_TOKEN_FILE = join(MAF_HOME, "auth", "local-token");
+const CLIENT_ID_FILE = join(MAF_HOME, "auth", "client-id");
+const CLIENT_PRIVATE_KEY_FILE = join(MAF_HOME, "auth", "client-private.pem");
+
+function localAuthToken() {
+  let token = "";
+  try { token = readFileSync(LOCAL_TOKEN_FILE, "utf-8").trim(); } catch {}
+  return token || process.env.MAF_LOCAL_TOKEN || "";
+}
+
+function authHeaders(headers = {}) {
+  return { ...headers, Authorization: `Bearer ${localAuthToken()}` };
+}
+
+function clientSignedHeaders(method, url, body = "", headers = {}) {
+  const clientId = readFileSync(CLIENT_ID_FILE, "utf-8").trim();
+  const privateKey = readFileSync(CLIENT_PRIVATE_KEY_FILE, "utf-8");
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(18).toString("base64url");
+  const parsed = new URL(url);
+  const target = `${parsed.pathname}${parsed.search}`;
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  const canonical = Buffer.from([method.toUpperCase(), target, timestamp, nonce, bodyHash].join("\n"));
+  return {
+    ...headers,
+    "X-MAF-Role": "client",
+    "X-MAF-ID": clientId,
+    "X-MAF-Timestamp": timestamp,
+    "X-MAF-Nonce": nonce,
+    "X-MAF-Signature": sign(null, canonical, privateKey).toString("base64url"),
+  };
+}
 const APP_SERVER_URL = process.env.MAF_CODEX_APP_SERVER_URL || "";
 const APP_SERVER_CMD = process.env.MAF_CODEX_APP_SERVER_CMD || "";
 const THREAD_ID_ENV = process.env.MAF_CODEX_THREAD_ID || "";
@@ -105,7 +138,7 @@ async function readJsonSafe(res) {
 async function postJson(url, body, timeoutMs = 10_000) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -115,7 +148,7 @@ async function postJson(url, body, timeoutMs = 10_000) {
 }
 
 async function getJson(url, timeoutMs = WAIT_TIMEOUT_MS) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  const res = await fetch(url, { headers: authHeaders(), signal: AbortSignal.timeout(timeoutMs) });
   const data = await readJsonSafe(res);
   if (!res.ok) throw new Error(`${url} HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
   return data;
@@ -385,7 +418,9 @@ async function subscribeWorkflowEvents(client, threadId) {
   try {
     const res = await fetch(`${serverUrl}/api/events`, {
       signal: sseAbortController.signal,
-      headers: { Accept: "text/event-stream" },
+      headers: AGENT_NAME === "Meta-Agent-Server" && process.env.MAF_AUTH_TOKEN
+        ? { Accept: "text/event-stream", Authorization: `Bearer ${process.env.MAF_AUTH_TOKEN}` }
+        : clientSignedHeaders("GET", `${serverUrl}/api/events`, "", { Accept: "text/event-stream" }),
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();

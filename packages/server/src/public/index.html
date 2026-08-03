@@ -417,6 +417,14 @@
       </section>
 
       <section class="stack">
+        <div class="panel hide-embedded">
+          <div class="panel-header">
+            <div><div class="panel-title" data-i18n="clientIdentities">Client Identities</div><div class="panel-subtitle" data-i18n="clientIdentitiesHint">机器身份准入、审批与单机吊销</div></div>
+            <span class="pill pending" id="client-identity-count">0</span>
+          </div>
+          <div class="panel-body scroll small" id="client-identities"></div>
+        </div>
+
         <div class="panel">
           <div class="panel-header">
             <div><div class="panel-title" data-i18n="workflowDetail">Workflow Detail</div><div class="panel-subtitle" data-i18n="workflowDetailHint">DAG 节点、执行结果和上下文</div></div>
@@ -490,7 +498,7 @@
         workflowFocus: 'Workflow 焦点', workflowFocusHint: '选择一个 workflow 查看执行详情', workflowDetail: 'Workflow 详情', workflowDetailHint: 'DAG 节点、执行结果和上下文',
         agentBoard: 'Agent 看板', agentBoardHint: '在线状态、runtime、版本和能力', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
         tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
-        inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果',
+        inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果', clientIdentities: 'Client 机器身份', clientIdentitiesHint: '机器身份准入、审批与单机吊销', approve: '批准', revoke: '吊销', noClientIdentities: '暂无 Client 机器身份。Client 首次上线后会自动出现在这里。', clientActionFailed: 'Client 身份操作失败', fingerprint: '指纹', sourceIp: '来源 IP', lastSeen: '最近在线',
         submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败',
         noWorkflow: '暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。', noSelectedWorkflow: '暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。', noNodes: '该 workflow 暂无节点信息。', noAgents: '暂无 agent 数据。', noSessions: '暂无 MAS session。调用 /api/workflows/mas/task 后会出现。', noTasks: '暂无传统 task 数据。', noEvents: '等待 SSE 事件。', noInventory: '暂无 Skills/MCP inventory 数据。等待 agent 心跳上报 skills/mcps 后会出现。', noEvolve: '暂无 evolve 结果。通过 /api/evolve/skill、/api/evolve/mcp 等接口推送后会出现。', noOta: '暂无 OTA 状态数据。',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: '创建时间', completedAt: '完成时间', nodes: '节点', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: '任务进入 MAF 控制面', dispatchNote: '按 agent_name 路由到节点', executeNoteIdle: '等待执行或已结束', resultNote: '最终状态', currentNode: '当前节点', coverage: '覆盖', gaps: '缺口', allAgents: '全部 Agent', latestHash: '最新 Hash', clientMinimum: 'Client 最低版本', serverVersion: 'Server 版本', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: '耗时', actions: '动作', endpoint: 'Endpoint', version: '版本', pluginHash: 'Plugin Hash', unknown: '未知', total: '总数', latest: '最新',
@@ -503,7 +511,7 @@
         workflowFocus: 'Workflow Focus', workflowFocusHint: 'Select a workflow to inspect execution details', workflowDetail: 'Workflow Detail', workflowDetailHint: 'DAG nodes, execution results, and context',
         agentBoard: 'Agent Board', agentBoardHint: 'Status, runtime, version, and capabilities', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
         tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
-        inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results',
+        inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results', clientIdentities: 'Client Identities', clientIdentitiesHint: 'Machine enrollment, approval, and per-client revocation', approve: 'Approve', revoke: 'Revoke', noClientIdentities: 'No Client identities yet. A Client appears here after its first connection.', clientActionFailed: 'Client identity action failed', fingerprint: 'Fingerprint', sourceIp: 'Source IP', lastSeen: 'Last seen',
         submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed',
         noWorkflow: 'No workflows. Create one via /api/workflows or /api/workflows/mas/task.', noSelectedWorkflow: 'No workflow to display. Select one on the left, or filter by workflow_id / agent_name / origin_id.', noNodes: 'This workflow has no node details.', noAgents: 'No agent data.', noSessions: 'No MAS sessions. Call /api/workflows/mas/task to create one.', noTasks: 'No legacy task data.', noEvents: 'Waiting for SSE events.', noInventory: 'No Skills/MCP inventory yet. It appears after agents report skills/mcps via heartbeat.', noEvolve: 'No evolve results yet. Push via /api/evolve/skill, /api/evolve/mcp, etc.', noOta: 'No OTA status data.',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: 'Created', completedAt: 'Completed', nodes: 'Nodes', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: 'Task entered the MAF control plane', dispatchNote: 'Routed by agent_name', executeNoteIdle: 'Waiting or finished', resultNote: 'Final state', currentNode: 'Current node', coverage: 'coverage', gaps: 'gaps', allAgents: 'all agents', latestHash: 'Latest hash', clientMinimum: 'Client minimum', serverVersion: 'Server version', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: 'Duration', actions: 'Actions', endpoint: 'Endpoint', version: 'Version', pluginHash: 'Plugin Hash', unknown: 'unknown', total: 'total', latest: 'latest',
@@ -543,12 +551,32 @@
     const state = {
       lang: detectLang(),
       health: null,
-      agents: [], tasks: [], workflows: [], sessions: [], inventory: null, otaStatus: null, evolveResults: [], events: [],
+      agents: [], tasks: [], workflows: [], sessions: [], inventory: null, otaStatus: null, evolveResults: [], clientIdentities: [], events: [],
       selectedWorkflowId: config.workflowId || null,
       statusFilter: 'all',
       lastError: '',
       masSubmit: { busy: false, status: '', message: '' },
     };
+
+    function resolveAuthToken() {
+      const fromHash = new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
+      if (fromHash) {
+        try { sessionStorage.setItem('maf_auth_token', fromHash); } catch {}
+        history.replaceState(null, '', `${location.pathname}${location.search}`);
+        return fromHash;
+      }
+      try {
+        const stored = sessionStorage.getItem('maf_auth_token');
+        if (stored) return stored;
+      } catch {}
+      const entered = window.prompt('MAF access token') || '';
+      if (entered) {
+        try { sessionStorage.setItem('maf_auth_token', entered); } catch {}
+      }
+      return entered;
+    }
+    const AUTH_TOKEN = resolveAuthToken();
+    const authHeaders = (headers = {}) => ({ ...headers, Authorization: `Bearer ${AUTH_TOKEN}` });
 
     function $(id) { return document.getElementById(id); }
     function t(key) { return I18N[state.lang]?.[key] ?? I18N.en[key] ?? key; }
@@ -596,7 +624,7 @@
 
     async function apiGet(path, fallback) {
       try {
-        const res = await fetch(`${API}${path}`, { cache: 'no-store' });
+        const res = await fetch(`${API}${path}`, { cache: 'no-store', headers: authHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (err) {
@@ -608,7 +636,7 @@
     async function apiPost(path, payload) {
       const res = await fetch(`${API}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       const text = await res.text();
@@ -654,7 +682,7 @@
     }
 
     async function refreshAll() {
-      const [health, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults] = await Promise.all([
+      const [health, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults, clientIdentities] = await Promise.all([
         apiGet('/api/health', null),
         apiGet('/api/agents?all=true', []),
         apiGet('/api/tasks?limit=80', []),
@@ -663,6 +691,7 @@
         apiGet('/api/agents/inventory', null),
         apiGet('/api/ota/status', null),
         apiGet('/api/evolve', []),
+        apiGet('/api/auth/clients', []),
       ]);
 
       state.health = health;
@@ -673,6 +702,7 @@
       state.inventory = inventory;
       state.otaStatus = otaStatus;
       state.evolveResults = Array.isArray(evolveResults) ? evolveResults : [];
+      state.clientIdentities = Array.isArray(clientIdentities) ? clientIdentities : [];
 
       const visible = visibleWorkflows();
       if (!state.selectedWorkflowId || !visible.some(w => w.id === state.selectedWorkflowId || w.workflow_id === state.selectedWorkflowId)) {
@@ -693,6 +723,7 @@
       renderWorkflowList();
       renderWorkflowDetail();
       renderAgents();
+      renderClientIdentities();
       renderSessions();
       renderTasks();
       renderInventory();
@@ -894,6 +925,37 @@
       }).join('') || `<div class="empty">${t('noAgents')}</div>`;
     }
 
+    function renderClientIdentities() {
+      const clients = state.clientIdentities.slice().sort((a, b) => {
+        const rank = { pending: 0, active: 1, revoked: 2 };
+        return (rank[a.status] ?? 3) - (rank[b.status] ?? 3)
+          || String(b.created_at || '').localeCompare(String(a.created_at || ''));
+      });
+      const pending = clients.filter(client => client.status === 'pending').length;
+      $('client-identity-count').textContent = pending || clients.length;
+      $('client-identity-count').className = `pill ${pending ? 'pending' : 'active'}`;
+      $('client-identities').innerHTML = clients.map(client => {
+        const action = client.status === 'active' ? 'revoke' : 'approve';
+        return `<div class="info-card">
+          <div class="row"><div class="title">${escapeHtml(client.hostname || client.host_user || client.client_id)}</div>${pill(client.status)}</div>
+          <div class="meta"><span class="mono">${escapeHtml(client.client_id)}</span><span>${escapeHtml(client.user_id || '-')}@${escapeHtml(client.host_user || '-')}</span></div>
+          <div class="meta"><span>${t('sourceIp')}: ${escapeHtml(client.source_ip || '-')}</span><span>${t('fingerprint')}: <span class="mono">${escapeHtml(client.public_key_fingerprint || '-')}</span></span><span>${t('lastSeen')}: ${time(client.last_seen_at)}</span></div>
+          <div class="form-actions"><button class="btn" type="button" data-client-id="${escapeHtml(client.client_id)}" data-client-action="${action}" ${config.readonly ? 'disabled' : ''}>${t(action)}</button></div>
+        </div>`;
+      }).join('') || `<div class="empty">${t('noClientIdentities')}</div>`;
+    }
+
+    async function updateClientIdentity(clientId, action) {
+      if (config.readonly || !clientId || !['approve', 'revoke'].includes(action)) return;
+      try {
+        await apiPost(`/api/auth/clients/${encodeURIComponent(clientId)}/${action}`, {});
+        await refreshAll();
+      } catch (err) {
+        addEvent({ type: 'client_identity_action_failed', data: { client_id: clientId, action, error: err.message }, timestamp: new Date().toISOString() });
+        window.alert(`${t('clientActionFailed')}: ${err.message}`);
+      }
+    }
+
     function renderSessions() {
       $('session-count').textContent = state.sessions.length;
       $('session-list').innerHTML = state.sessions.slice(0, 30).map(s => `
@@ -1086,27 +1148,46 @@
       }
     }
 
-    function connectSSE() {
+    async function connectSSE() {
       try {
-        const es = new EventSource(`${API}/api/events`);
-        es.addEventListener('connected', (event) => {
-          $('sse-dot').className = 'dot green';
-          $('sse-status').textContent = 'connected';
-          try { addEvent({ type: 'connected', data: JSON.parse(event.data), timestamp: new Date().toISOString() }); } catch {}
+        const res = await fetch(`${API}/api/events`, {
+          headers: authHeaders({ Accept: 'text/event-stream' }),
         });
-        for (const type of EVENT_TYPES) {
-          es.addEventListener(type, (event) => {
-            try { addEvent(JSON.parse(event.data)); } catch { addEvent({ type, data: event.data, timestamp: new Date().toISOString() }); }
-            scheduleRefresh();
-          });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        $('sse-dot').className = 'dot green';
+        $('sse-status').textContent = 'connected';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split('\n\n');
+          buffer = chunks.pop() || '';
+          for (const chunk of chunks) {
+            let type = 'message';
+            let raw = '';
+            for (const line of chunk.split('\n')) {
+              if (line.startsWith('event:')) type = line.slice(6).trim();
+              if (line.startsWith('data:')) raw += line.slice(5).trim();
+            }
+            if (!raw) continue;
+            let data;
+            try { data = JSON.parse(raw); } catch { data = raw; }
+            if (type === 'connected') {
+              addEvent({ type, data, timestamp: new Date().toISOString() });
+            } else if (EVENT_TYPES.includes(type)) {
+              addEvent(typeof data === 'object' ? data : { type, data, timestamp: new Date().toISOString() });
+              scheduleRefresh();
+            }
+          }
         }
-        es.onerror = () => {
-          $('sse-dot').className = 'dot red';
-          $('sse-status').textContent = 'disconnected';
-        };
-      } catch (err) {
+        throw new Error('SSE stream closed');
+      } catch {
         $('sse-dot').className = 'dot red';
-        $('sse-status').textContent = 'unavailable';
+        $('sse-status').textContent = 'disconnected';
+        setTimeout(connectSSE, 3000);
       }
     }
 
@@ -1135,7 +1216,10 @@
         state.selectedWorkflowId = null;
         renderAll();
         notifyResize();
+        return;
       }
+      const clientAction = event.target.closest('[data-client-action]');
+      if (clientAction) updateClientIdentity(clientAction.dataset.clientId, clientAction.dataset.clientAction);
     });
 
     $('refresh-btn').addEventListener('click', refreshAll);

@@ -25,6 +25,18 @@ elif [[ -f "$HOME/.meta-agent-framework/maf.config.json" ]]; then
 else
   SERVER_URL="http://localhost:3000"
 fi
+MAF_STATE_HOME="${MAF_HOME:-$HOME/.meta-agent-framework}"
+AUTH_TOKEN="${MAF_AUTH_TOKEN:-}"
+if [[ -z "$AUTH_TOKEN" && -f "$MAF_STATE_HOME/maf.config.json" ]]; then
+  AUTH_TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("auth",{}).get("token",""))' "$MAF_STATE_HOME/maf.config.json" 2>/dev/null || true)
+fi
+if [[ -z "$AUTH_TOKEN" && -f "$MAF_STATE_HOME/auth/admin-token" ]]; then
+  AUTH_TOKEN=$(<"$MAF_STATE_HOME/auth/admin-token")
+fi
+if [[ -z "$AUTH_TOKEN" ]]; then
+  echo "无法读取 MAF Admin Token: $MAF_STATE_HOME/auth/admin-token" >&2
+  exit 2
+fi
 
 if [[ -z "$AGENT_NAME" || -z "$SKILL_NAME" ]]; then
   echo "用法: bash scripts/push-skill.sh <agent_name> <skill_name> [skill_dir]"
@@ -88,6 +100,7 @@ echo "   目录: $SKILL_DIR"
 echo "   文件数: $(echo "$FILES_JSON" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")"
 
 RESULT=$(curl -s -X POST "$SERVER_URL/api/evolve/skill" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$BODY")
 

@@ -21,6 +21,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(__dirname);
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
+const LOCAL_TOKEN_FILE = join(MAF_HOME, "auth", "local-token");
+
+function localAuthToken() {
+  let token = "";
+  try { token = readFileSync(LOCAL_TOKEN_FILE, "utf-8").trim(); } catch {}
+  const cfg = readMafConfig(process.cwd());
+  return token || process.env.MAF_LOCAL_TOKEN || "";
+}
+
+function authHeaders(headers = {}) {
+  return { ...headers, Authorization: `Bearer ${localAuthToken()}` };
+}
 
 const LOG_MAX_BYTES = parseInt(process.env.MAF_LOG_MAX_BYTES || "", 10) || 20 * 1024 * 1024;
 const LOG_BACKUPS = parseInt(process.env.MAF_LOG_BACKUPS || "", 10) || 2;
@@ -245,7 +257,7 @@ async function disconnectAgent({ agentName, port, pluginPid = 0 }) {
     if (pluginPid) body.plugin_pid = pluginPid;
     const res = await fetch(`http://127.0.0.1:${port}/agents/disconnect`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(2500),
     });
@@ -367,6 +379,7 @@ async function ensureDaemon({ agentName, projectPath, serverUrl, port }) {
     MAF_DIRECTORY: projectPath,
     MAF_PLUGIN_DIR: dirname(daemonScript),
     META_AGENT_SERVER: serverUrl || process.env.META_AGENT_SERVER || "",
+    MAF_LOCAL_TOKEN: localAuthToken(),
   };
 
   try {
@@ -391,7 +404,7 @@ async function connectAgent({ agentName, projectPath, port, pluginPid = 0 }) {
     if (pluginPid) body.plugin_pid = pluginPid;
     const res = await fetch(`http://127.0.0.1:${port}/agents/connect`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(2500),
     });

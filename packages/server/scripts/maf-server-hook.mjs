@@ -26,6 +26,13 @@ function loadConfig() {
 const config = loadConfig();
 const SERVER_PORT = config.server?.port || 3000;
 const SERVER_URL = `http://localhost:${SERVER_PORT}`;
+const ADMIN_TOKEN = String(
+  process.env.MAF_AUTH_TOKEN
+  || config.auth?.token
+  || (() => {
+    try { return readFileSync(join(STATE_DIR, "auth", "admin-token"), "utf-8").trim(); } catch { return ""; }
+  })(),
+).trim();
 
 /**
  * 订阅 Server SSE，等待 workflow_completed / workflow_failed 事件
@@ -44,7 +51,7 @@ async function waitForResult() {
   // 订阅 SSE
   try {
     const res = await fetch(`${SERVER_URL}/api/events`, {
-      headers: { "Accept": "text/event-stream" },
+      headers: { "Accept": "text/event-stream", Authorization: `Bearer ${ADMIN_TOKEN}` },
       signal: AbortSignal.timeout(86400_000), // 24h
     });
 

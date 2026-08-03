@@ -4,6 +4,8 @@ Base URL: `http://localhost:3000`（默认端口，实际以 `~/.meta-agent-fram
 
 Daemon URL: `http://127.0.0.1:4100`（默认端口，实际以配置中 `daemon.port` 为准）
 
+鉴权：除 `/api/health` 外，Server 管理 API 使用 `Authorization: Bearer $MAF_AUTH_TOKEN`。该变量由 `maf-server` 注入本机 Server runtime；不得下发给 Client。Client 与 Server 的内部通信由 Node Daemon 自动使用机器密钥签名，Agent 不手工构造签名。
+
 ## Server API
 
 | 操作 | 方法 | 端点 | 返回关键字段 |
@@ -32,6 +34,9 @@ Daemon URL: `http://127.0.0.1:4100`（默认端口，实际以配置中 `daemon.
 | 查所有进化记录 | GET | `/api/evolve` | `[{evolve_id, status, type, target_agents}]` |
 | 创建提议（Client→Server） | POST | `/api/proposals` | `{id, from_agent, type, title, status}` |
 | SSE 事件流 | GET | `/api/events` | Server-Sent Events（workflow_completed 等） |
+| Client 机器身份 | GET | `/api/auth/clients` | `[{client_id, fingerprint, status, source_ip}]` |
+| 批准 Client | POST | `/api/auth/clients/<id>/approve` | `{client_id, status:"active"}` |
+| 吊销 Client | POST | `/api/auth/clients/<id>/revoke` | `{client_id, status:"revoked"}` |
 
 ## Workflow Body Schema
 
@@ -93,6 +98,8 @@ Evolve cookbook 见 `common_agent/rules/evolve-guide.md`。
 |------|------|------|------|
 | 健康检查 | GET | `/health` | `{ok, agents, version, server}` |
 | 查看管理的 agent | GET | `/agents` | `{agents: [{agent_name, runtime, lastSeen}]}` |
+
+`/health` 匿名；其余 Daemon API 使用本机 `Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)`。Server 调 Daemon 时由框架自动使用 Server 机器签名。
 
 ## Agent 状态字段
 

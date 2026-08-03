@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../db/database';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
+import { serverAuthHeaders } from '../auth';
 import type { Agent, Task, TaskCreatePayload, TaskResultPayload } from '../types';
 
 // ============================================================
@@ -308,16 +309,18 @@ export class TaskDispatcher {
   }
 
   private async pushToClient(task: Task, agent: Agent): Promise<void> {
-    const res = await fetch(`${agent.client_endpoint}/execute`, {
+    const url = `${agent.client_endpoint}/execute`;
+    const body = JSON.stringify({
+      task_id: task.id, type: task.type, title: task.title,
+      description: task.description, priority: task.priority,
+      target_agent: agent.agent_name,
+      runtime: agent.runtime || 'opencode',
+      metadata: JSON.parse(task.metadata || '{}'),
+    });
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        task_id: task.id, type: task.type, title: task.title,
-        description: task.description, priority: task.priority,
-        target_agent: agent.agent_name,
-        runtime: agent.runtime || 'opencode',
-        metadata: JSON.parse(task.metadata || '{}'),
-      }),
+      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+      body,
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new Error(`Client responded ${res.status}`);

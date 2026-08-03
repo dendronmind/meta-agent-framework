@@ -8,7 +8,7 @@
 
 1. 不要再读取完整 agent/rules 文档；不要为简单派发 `sed`/`cat` 大文件。
 2. 如需确认目标是否存在，只做一次精简状态查询：
-   `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
+   `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
 3. 直接执行下方 Step 2 的异步 `POST /api/workflows`。
 4. 派发后不轮询，回复“已派发给 xxx，结果会自动回来。”
 
@@ -17,7 +17,7 @@
 ## Step 1 — 选人（如已知目标 agent 可跳过）
 
 ```bash
-curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
+curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
 ```
 
 从返回的 `agent_name`、`capabilities`、`runtime`、`status` 中匹配目标。只要目标 agent 存在，就优先通过标准 Workflow 派发；是否需要拉起、唤醒或等待由 Server/Daemon 根据 runtime 能力处理。
@@ -28,6 +28,7 @@ curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capab
 
 ```bash
 curl -s -X POST http://localhost:3000/api/workflows \
+  -H "Authorization: Bearer $MAF_AUTH_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "title": "<一句话概述>",

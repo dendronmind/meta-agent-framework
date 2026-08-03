@@ -11,6 +11,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
+import { serverAuthHeaders } from '../auth';
 import type {
   Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult, WorkflowFailurePolicy,
 } from '../types';
@@ -64,6 +65,20 @@ interface WorkflowStartOptions {
   failure_policy?: WorkflowFailurePolicy;
   origin?: Record<string, unknown>;
   notify?: Record<string, unknown>;
+}
+
+export type ResultReportCode =
+  | 'accepted'
+  | 'unknown_workflow'
+  | 'unknown_node'
+  | 'execution_mismatch'
+  | 'agent_mismatch'
+  | 'invalid_state';
+
+export interface ResultReportOutcome {
+  accepted: boolean;
+  code: ResultReportCode;
+  message?: string;
 }
 
 // ============================================================
@@ -138,31 +153,41 @@ export class WorkflowEngine {
   /**
    * Client 回报节点执行结果
    */
-  reportNodeResult(result: ExecutionResult): void {
+  reportNodeResult(result: ExecutionResult): ResultReportOutcome {
     const workflow = workflows.get(result.workflow_id);
     if (!workflow) {
       console.error(`[Workflow] 未知 workflow: ${result.workflow_id}`);
-      return;
+      return { accepted: false, code: 'unknown_workflow', message: 'Workflow not found' };
     }
 
     const node = workflow.nodes.find(n => n.id === result.node_id);
     if (!node) {
       console.error(`[Workflow] 未知 node: ${result.node_id}`);
-      return;
+      return { accepted: false, code: 'unknown_node', message: 'Workflow node not found' };
     }
 
-    // 清除超时定时器
+    if (!node.execution_id || result.execution_id !== node.execution_id) {
+      console.warn(`[Workflow] ⚠️ [${node.id}] execution_id 不匹配，拒绝回报`);
+      return { accepted: false, code: 'execution_mismatch', message: 'execution_id does not match the active dispatch' };
+    }
+
+    if (result.agent_name !== node.agent_name) {
+      console.warn(`[Workflow] ⚠️ [${node.id}] agent_name 不匹配，拒绝回报`);
+      return { accepted: false, code: 'agent_mismatch', message: 'agent_name does not match the workflow node' };
+    }
+
+    // 超时、已完成或已失败节点的迟到回报不得再次推进状态。
+    if (node.status !== 'running') {
+      console.warn(`[Workflow] ⚠️ [${node.id}] 收到迟到回报 (当前状态: ${node.status})，忽略`);
+      return { accepted: false, code: 'invalid_state', message: `Node is ${node.status}, expected running` };
+    }
+
+    // 仅在所有关联校验通过后清除超时定时器。
     const nodeKey = `${result.workflow_id}:${result.node_id}`;
     const timer = nodeTimeouts.get(nodeKey);
     if (timer) {
       clearTimeout(timer);
       nodeTimeouts.delete(nodeKey);
-    }
-
-    // 如果节点已经被超时标记为 failed，忽略迟到的回报
-    if (node.status !== 'running') {
-      console.warn(`[Workflow] ⚠️ [${node.id}] 收到迟到回报 (当前状态: ${node.status})，忽略`);
-      return;
     }
 
     node.status = result.status;
@@ -201,6 +226,7 @@ export class WorkflowEngine {
     this.advanceAfterNodeTerminal(workflow, result.status === 'failed'
       ? `节点 [${node.id}] ${node.agent_name} 执行失败`
       : undefined);
+    return { accepted: true, code: 'accepted' };
   }
 
   /** 获取工作流 */
@@ -431,6 +457,7 @@ export class WorkflowEngine {
    */
   private async executeNode(workflow: Workflow, node: WorkflowNode): Promise<void> {
     node.status = 'running';
+    node.execution_id = uuidv4();
     node.started_at = new Date().toISOString();
 
     eventBus.emit({
@@ -584,10 +611,11 @@ export class WorkflowEngine {
       // 1. 创建或复用 session
       let sid = sessionId;
       if (!sid) {
+        const createBody = JSON.stringify({ directory: agent.project_path || undefined });
         const createRes = await fetch(`${endpoint}/session`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ directory: agent.project_path || undefined }),
+          body: createBody,
           signal: AbortSignal.timeout(10_000),
         });
         if (!createRes.ok) throw new Error(`创建 session 失败: HTTP ${createRes.status}`);
@@ -604,12 +632,13 @@ export class WorkflowEngine {
 
       // 2. 更新 session title 带上 meta-agent 标记（Plugin 用来识别）
       try {
+        const titleBody = JSON.stringify({
+          title: `[meta-agent:${workflow.id}:${node.id}:${node.execution_id}] ${prompt.slice(0, 80)}`,
+        });
         await fetch(`${endpoint}/session/${sid}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: `[meta-agent:${workflow.id}:${node.id}] ${prompt.slice(0, 80)}`,
-          }),
+          body: titleBody,
           signal: AbortSignal.timeout(5_000),
         });
       } catch {
@@ -617,13 +646,14 @@ export class WorkflowEngine {
       }
 
       // 3. 异步下发任务
+      const promptBody = JSON.stringify({
+        parts: [{ type: 'text', text: prompt }],
+        agent: node.agent_name,
+      });
       const promptRes = await fetch(`${endpoint}/session/${sid}/prompt_async`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          parts: [{ type: 'text', text: prompt }],
-          agent: node.agent_name,
-        }),
+        body: promptBody,
         signal: AbortSignal.timeout(10_000),
       });
 
@@ -654,7 +684,7 @@ export class WorkflowEngine {
     console.log(`[Workflow] 📦 Client /execute 模式: ${endpoint}`);
 
     const cmd: ExecuteCommand = {
-      execution_id: uuidv4(),
+      execution_id: node.execution_id!,
       workflow_id: workflow.id,
       node_id: node.id,
       agent_name: node.agent_name,
@@ -669,10 +699,12 @@ export class WorkflowEngine {
       session_id: sessionId,
     };
 
-    const res = await fetch(`${endpoint}/execute`, {
+    const url = `${endpoint}/execute`;
+    const body = JSON.stringify(cmd);
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cmd),
+      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+      body,
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new Error(`Client ${endpoint} responded ${res.status}`);
@@ -817,10 +849,12 @@ export class WorkflowEngine {
 
     for (const [agentName, endpoint] of agentEndpoints) {
       console.log(`[Workflow] 📤 通知释放: ${agentName} → ${endpoint} (workflow: ${workflow.id}, immediate: ${immediate})`);
-      fetch(`${endpoint}/release`, {
+      const url = `${endpoint}/release`;
+      const body = JSON.stringify({ agent_name: agentName, workflow_id: workflow.id, immediate });
+      fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_name: agentName, workflow_id: workflow.id, immediate }),
+        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+        body,
         signal: AbortSignal.timeout(5_000),
       }).catch(err => {
         // 释放通知失败不影响主流程，Client 自己有闲置超时兜底

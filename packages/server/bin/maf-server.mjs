@@ -23,7 +23,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, openSync, cpSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // ============================================================
@@ -54,7 +54,14 @@ const PID_FILE = join(STATE_DIR, "server.pid");
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "server.log");
 const CONFIG_FILE = join(MAF_HOME, "maf.config.json");
+const ADMIN_TOKEN_FILE = join(MAF_HOME, "auth", "admin-token");
 let stopServerOnTuiExit = false;
+
+function readAdminToken(cfg = readConfig()) {
+  if (process.env.MAF_AUTH_TOKEN) return process.env.MAF_AUTH_TOKEN;
+  if (cfg?.auth?.token) return cfg.auth.token;
+  try { return readFileSync(ADMIN_TOKEN_FILE, "utf-8").trim(); } catch { return ""; }
+}
 
 // 确保目录
 mkdirSync(STATE_DIR, { recursive: true });
@@ -440,7 +447,12 @@ function cmdStatus() {
       console.log(`  运行时间: ${Math.round(health.uptime / 60)}min`);
     } catch {}
     try {
-      const agents = JSON.parse(execSync(`curl -s http://localhost:${port}/api/agents`, { encoding: "utf-8", timeout: 3000 }));
+      const token = readAdminToken();
+      const agents = JSON.parse(execFileSync("curl", [
+        "-s",
+        "-H", `Authorization: Bearer ${token}`,
+        `http://localhost:${port}/api/agents`,
+      ], { encoding: "utf-8", timeout: 3000 }));
       const online = agents.filter(a => a.status === "online").length;
       console.log(`  Agents:   ${agents.length} 注册, ${online} 在线`);
     } catch {}
@@ -521,9 +533,17 @@ function saveRuntime(runtime) {
   } catch {}
 }
 
-function codexMetaServerEnv() {
+function serverRuntimeEnv() {
+  const cfg = readConfig();
   return {
     ...process.env,
+    MAF_AUTH_TOKEN: readAdminToken(cfg),
+  };
+}
+
+function codexMetaServerEnv() {
+  return {
+    ...serverRuntimeEnv(),
     MAF_AGENT_NAME: "Meta-Agent-Server",
     MAF_RUNTIME: "codex",
     MAF_DIRECTORY: MAF_HOME,
@@ -585,13 +605,13 @@ function cmdTui() {
   try {
     if (runtime === "opencode") {
       const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${extraArgs}`.trim();
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
     } else if (runtime === "codex") {
       const cmd = `codex -C "${MAF_HOME}" ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: codexMetaServerEnv() });
     } else {
       const cmd = `claude ${extraArgs}`.trim();
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
     }
   } catch (err) {
     // 用户退出 TUI
@@ -661,7 +681,7 @@ function cmdResume() {
 
     const cmd = `opencode --agent Meta-Agent-Server --hostname localhost --session ${lastSession} ${extraArgs}`.trim();
     try {
-      execSync(cmd, { cwd: sessionDir, stdio: "inherit" });
+      execSync(cmd, { cwd: sessionDir, stdio: "inherit", env: serverRuntimeEnv() });
     } catch {
       // 用户退出 TUI
     }
@@ -679,7 +699,7 @@ function cmdResume() {
     console.log(`\n  🔄 恢复 Claude Code session (--continue)\n`);
     const cmd = `claude --continue ${extraArgs}`.trim();
     try {
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit" });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
     } catch {
       // 用户退出
     }
@@ -737,8 +757,8 @@ Meta-Agent-Framework Server
 数据目录: ${MAF_HOME}
 
 快速开始:
-  1. maf-server init          # 交互式初始化 / 修改配置（首次必须选择 Runtime）
-  2. maf-server start         # 启动 Server（未配置时会自动 init）
+  1. maf-server start         # 首次自动配置并生成 Server 身份
+  2. 远端执行安装命令        # Client 首次上线自动注册，无需携带凭证
   3. maf-server resume        # 恢复上次对话（最常用！）
   4. maf-server tui           # 启动全新会话
   5. maf-server tui [claude/codex/opencode]    # 用 Claude/codex/opencode 启动新会话

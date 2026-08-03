@@ -18,6 +18,7 @@ import { eventBus } from './event-bus';
 import type {
   Agent, EvolveCommand, EvolveAction, EvolveFile, EvolveResult,
 } from '../types';
+import { serverAuthHeaders } from '../auth';
 
 // ============================================================
 // SKILL.md frontmatter 校验
@@ -56,6 +57,7 @@ function validateSkillFiles(files: EvolveFile[]): string | null {
 // ============================================================
 
 const evolveResults = new Map<string, EvolveResult>();
+const evolveClientOwners = new Map<string, string>();
 
 // ============================================================
 // 公开 API
@@ -237,7 +239,9 @@ export class EvolutionService {
   /**
    * 接收 Client 回报的进化结果
    */
-  reportResult(result: EvolveResult): void {
+  reportResult(result: EvolveResult, clientId?: string): boolean {
+    const expectedClientId = evolveClientOwners.get(result.evolve_id);
+    if (clientId && (!expectedClientId || expectedClientId !== clientId)) return false;
     evolveResults.set(result.evolve_id, result);
     const emoji = result.status === 'completed' ? '🎉' : '💀';
     console.log(`[Evolution] ${emoji} ${result.evolve_id}: ${result.status} (${result.duration_ms}ms)`);
@@ -247,6 +251,7 @@ export class EvolutionService {
       data: { evolve_id: result.evolve_id, status: result.status, actions: result.actions },
       timestamp: new Date().toISOString(),
     });
+    return true;
   }
 
   /** 查询进化结果 */
@@ -274,6 +279,7 @@ export class EvolutionService {
     agent: Agent,
     cmd: EvolveCommand,
   ): Promise<{ evolve_id: string; pushed: boolean; message: string }> {
+    evolveClientOwners.set(cmd.evolve_id, agent.client_id || '');
     console.log(`[Evolution] 🧬 → ${agent.user_id}@${agent.host_user} (${agent.client_endpoint})`);
     console.log(`           title: "${cmd.title}"`);
     console.log(`           actions: ${cmd.actions.map(a => a.type).join(' → ')}`);
@@ -291,10 +297,12 @@ export class EvolutionService {
     });
 
     try {
-      const res = await fetch(`${agent.client_endpoint}/evolve`, {
+      const url = `${agent.client_endpoint}/evolve`;
+      const body = JSON.stringify(cmd);
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cmd),
+        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+        body,
         signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) throw new Error(`Client responded ${res.status}`);

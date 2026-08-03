@@ -21,6 +21,22 @@ elif [[ -f "$HOME/.meta-agent-framework/maf.config.json" ]]; then
 else
   BASE="http://localhost:3000"
 fi
+
+# 管理 API 使用 Server 本机 Admin Bearer。maf-server 启动 runtime 时会注入
+# MAF_AUTH_TOKEN；直接运行脚本时则从 Server 状态目录读取。
+MAF_STATE_HOME="${MAF_HOME:-$HOME/.meta-agent-framework}"
+AUTH_TOKEN="${MAF_AUTH_TOKEN:-}"
+if [[ -z "$AUTH_TOKEN" && -f "$MAF_STATE_HOME/maf.config.json" ]]; then
+  AUTH_TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("auth",{}).get("token",""))' "$MAF_STATE_HOME/maf.config.json" 2>/dev/null || true)
+fi
+if [[ -z "$AUTH_TOKEN" && -f "$MAF_STATE_HOME/auth/admin-token" ]]; then
+  AUTH_TOKEN=$(<"$MAF_STATE_HOME/auth/admin-token")
+fi
+if [[ -z "$AUTH_TOKEN" ]]; then
+  echo "无法读取 MAF Admin Token: $MAF_STATE_HOME/auth/admin-token" >&2
+  exit 2
+fi
+
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
 FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
@@ -41,6 +57,7 @@ for ((try=1; try<=MAX; try++)); do
 
   # long-poll 请求：Server hold 连接直到工作流完成或超时
   RESP=$(curl -s --max-time $((POLL_TIMEOUT + 5)) \
+    -H "Authorization: Bearer $AUTH_TOKEN" \
     "${BASE}/api/workflows/${WF_ID}?wait=true&timeout=$((POLL_TIMEOUT * 1000))" 2>/dev/null)
 
   $IS_TTY && printf "\r\033[2K"

@@ -92,7 +92,19 @@ router.post('/broadcast', async (req: Request, res: Response) => {
  * Client 回报进化执行结果
  */
 router.post('/:id/result', (req: Request, res: Response) => {
-  evolutionService.reportResult(req.body);
+  if (req.body?.evolve_id && req.body.evolve_id !== req.params.id) {
+    res.status(409).json({ error: 'evolve_id mismatch' });
+    return;
+  }
+  const principal = res.locals.mafPrincipal;
+  const accepted = evolutionService.reportResult(
+    { ...req.body, evolve_id: req.params.id },
+    principal?.role === 'client' ? principal.id : undefined,
+  );
+  if (!accepted) {
+    res.status(403).json({ error: 'Evolve command does not belong to this client' });
+    return;
+  }
   res.json({ ok: true });
 });
 

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { taskDispatcher } from '../services/task-dispatcher';
+import { agentRegistry } from '../services/agent-registry';
 import type { TaskCreatePayload, TaskResultPayload } from '../types';
 
 const router = Router();
@@ -35,6 +36,17 @@ router.post('/:id/dispatch', (req: Request, res: Response) => {
 
 /** POST /api/tasks/:id/result — 远端 agent 回报结果 */
 router.post('/:id/result', (req: Request, res: Response) => {
+  const principal = res.locals.mafPrincipal;
+  const existingTask = taskDispatcher.getById(req.params.id as string);
+  if (principal?.role === 'client') {
+    const assignedAgent = existingTask?.assigned_agent_id
+      ? agentRegistry.getById(existingTask.assigned_agent_id)
+      : undefined;
+    if (!assignedAgent || assignedAgent.client_id !== principal.id) {
+      res.status(403).json({ error: 'Task does not belong to this client' });
+      return;
+    }
+  }
   const payload: TaskResultPayload = {
     task_id: req.params.id,
     ...req.body,
@@ -63,6 +75,11 @@ router.get('/poll', (req: Request, res: Response) => {
   const agentName = req.query.agent_name as string;
   const userId = req.query.user_id as string;
   if (!agentName) { res.status(400).json({ error: 'agent_name required' }); return; }
+  const principal = res.locals.mafPrincipal;
+  if (principal?.role === 'client' && !agentRegistry.clientOwnsAgent(principal.id, agentName)) {
+    res.status(403).json({ error: 'Agent does not belong to this client' });
+    return;
+  }
 
   const task = taskDispatcher.pollForAgent(agentName, userId);
   if (task) {
@@ -77,6 +94,11 @@ router.get('/poll', (req: Request, res: Response) => {
  */
 router.post('/:id/claim', (req: Request, res: Response) => {
   const { agent_name, user_id } = req.body;
+  const principal = res.locals.mafPrincipal;
+  if (principal?.role === 'client' && !agentRegistry.clientOwnsAgent(principal.id, agent_name)) {
+    res.status(403).json({ error: 'Agent does not belong to this client' });
+    return;
+  }
   const task = taskDispatcher.claim(req.params.id as string, agent_name, user_id);
   if (task) {
     res.json(task);

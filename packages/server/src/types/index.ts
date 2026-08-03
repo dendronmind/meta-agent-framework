@@ -41,6 +41,7 @@ export type AgentRuntime = 'opencode' | 'claude-code' | 'codex';
 
 /** Client 注册时提交的 payload */
 export interface ClientRegisterPayload {
+  client_id: string;               // 已准入的机器身份 ID
   user_id: string;             // 用户标识，如 zhangsan
   host_user: string;               // 宿主机用户名，如 mi
   client_endpoint: string;         // http://ip:port
@@ -81,6 +82,7 @@ export interface AgentInfo {
 /** Agent 记录（数据库） */
 export interface Agent {
   id: string;
+  client_id: string;               // 所属机器身份 ID
   user_id: string;             // 用户标识
   host_user: string;               // 宿主机用户名
   client_endpoint: string;         // Client 地址
@@ -215,6 +217,7 @@ export interface WorkflowNode {
   detached?: boolean;              // Codex detached screen/TUI 兜底开关
   depends_on?: string[];           // 依赖的前置节点 ID
   status: WorkflowNodeStatus;
+  execution_id?: string;           // Server 派发时生成；结果回报必须精确匹配
   result?: string;                 // 执行结果
   started_at?: string;
   completed_at?: string;

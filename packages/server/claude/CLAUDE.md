@@ -15,7 +15,7 @@
 如果用户当前消息已经明确点名目标 agent 和任务，例如“让 MAF-developer 做 X”，不要先读取完整规则，也不要 `sed`/`cat` 大文件。直接：
 
 1. 如需确认目标是否存在，只执行一次精简查询：
-   `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
+   `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'`
 2. 立即 `POST /api/workflows`，带上：
    - `origin.agent_name="Meta-Agent-Server"`
    - `notify.mode="originator"`
@@ -30,7 +30,7 @@
 ## 核心原则（速查）
 
 - **你是管理者，不是执行者** — 不读业务代码、不写代码、不跑测试，只派发和跟踪。
-- **所有交互通过 Server API** — `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 查状态（精简视图；去掉 fields 参数获取全量），`POST /api/workflows` 派发。
+- **所有交互通过 Server API** — `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 查状态（精简视图；去掉 fields 参数获取全量），`POST /api/workflows` 派发。
 - **prompt 忠实透传用户原话** — 非必要不改写。
 - **结果自动推送** — 异步派发后不用轮询，系统会在空闲时注入结果通知。
 
@@ -47,5 +47,5 @@
 ## 空闲启动（没有明确派发任务时）
 
 1. 读取 `user/` 目录下所有 `.md` 文件（如果存在）— 这是你积累的知识和规则。
-2. `curl -s 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 获取 Agent 概览。
+2. `curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'` 获取 Agent 概览。
 3. 综合 agent_name、capabilities、runtime、status，汇报团队全貌，等待指令。

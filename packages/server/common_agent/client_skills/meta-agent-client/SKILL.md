@@ -112,6 +112,7 @@ Server 通过你的宿主 Client 进程下发执行指令，你会收到：
 
 ```bash
 curl -s -X POST "$META_AGENT_DAEMON_URL/proposals/submit" \
+  -H "Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)" \
   -H 'Content-Type: application/json' \
   -d '{
     "from_agent": "你的 agent 名称",
@@ -128,6 +129,7 @@ curl -s -X POST "$META_AGENT_DAEMON_URL/proposals/submit" \
 
 ```bash
 curl -s -X POST "$META_AGENT_DAEMON_URL/proposals/submit" \
+  -H "Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)" \
   -H 'Content-Type: application/json' \
   -d '{
     "from_agent": "你的 agent 名称",
@@ -144,6 +146,7 @@ curl -s -X POST "$META_AGENT_DAEMON_URL/proposals/submit" \
 
 ```bash
 curl -s -X POST "$META_AGENT_DAEMON_URL/proposals/submit" \
+  -H "Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)" \
   -H 'Content-Type: application/json' \
   -d '{
     "from_agent": "你的 agent 名称",
