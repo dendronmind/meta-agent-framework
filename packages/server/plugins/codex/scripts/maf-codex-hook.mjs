@@ -11,11 +11,11 @@
  * Codex TUI startup is not polluted.
  */
 
-import { mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, statSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, statSync, renameSync, openSync, closeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { HOME, MAF_HOME, inferAgent, isDir, isFile, processAlive, readMafConfig, safeName, validAgentName } from "./maf-codex-common.mjs";
+import { HOME, MAF_HOME, inferAgent, isDir, isFile, processAlive, readMafConfig, safeName, sleep, validAgentName } from "./maf-codex-common.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(__dirname);
@@ -58,6 +58,10 @@ function appendLogLine(content) {
 }
 const DEFAULT_PORT = 4100;
 const SERVER_AGENT_NAME = "Meta-Agent-Server";
+const RECEIVER_TERM_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_RECEIVER_TERM_TIMEOUT_MS || "0", 10) || 3000;
+const RECEIVER_KILL_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_RECEIVER_KILL_TIMEOUT_MS || "0", 10) || 2000;
+const RECEIVER_LOCK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_RECEIVER_LOCK_TIMEOUT_MS || "0", 10) || 5000;
+const RECEIVER_LOCK_STALE_MS = parseInt(process.env.MAF_CODEX_RECEIVER_LOCK_STALE_MS || "0", 10) || 30_000;
 
 function isServerAgentName(name) {
   return String(name || "").trim() === SERVER_AGENT_NAME;
@@ -147,6 +151,10 @@ function receiverMetaFile(agentName) {
   return join(MAF_HOME, `codex-attached-receiver-${safeName(agentName)}.json`);
 }
 
+function receiverLockFile(agentName) {
+  return join(MAF_HOME, `codex-attached-receiver-${safeName(agentName)}.lock`);
+}
+
 function readReceiverMeta(agentName) {
   try {
     const meta = safeJson(readFileSync(receiverMetaFile(agentName), "utf-8"));
@@ -163,8 +171,123 @@ function writeReceiverMeta(agentName, meta) {
   }
 }
 
-function removeReceiverMeta(agentName) {
-  try { unlinkSync(receiverMetaFile(agentName)); } catch {}
+function removeReceiverMeta(agentName, expectedPid = 0) {
+  const path = receiverMetaFile(agentName);
+  try {
+    if (expectedPid) {
+      const meta = safeJson(readFileSync(path, "utf-8"));
+      if (Number(meta?.pid || 0) !== Number(expectedPid)) return false;
+    }
+    unlinkSync(path);
+    return true;
+  } catch { return false; }
+}
+
+function readReceiverPid(agentName) {
+  try { return Number(readFileSync(receiverPidFile(agentName), "utf-8").trim() || 0); } catch { return 0; }
+}
+
+function removeReceiverPidFile(agentName, expectedPid = 0) {
+  const path = receiverPidFile(agentName);
+  try {
+    if (expectedPid && Number(readFileSync(path, "utf-8").trim() || 0) !== Number(expectedPid)) return false;
+    unlinkSync(path);
+    return true;
+  } catch { return false; }
+}
+
+function inspectReceiverProcess(pid, { agentName, pidFile, receiverScript }) {
+  const numericPid = Number(pid || 0);
+  if (!processAlive(numericPid)) return { alive: false, verified: true, matches: false, env: {} };
+  if (process.platform !== "linux") return { alive: true, verified: false, matches: false, env: {} };
+  try {
+    const args = readFileSync(`/proc/${numericPid}/cmdline`).toString("utf-8").split("\0").filter(Boolean);
+    const env = {};
+    for (const entry of readFileSync(`/proc/${numericPid}/environ`).toString("utf-8").split("\0")) {
+      const idx = entry.indexOf("=");
+      if (idx > 0) env[entry.slice(0, idx)] = entry.slice(idx + 1);
+    }
+    const matches = args.some(arg => resolve(arg) === resolve(receiverScript))
+      && String(env.MAF_AGENT_NAME || env.MAF_CODEX_AGENT || "") === String(agentName)
+      && resolve(String(env.MAF_CODEX_RECEIVER_PID_FILE || "")) === resolve(pidFile);
+    return { alive: true, verified: true, matches, env };
+  } catch {
+    return { alive: processAlive(numericPid), verified: false, matches: false, env: {} };
+  }
+}
+
+function sameReceiverTarget(info, { projectPath, appServerUrl, appServerCmd, sessionPid }) {
+  const env = info?.env || {};
+  if (!sessionPid || String(env.MAF_CODEX_SESSION_PID || "") !== String(sessionPid)) return false;
+  if (resolve(String(env.MAF_DIRECTORY || env.CODEX_CWD || "")) !== resolve(projectPath)) return false;
+  if (appServerUrl && String(env.MAF_CODEX_APP_SERVER_URL || "") !== String(appServerUrl)) return false;
+  if (appServerCmd && String(env.MAF_CODEX_APP_SERVER_CMD || "") !== String(appServerCmd)) return false;
+  return true;
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processAlive(pid) && Date.now() < deadline) await sleep(50);
+  return !processAlive(pid);
+}
+
+async function terminateReceiverProcess(pid, identity, reason) {
+  if (!processAlive(pid)) return { stopped: true, staleReference: false };
+  let info = inspectReceiverProcess(pid, identity);
+  if (info.verified && !info.matches) {
+    log(`refuse receiver signal for unrelated pid: pid=${pid} reason=${reason}`);
+    return { stopped: false, staleReference: true };
+  }
+  if (!info.verified) {
+    log(`refuse receiver signal without process identity: pid=${pid} reason=${reason}`);
+    return { stopped: false, staleReference: false };
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+    log(`sent SIGTERM to attached receiver: pid=${pid} reason=${reason}`);
+  } catch {}
+  if (await waitForProcessExit(pid, RECEIVER_TERM_TIMEOUT_MS)) return { stopped: true, staleReference: false };
+
+  info = inspectReceiverProcess(pid, identity);
+  if (!info.verified || !info.matches) {
+    log(`refuse receiver SIGKILL after identity changed: pid=${pid} reason=${reason}`);
+    return { stopped: false, staleReference: !info.matches };
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+    log(`sent SIGKILL to attached receiver: pid=${pid} reason=${reason}`);
+  } catch {}
+  return { stopped: await waitForProcessExit(pid, RECEIVER_KILL_TIMEOUT_MS), staleReference: false };
+}
+
+async function acquireReceiverLock(agentName) {
+  mkdirSync(MAF_HOME, { recursive: true });
+  const path = receiverLockFile(agentName);
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const deadline = Date.now() + RECEIVER_LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const fd = openSync(path, "wx", 0o600);
+      writeFileSync(fd, token);
+      return { fd, path, token };
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - statSync(path).mtimeMs > RECEIVER_LOCK_STALE_MS) unlinkSync(path);
+      } catch {}
+      await sleep(50);
+    }
+  }
+  throw new Error(`receiver lifecycle lock timeout: ${path}`);
+}
+
+function releaseReceiverLock(lock) {
+  if (!lock) return;
+  try { closeSync(lock.fd); } catch {}
+  try {
+    if (readFileSync(lock.path, "utf-8") === lock.token) unlinkSync(lock.path);
+  } catch {}
 }
 
 function findCodexRemote(hookEvent) {
@@ -182,7 +305,7 @@ function findCodexRemote(hookEvent) {
   return "";
 }
 
-function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, appServerCmd, sessionPid = "" }) {
+async function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, appServerCmd, sessionPid = "" }) {
   if (process.env.MAF_CODEX_ATTACHED_RECEIVER_DISABLE === "1" || process.env.MAF_CODEX_AUTO_ATTACHED_RECEIVER === "0") {
     log("attached receiver autostart disabled");
     return false;
@@ -197,35 +320,62 @@ function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, app
 
   const pidFile = receiverPidFile(agentName);
   const metaFile = receiverMetaFile(agentName);
-  let oldPid = "";
-  try { oldPid = readFileSync(pidFile, "utf-8").trim(); } catch {}
-  if (processAlive(oldPid)) {
-    if (sessionPid && process.env.MAF_CODEX_REPLACE_ATTACHED_RECEIVER !== "0") {
-      log(`replace stale/previous attached receiver: agent=${agentName} oldPid=${oldPid} sessionPid=${sessionPid}`);
-      try { process.kill(Number(oldPid), "SIGTERM"); } catch {}
-      try { unlinkSync(pidFile); } catch {}
-      try { unlinkSync(metaFile); } catch {}
-    } else {
-      log(`attached receiver already running: agent=${agentName} pid=${oldPid}`);
-      return { ok: true, pid: Number(oldPid) || 0, reused: true, meta: readReceiverMeta(agentName) };
-    }
-  }
-
-  const env = {
-    ...process.env,
-    MAF_NODE_PORT: String(port),
-    MAF_DAEMON_URL: `http://127.0.0.1:${port}`,
-    MAF_AGENT_NAME: agentName,
-    MAF_RUNTIME: "codex",
-    MAF_DIRECTORY: projectPath,
-    MAF_CODEX_RECEIVER_PID_FILE: pidFile,
-  };
-  if (sessionPid) env.MAF_CODEX_SESSION_PID = sessionPid;
-  else delete env.MAF_CODEX_SESSION_PID;
-  if (appServerUrl && !env.MAF_CODEX_APP_SERVER_URL) env.MAF_CODEX_APP_SERVER_URL = appServerUrl;
-  if (appServerCmd && !env.MAF_CODEX_APP_SERVER_CMD) env.MAF_CODEX_APP_SERVER_CMD = appServerCmd;
-
+  const identity = { agentName, pidFile, receiverScript };
+  let lock = null;
   try {
+    lock = await acquireReceiverLock(agentName);
+    const oldMeta = readReceiverMeta(agentName);
+    const oldPid = readReceiverPid(agentName) || Number(oldMeta.pid || 0);
+    if (oldPid && processAlive(oldPid)) {
+      const info = inspectReceiverProcess(oldPid, identity);
+      if (info.verified && !info.matches) {
+        log(`discard stale receiver state for unrelated pid: agent=${agentName} pid=${oldPid}`);
+        removeReceiverPidFile(agentName, oldPid);
+        removeReceiverMeta(agentName, oldPid);
+      } else if (!info.verified) {
+        log(`attached receiver identity unavailable; skip duplicate start: agent=${agentName} pid=${oldPid}`);
+        return { ok: false, pid: oldPid, reused: false, error: "receiver identity unavailable" };
+      } else {
+        const reuse = !sessionPid
+          || process.env.MAF_CODEX_REPLACE_ATTACHED_RECEIVER === "0"
+          || sameReceiverTarget(info, { projectPath, appServerUrl, appServerCmd, sessionPid });
+        if (reuse) {
+          log(`attached receiver already running: agent=${agentName} pid=${oldPid}`);
+          return { ok: true, pid: oldPid, reused: true, meta: oldMeta };
+        }
+
+        log(`replace stale/previous attached receiver: agent=${agentName} oldPid=${oldPid} sessionPid=${sessionPid}`);
+        await disconnectAgent({ agentName, port, pluginPid: oldPid });
+        const terminated = await terminateReceiverProcess(oldPid, identity, "replace");
+        if (!terminated.stopped && !terminated.staleReference) {
+          log(`attached receiver replacement blocked: agent=${agentName} pid=${oldPid}`);
+          return { ok: false, pid: oldPid, reused: false, error: "previous receiver did not stop" };
+        }
+        removeReceiverPidFile(agentName, oldPid);
+        removeReceiverMeta(agentName, oldPid);
+      }
+    } else if (oldPid) {
+      removeReceiverPidFile(agentName, oldPid);
+      removeReceiverMeta(agentName, oldPid);
+    }
+
+    const env = {
+      ...process.env,
+      MAF_NODE_PORT: String(port),
+      MAF_DAEMON_URL: `http://127.0.0.1:${port}`,
+      MAF_AGENT_NAME: agentName,
+      MAF_RUNTIME: "codex",
+      MAF_DIRECTORY: projectPath,
+      MAF_CODEX_RECEIVER_PID_FILE: pidFile,
+      MAF_CODEX_RECEIVER_META_FILE: metaFile,
+    };
+    if (sessionPid) env.MAF_CODEX_SESSION_PID = sessionPid;
+    else delete env.MAF_CODEX_SESSION_PID;
+    if (appServerUrl) env.MAF_CODEX_APP_SERVER_URL = appServerUrl;
+    else delete env.MAF_CODEX_APP_SERVER_URL;
+    if (appServerCmd) env.MAF_CODEX_APP_SERVER_CMD = appServerCmd;
+    else delete env.MAF_CODEX_APP_SERVER_CMD;
+
     const child = spawn(process.execPath, [receiverScript], {
       cwd: projectPath,
       detached: true,
@@ -248,6 +398,8 @@ function startAttachedReceiver({ agentName, projectPath, port, appServerUrl, app
   } catch (err) {
     log(`attached receiver spawn failed: ${err.message}`);
     return { ok: false, pid: 0 };
+  } finally {
+    releaseReceiverLock(lock);
   }
 }
 
@@ -271,33 +423,51 @@ async function disconnectAgent({ agentName, port, pluginPid = 0 }) {
 }
 
 async function stopAttachedReceiver({ agentName, port, sessionPid = "" }) {
-  const meta = readReceiverMeta(agentName);
-  const metaSessionPid = String(meta.session_pid || "").trim();
-  if (sessionPid && metaSessionPid && metaSessionPid !== String(sessionPid)) {
-    log(`skip receiver stop: agent=${agentName} sessionPid=${sessionPid} currentSessionPid=${metaSessionPid}`);
-    return false;
-  }
-
-  let pid = Number(meta.pid || 0);
-  if (!pid) {
-    try { pid = Number(readFileSync(receiverPidFile(agentName), "utf-8").trim() || 0); } catch {}
-  }
-  if (!pid) {
-    log(`skip receiver stop: agent=${agentName} no attached receiver pid`);
-    return false;
-  }
-
-  await disconnectAgent({ agentName, port, pluginPid: pid });
-  if (pid && processAlive(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-      log(`sent SIGTERM to attached receiver: agent=${agentName} pid=${pid}`);
-    } catch (err) {
-      log(`receiver SIGTERM failed: agent=${agentName} pid=${pid} ${err.message}`);
+  let lock = null;
+  try {
+    lock = await acquireReceiverLock(agentName);
+    const meta = readReceiverMeta(agentName);
+    const metaSessionPid = String(meta.session_pid || "").trim();
+    if (sessionPid && metaSessionPid && metaSessionPid !== String(sessionPid)) {
+      log(`skip receiver stop: agent=${agentName} sessionPid=${sessionPid} currentSessionPid=${metaSessionPid}`);
+      return false;
     }
+
+    const pid = readReceiverPid(agentName) || Number(meta.pid || 0);
+    if (!pid) {
+      log(`skip receiver stop: agent=${agentName} no attached receiver pid`);
+      return false;
+    }
+
+    const identity = {
+      agentName,
+      pidFile: receiverPidFile(agentName),
+      receiverScript: join(PLUGIN_ROOT, "scripts", "maf-codex-attached-receiver.mjs"),
+    };
+    const info = inspectReceiverProcess(pid, identity);
+    if (info.verified && !info.matches) {
+      log(`discard stale receiver state without signaling unrelated pid: agent=${agentName} pid=${pid}`);
+      removeReceiverPidFile(agentName, pid);
+      removeReceiverMeta(agentName, pid);
+      return true;
+    }
+    if (!info.verified) {
+      log(`receiver stop blocked because process identity is unavailable: agent=${agentName} pid=${pid}`);
+      return false;
+    }
+
+    await disconnectAgent({ agentName, port, pluginPid: pid });
+    const terminated = await terminateReceiverProcess(pid, identity, "session-stop");
+    if (!terminated.stopped && !terminated.staleReference) return false;
+    removeReceiverPidFile(agentName, pid);
+    removeReceiverMeta(agentName, pid);
+    return true;
+  } catch (err) {
+    log(`receiver stop failed: agent=${agentName} ${err.message}`);
+    return false;
+  } finally {
+    releaseReceiverLock(lock);
   }
-  removeReceiverMeta(agentName);
-  return true;
 }
 
 async function stopOwnedAppServer({ agentName, appServerUrl, sessionPid = "" }) {
@@ -475,7 +645,7 @@ async function main() {
   const appServerUrl = findCodexRemote(hookEvent);
   const appServerCmd = process.env.MAF_CODEX_APP_SERVER_CMD || "";
   const startSessionPid = String(hookEvent?.sessionPid || (eventName === "WrapperStart" ? process.env.MAF_CODEX_SESSION_PID : "") || "").trim();
-  const receiver = startAttachedReceiver({
+  const receiver = await startAttachedReceiver({
     agentName: inferred.agentName,
     projectPath,
     port,

@@ -1850,11 +1850,126 @@ wait_until 10 "cat '$CODEX_RECV_TURN_LOG' 2>/dev/null" "\\[MAF 后台任务结�
 assert "Codex origin workflow notification injected" "\\[MAF 后台任务结果通知\\]" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
 assert "Codex origin workflow notification result" "codex origin notification result" "$(cat "$CODEX_RECV_TURN_LOG" 2>/dev/null || true)"
 
-kill -TERM "$CODEX_RECV_PID" 2>/dev/null || true
+CODEX_RECV_OLD_PID="$CODEX_RECV_PID"
+sleep 30 &
+CODEX_RECV_SESSION_A_PID=$!
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_A_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-replace.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperStart","sessionPid":"$CODEX_RECV_SESSION_A_PID"}
+HOOKJSON
+CODEX_RECV_REPLACEMENT_PID="$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+assert "Codex receiver replacement uses a new pid" "true" "$([[ -n "$CODEX_RECV_REPLACEMENT_PID" && "$CODEX_RECV_REPLACEMENT_PID" != "$CODEX_RECV_OLD_PID" ]] && echo true || echo false)"
+assert "Codex receiver replacement stops previous process" "gone" "$(kill -0 "$CODEX_RECV_OLD_PID" 2>/dev/null && echo alive || echo gone)"
+assert "Codex receiver replacement keeps new pid file" "$CODEX_RECV_REPLACEMENT_PID" "$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_A_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-reuse.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperStart","sessionPid":"$CODEX_RECV_SESSION_A_PID"}
+HOOKJSON
+assert "Codex repeated session hook reuses receiver" "$CODEX_RECV_REPLACEMENT_PID" "$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_A_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-stop.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperEnd","sessionPid":"$CODEX_RECV_SESSION_A_PID"}
+HOOKJSON
+assert "Codex WrapperEnd confirms receiver exit" "gone" "$(kill -0 "$CODEX_RECV_REPLACEMENT_PID" 2>/dev/null && echo alive || echo gone)"
+assert "Codex WrapperEnd removes owned pid file" "missing" "$([[ -e "$CODEX_RECV_PID_FILE" ]] && echo present || echo missing)"
+assert "Codex WrapperEnd removes owned meta file" "missing" "$([[ -e "$CODEX_RECV_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_RECV_AGENT}.json" ]] && echo present || echo missing)"
+kill "$CODEX_RECV_SESSION_A_PID" 2>/dev/null || true
+wait "$CODEX_RECV_SESSION_A_PID" 2>/dev/null || true
+
+sleep 30 &
+CODEX_RECV_SESSION_B_PID=$!
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_B_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-session-exit.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperStart","sessionPid":"$CODEX_RECV_SESSION_B_PID"}
+HOOKJSON
+CODEX_RECV_SESSION_BOUND_PID="$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+assert "Codex session-bound receiver spawned" "true" "$([[ -n "$CODEX_RECV_SESSION_BOUND_PID" ]] && kill -0 "$CODEX_RECV_SESSION_BOUND_PID" 2>/dev/null && echo true || echo false)"
+kill "$CODEX_RECV_SESSION_B_PID" 2>/dev/null || true
+wait "$CODEX_RECV_SESSION_B_PID" 2>/dev/null || true
+wait_until 8 "kill -0 '$CODEX_RECV_SESSION_BOUND_PID' 2>/dev/null && echo alive || echo gone" "gone" || true
+assert "Codex receiver exits when session disappears" "gone" "$(kill -0 "$CODEX_RECV_SESSION_BOUND_PID" 2>/dev/null && echo alive || echo gone)"
+assert "Codex session exit removes owned pid file" "missing" "$([[ -e "$CODEX_RECV_PID_FILE" ]] && echo present || echo missing)"
+
+sleep 30 &
+CODEX_RECV_UNRELATED_PID=$!
+printf '%s\n' "$CODEX_RECV_UNRELATED_PID" > "$CODEX_RECV_PID_FILE"
+cat > "$CODEX_RECV_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_RECV_AGENT}.json" << METAJSON
+{"agent_name":"$CODEX_RECV_AGENT","pid":$CODEX_RECV_UNRELATED_PID,"project_path":"$CODEX_RECV_PROJECT","session_pid":"stale"}
+METAJSON
+sleep 30 &
+CODEX_RECV_SESSION_C_PID=$!
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_C_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-stale-pid.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperStart","sessionPid":"$CODEX_RECV_SESSION_C_PID"}
+HOOKJSON
+CODEX_RECV_FINAL_PID="$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+assert "Codex stale pid does not signal unrelated process" "alive" "$(kill -0 "$CODEX_RECV_UNRELATED_PID" 2>/dev/null && echo alive || echo gone)"
+assert "Codex stale pid is replaced with receiver pid" "true" "$([[ -n "$CODEX_RECV_FINAL_PID" && "$CODEX_RECV_FINAL_PID" != "$CODEX_RECV_UNRELATED_PID" ]] && echo true || echo false)"
+
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_C_PID" \
+  MAF_CODEX_APP_SERVER_CMD="node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-final-stop.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperEnd","sessionPid":"$CODEX_RECV_SESSION_C_PID"}
+HOOKJSON
+
+CODEX_RECV_DROP_PORT=14947
+CODEX_RECV_DROP_URL="ws://127.0.0.1:${CODEX_RECV_DROP_PORT}"
+node "$ROOT_DIR/scripts/mock-codex-app-server.mjs" --listen "$CODEX_RECV_DROP_URL" >/tmp/e2e-codex-receiver-drop-app.log 2>&1 &
+CODEX_RECV_DROP_APP_PID=$!
+wait_until 10 "command curl -s http://127.0.0.1:${CODEX_RECV_DROP_PORT}/readyz 2>/dev/null" '"ok":true' || true
+sleep 30 &
+CODEX_RECV_SESSION_D_PID=$!
+HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" \
+  MAF_AGENT_NAME="$CODEX_RECV_AGENT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_SESSION_PID="$CODEX_RECV_SESSION_D_PID" MAF_CODEX_APP_SERVER_URL="$CODEX_RECV_DROP_URL" \
+  node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-receiver-drop-hook.log 2>&1
+{"cwd":"$CODEX_RECV_PROJECT","eventName":"WrapperStart","sessionPid":"$CODEX_RECV_SESSION_D_PID"}
+HOOKJSON
+CODEX_RECV_DROP_PID="$(cat "$CODEX_RECV_PID_FILE" 2>/dev/null || true)"
+assert "Codex app-server-drop receiver spawned" "true" "$([[ -n "$CODEX_RECV_DROP_PID" ]] && kill -0 "$CODEX_RECV_DROP_PID" 2>/dev/null && echo true || echo false)"
+kill "$CODEX_RECV_DROP_APP_PID" 2>/dev/null || true
+wait "$CODEX_RECV_DROP_APP_PID" 2>/dev/null || true
+wait_until 8 "kill -0 '$CODEX_RECV_DROP_PID' 2>/dev/null && echo alive || echo gone" "gone" || true
+assert "Codex receiver exits when app-server disconnects" "gone" "$(kill -0 "$CODEX_RECV_DROP_PID" 2>/dev/null && echo alive || echo gone)"
+assert "Codex app-server disconnect removes state" "missing" "$([[ -e "$CODEX_RECV_PID_FILE" || -e "$CODEX_RECV_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_RECV_AGENT}.json" ]] && echo present || echo missing)"
+kill "$CODEX_RECV_SESSION_D_PID" 2>/dev/null || true
+wait "$CODEX_RECV_SESSION_D_PID" 2>/dev/null || true
+
 wait_until 10 "get_agent_field status $CODEX_RECV_AGENT" "offline" || true
 assert "Codex attached receiver disconnect offline" "offline" "$(get_agent_field status $CODEX_RECV_AGENT)"
+assert "Codex receiver lifecycle lock removed" "missing" "$([[ -e "$CODEX_RECV_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_RECV_AGENT}.lock" ]] && echo present || echo missing)"
 
-kill -9 "$CODEX_RECV_PID" "$CODEX_RECV_DAEMON_PID" "$CODEX_NOTIFY_ENDPOINT_PID" 2>/dev/null || true
+kill -9 "$CODEX_RECV_OLD_PID" "$CODEX_RECV_REPLACEMENT_PID" "$CODEX_RECV_SESSION_BOUND_PID" "$CODEX_RECV_FINAL_PID" "$CODEX_RECV_DROP_PID" \
+  "$CODEX_RECV_SESSION_A_PID" "$CODEX_RECV_SESSION_B_PID" "$CODEX_RECV_SESSION_C_PID" "$CODEX_RECV_SESSION_D_PID" "$CODEX_RECV_UNRELATED_PID" \
+  "$CODEX_RECV_DROP_APP_PID" \
+  "$CODEX_RECV_DAEMON_PID" "$CODEX_NOTIFY_ENDPOINT_PID" 2>/dev/null || true
+wait "$CODEX_RECV_SESSION_C_PID" "$CODEX_RECV_UNRELATED_PID" 2>/dev/null || true
 
 fi
 

@@ -15,7 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, statSync, renameSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, statSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { createHash, randomBytes, sign } from "node:crypto";
@@ -88,6 +88,7 @@ function appendLogLine(content) {
   } catch {}
 }
 const PID_FILE = process.env.MAF_CODEX_RECEIVER_PID_FILE || "";
+const META_FILE = process.env.MAF_CODEX_RECEIVER_META_FILE || "";
 const THREAD_WAIT_MS = parseInt(process.env.MAF_CODEX_THREAD_WAIT_MS || "0", 10) || 120_000;
 const THREAD_POLL_MS = parseInt(process.env.MAF_CODEX_THREAD_POLL_MS || "0", 10) || 1000;
 const TURN_POLL_MS = parseInt(process.env.MAF_CODEX_TURN_POLL_MS || "0", 10) || 1000;
@@ -118,10 +119,17 @@ function writePidFile() {
   }
 }
 
-function removePidFile() {
-  if (!PID_FILE) return;
+function removeOwnedStateFiles() {
+  if (PID_FILE) {
+    try {
+      const ownerPid = readFileSync(PID_FILE, "utf-8").trim();
+      if (ownerPid === String(process.pid)) unlinkSync(PID_FILE);
+    } catch {}
+  }
+  if (!META_FILE) return;
   try {
-    if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
+    const meta = JSON.parse(readFileSync(META_FILE, "utf-8"));
+    if (Number(meta?.pid || 0) === process.pid) unlinkSync(META_FILE);
   } catch {}
 }
 
@@ -147,11 +155,21 @@ async function postJson(url, body, timeoutMs = 10_000) {
   return data;
 }
 
-async function getJson(url, timeoutMs = WAIT_TIMEOUT_MS) {
-  const res = await fetch(url, { headers: authHeaders(), signal: AbortSignal.timeout(timeoutMs) });
-  const data = await readJsonSafe(res);
-  if (!res.ok) throw new Error(`${url} HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
-  return data;
+async function getJson(url, timeoutMs = WAIT_TIMEOUT_MS, externalSignal = null) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`request timeout: ${url}`)), timeoutMs);
+  const abort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abort();
+  else externalSignal?.addEventListener("abort", abort, { once: true });
+  try {
+    const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
+    const data = await readJsonSafe(res);
+    if (!res.ok) throw new Error(`${url} HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
+    return data;
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abort);
+  }
 }
 
 const pendingNotifications = [];
@@ -301,11 +319,13 @@ async function waitForNotificationTurn(client, threadId, turnId, fallbackText, t
     let pollTimer = null;
     let lastPollStatus = "";
     let lastPollError = "";
+    let onAbort = null;
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       if (pollTimer) clearTimeout(pollTimer);
       client.off("notification", onNotification);
+      if (onAbort) shutdownController.signal.removeEventListener("abort", onAbort);
     };
 
     const finish = (source, status = "completed") => {
@@ -340,6 +360,8 @@ async function waitForNotificationTurn(client, threadId, turnId, fallbackText, t
       }
     };
 
+    onAbort = () => finish("receiver-stop", "stopped");
+
     const poll = async () => {
       if (done) return;
       try {
@@ -371,7 +393,11 @@ async function waitForNotificationTurn(client, threadId, turnId, fallbackText, t
     };
 
     client.on("notification", onNotification);
-    pollTimer = setTimeout(poll, TURN_POLL_MS);
+    if (shutdownController.signal.aborted) onAbort();
+    else {
+      shutdownController.signal.addEventListener("abort", onAbort, { once: true });
+      pollTimer = setTimeout(poll, TURN_POLL_MS);
+    }
   });
 }
 
@@ -474,8 +500,7 @@ class CodexAppServerClient extends EventEmitter {
       ws.onerror = () => { clearTimeout(timer); reject(new Error(`websocket error: ${url}`)); };
       ws.onmessage = event => this.handleWebSocketData(event.data).catch(err => log(`websocket message parse failed: ${err.message}`));
       ws.onclose = event => {
-        this.closed = true;
-        this.rejectAll(new Error(`app-server websocket closed: ${event.code} ${event.reason || ""}`.trim()));
+        this.markClosed(new Error(`app-server websocket closed: ${event.code} ${event.reason || ""}`.trim()));
       };
     });
   }
@@ -498,10 +523,9 @@ class CodexAppServerClient extends EventEmitter {
     });
     proc.stderr.on("data", chunk => log(`app-server stderr: ${chunk.toString().trim()}`));
     proc.on("exit", (code, signal) => {
-      this.closed = true;
-      this.rejectAll(new Error(`app-server command exited: ${code ?? ""}${signal ? ` signal=${signal}` : ""}`));
+      this.markClosed(new Error(`app-server command exited: ${code ?? ""}${signal ? ` signal=${signal}` : ""}`));
     });
-    proc.on("error", err => this.rejectAll(err));
+    proc.on("error", err => this.markClosed(err));
     await sleep(200);
   }
 
@@ -585,6 +609,13 @@ class CodexAppServerClient extends EventEmitter {
       pending.reject(err);
       this.pending.delete(id);
     }
+  }
+
+  markClosed(err) {
+    if (this.closed) return;
+    this.closed = true;
+    this.rejectAll(err);
+    this.emit("close", err);
   }
 
   async initialize() {
@@ -739,9 +770,9 @@ async function runTurn(client, threadId, task) {
     let lastPollStatus = "";
     let lastPollError = "";
     let pollTimer = null;
+    let onAbort = null;
     const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Codex attached turn timeout (${TASK_TIMEOUT_MS}ms)`));
+      finishErr(new Error(`Codex attached turn timeout (${TASK_TIMEOUT_MS}ms)`));
     }, TASK_TIMEOUT_MS);
 
     const finishOk = (source, output) => {
@@ -782,7 +813,10 @@ async function runTurn(client, threadId, task) {
       clearTimeout(timer);
       if (pollTimer) clearTimeout(pollTimer);
       client.off("notification", onNotification);
+      if (onAbort) shutdownController.signal.removeEventListener("abort", onAbort);
     };
+
+    onAbort = () => finishErr(new Error("Codex attached receiver is stopping"));
 
     const poll = async () => {
       if (done) return;
@@ -815,7 +849,11 @@ async function runTurn(client, threadId, task) {
     };
 
     client.on("notification", onNotification);
-    pollTimer = setTimeout(poll, TURN_POLL_MS);
+    if (shutdownController.signal.aborted) onAbort();
+    else {
+      shutdownController.signal.addEventListener("abort", onAbort, { once: true });
+      pollTimer = setTimeout(poll, TURN_POLL_MS);
+    }
   });
 }
 
@@ -872,94 +910,116 @@ async function reportDone(task, status, result, durationMs) {
 }
 
 let stopping = false;
-process.on("SIGINT", () => { stopping = true; });
-process.on("SIGTERM", () => { stopping = true; });
-process.on("exit", () => removePidFile());
+let activeClient = null;
+const shutdownController = new AbortController();
+
+function requestStop(reason) {
+  if (stopping) return;
+  stopping = true;
+  log(`stopping attached receiver: ${reason}`);
+  try { shutdownController.abort(new Error(reason)); } catch {}
+  try { sseAbortController?.abort(); } catch {}
+  try { activeClient?.close(); } catch {}
+}
+
+process.on("SIGINT", () => requestStop("SIGINT"));
+process.on("SIGTERM", () => requestStop("SIGTERM"));
+process.on("exit", () => removeOwnedStateFiles());
 
 async function main() {
   writePidFile();
   const client = new CodexAppServerClient({ url: APP_SERVER_URL, command: APP_SERVER_CMD });
+  activeClient = client;
+  client.on("close", err => requestStop(err?.message || "app-server transport closed"));
   let sessionTimer = null;
-  await client.connect();
-  const init = await client.initialize();
-  log(`app-server initialized: ${JSON.stringify(init)}`);
-  const threadId = await resolveThreadId(client);
-  log(`attached receiver bound to thread=${threadId}`);
-  await ensureRegistered(true);
-  if (IS_SERVER_IDENTITY) {
-    log(`${SERVER_AGENT_NAME} notification-only mode: skip /tasks/wait and Agent board presence`);
-  }
-  subscribeWorkflowEvents(client, threadId).catch(err => log(`workflow SSE start failed: ${err.message}`));
-  if (SESSION_PID) {
-    log(`attached receiver follows Codex session pid=${SESSION_PID}`);
-    sessionTimer = setInterval(() => {
-      if (!sessionStillAlive()) {
-        log(`Codex session pid=${SESSION_PID} exited; stopping attached receiver`);
-        stopping = true;
-      }
-    }, 1000);
-    sessionTimer.unref?.();
-  }
-
-  while (!stopping && !client.closed) {
-    if (!sessionStillAlive()) {
-      log(`Codex session pid=${SESSION_PID} exited; stopping attached receiver`);
-      break;
-    }
-    try { await ensureRegistered(); } catch (err) { log(`receiver re-register failed: ${err.message}`); }
-    await injectPendingNotifications(client, threadId);
+  try {
+    await client.connect();
+    const init = await client.initialize();
+    log(`app-server initialized: ${JSON.stringify(init)}`);
+    const threadId = await resolveThreadId(client);
+    log(`attached receiver bound to thread=${threadId}`);
+    await ensureRegistered(true);
     if (IS_SERVER_IDENTITY) {
-      await sleep(1000);
-      continue;
+      log(`${SERVER_AGENT_NAME} notification-only mode: skip /tasks/wait and Agent board presence`);
     }
-    let data;
-    try {
-      data = await getJson(`${DAEMON_URL}/tasks/wait?agent=${encodeURIComponent(AGENT_NAME)}`, WAIT_TIMEOUT_MS + 5000);
-    } catch (err) {
-      log(`tasks/wait failed: ${err.message}`);
-      await sleep(1000);
-      continue;
+    subscribeWorkflowEvents(client, threadId).catch(err => log(`workflow SSE start failed: ${err.message}`));
+    if (SESSION_PID) {
+      log(`attached receiver follows Codex session pid=${SESSION_PID}`);
+      sessionTimer = setInterval(() => {
+        if (!sessionStillAlive()) {
+          requestStop(`Codex session pid=${SESSION_PID} exited`);
+        }
+      }, 1000);
+      sessionTimer.unref?.();
     }
-    const task = data?.task;
-    if (!task) continue;
 
-    const started = Date.now();
-    currentTaskExecuting = true;
-    try {
-      log(`attached task received: ${task.id} ${task.title || ""}`);
-      const output = await runTurn(client, threadId, task);
-      const reportAck = await reportDone(task, "completed", output, Date.now() - started);
-      rememberCompletedTask(task, "completed");
-      if (NOTIFY_ACK && task.workflow_id && !ackedWorkflowIds.has(task.workflow_id)) {
-        ackedWorkflowIds.add(task.workflow_id);
-        enqueueNotification(buildTaskAckNotification(task, "completed", reportAck));
+    while (!stopping && !client.closed) {
+      if (!sessionStillAlive()) {
+        requestStop(`Codex session pid=${SESSION_PID} exited`);
+        break;
       }
-      log(`attached task completed: ${task.id}`);
-    } catch (err) {
-      const msg = `Codex attached receiver failed: ${err.message}`;
-      log(`${msg}\n${err.stack || ""}`);
+      try { await ensureRegistered(); } catch (err) { log(`receiver re-register failed: ${err.message}`); }
+      await injectPendingNotifications(client, threadId);
+      if (IS_SERVER_IDENTITY) {
+        await sleep(1000);
+        continue;
+      }
+      let data;
       try {
-        const reportAck = await reportDone(task, "failed", msg, Date.now() - started);
-        rememberCompletedTask(task, "failed");
+        data = await getJson(
+          `${DAEMON_URL}/tasks/wait?agent=${encodeURIComponent(AGENT_NAME)}`,
+          WAIT_TIMEOUT_MS + 5000,
+          shutdownController.signal,
+        );
+      } catch (err) {
+        if (stopping) break;
+        log(`tasks/wait failed: ${err.message}`);
+        await sleep(1000);
+        continue;
+      }
+      const task = data?.task;
+      if (!task) continue;
+
+      const started = Date.now();
+      currentTaskExecuting = true;
+      try {
+        log(`attached task received: ${task.id} ${task.title || ""}`);
+        const output = await runTurn(client, threadId, task);
+        const reportAck = await reportDone(task, "completed", output, Date.now() - started);
+        rememberCompletedTask(task, "completed");
         if (NOTIFY_ACK && task.workflow_id && !ackedWorkflowIds.has(task.workflow_id)) {
           ackedWorkflowIds.add(task.workflow_id);
-          enqueueNotification(buildTaskAckNotification(task, "failed", reportAck));
+          enqueueNotification(buildTaskAckNotification(task, "completed", reportAck));
         }
-      } catch (reportErr) { log(`report failed: ${reportErr.message}`); }
-    } finally {
-      currentTaskExecuting = false;
-      await injectPendingNotifications(client, threadId);
+        log(`attached task completed: ${task.id}`);
+      } catch (err) {
+        const msg = `Codex attached receiver failed: ${err.message}`;
+        log(`${msg}\n${err.stack || ""}`);
+        try {
+          const reportAck = await reportDone(task, "failed", msg, Date.now() - started);
+          rememberCompletedTask(task, "failed");
+          if (NOTIFY_ACK && task.workflow_id && !ackedWorkflowIds.has(task.workflow_id)) {
+            ackedWorkflowIds.add(task.workflow_id);
+            enqueueNotification(buildTaskAckNotification(task, "failed", reportAck));
+          }
+        } catch (reportErr) { log(`report failed: ${reportErr.message}`); }
+      } finally {
+        currentTaskExecuting = false;
+        await injectPendingNotifications(client, threadId);
+      }
     }
+  } finally {
+    if (sessionTimer) clearInterval(sessionTimer);
+    try { sseAbortController?.abort(); } catch {}
+    await disconnectAgent();
+    client.close();
+    if (activeClient === client) activeClient = null;
   }
-
-  if (sessionTimer) clearInterval(sessionTimer);
-  try { sseAbortController?.abort(); } catch {}
-  await disconnectAgent();
-  client.close();
 }
 
 main().catch(async err => {
   log(`fatal: ${err.message}\n${err.stack || ""}`);
+  requestStop(`fatal: ${err.message}`);
   await disconnectAgent();
   process.exit(1);
 });
