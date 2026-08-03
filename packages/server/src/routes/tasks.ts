@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { taskDispatcher } from '../services/task-dispatcher';
 import { agentRegistry } from '../services/agent-registry';
+import { serverAuthHeaders } from '../auth';
 import type { TaskCreatePayload, TaskResultPayload } from '../types';
 
 const router = Router();
@@ -82,11 +83,10 @@ router.get('/poll', (req: Request, res: Response) => {
   }
 
   const task = taskDispatcher.pollForAgent(agentName, userId);
-  if (task) {
-    res.json({ has_task: true, task });
-  } else {
-    res.json({ has_task: false });
-  }
+  const body = JSON.stringify(task ? { has_task: true, task } : { has_task: false });
+  const signedHeaders = serverAuthHeaders('GET', req.originalUrl, body);
+  for (const [name, value] of Object.entries(signedHeaders)) res.setHeader(name, value);
+  res.type('application/json').send(body);
 });
 
 /**

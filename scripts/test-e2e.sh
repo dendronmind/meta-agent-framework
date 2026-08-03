@@ -68,6 +68,8 @@ DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/logs/client-daemon.log"
 E2E_SERVER_PORT=13000
 NODE_PORT=14100
 E2E_SERVER="http://localhost:$E2E_SERVER_PORT"
+E2E_REMOTE_HOST="$(node -e 'const os=require("node:os"); for (const list of Object.values(os.networkInterfaces())) for (const item of list || []) if (item.family === "IPv4" && !item.internal) { process.stdout.write(item.address); process.exit(0); }')"
+E2E_REMOTE_SERVER="http://${E2E_REMOTE_HOST}:$E2E_SERVER_PORT"
 DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 export MAF_AUTH_TOKEN="maf-e2e-auth-token-0123456789abcdef0123456789abcdef"
 export MAF_LOCAL_TOKEN="$MAF_AUTH_TOKEN"
@@ -193,6 +195,57 @@ const headers = {
   "X-MAF-Timestamp": timestamp,
   "X-MAF-Nonce": nonce,
   "X-MAF-Signature": signature,
+};
+if (body) headers["Content-Type"] = "application/json";
+fetch(url, { method, headers, body: body || undefined })
+  .then(async res => {
+    const responseBody = await res.text();
+    const responseTimestamp = res.headers.get("x-maf-timestamp") || "";
+    const responseNonce = res.headers.get("x-maf-nonce") || "";
+    const responseSignature = res.headers.get("x-maf-signature") || "";
+    let serverSignatureValid = false;
+    try {
+      const serverPublicKey = fs.readFileSync(path.join(authDir, "server-public.pem"), "utf8");
+      const responseHash = crypto.createHash("sha256").update(responseBody).digest("hex");
+      const responseCanonical = Buffer.from([
+        method.toUpperCase(),
+        target,
+        responseTimestamp,
+        responseNonce,
+        responseHash,
+      ].join("\n"));
+      serverSignatureValid = res.headers.get("x-maf-role") === "server"
+        && res.headers.get("x-maf-id") === "maf-server"
+        && crypto.verify(null, responseCanonical, serverPublicKey, Buffer.from(responseSignature, "base64url"));
+    } catch {}
+    process.stdout.write(`HTTP:${res.status}\nSERVER_SIGNATURE_VALID:${serverSignatureValid}\n${responseBody}`);
+  })
+  .catch(err => { console.error(err.message); process.exit(1); });
+NODE
+}
+
+server_signed_fetch() {
+  local url=$1 method=${2:-GET} body=${3:-}
+  MAF_SIGNED_URL="$url" MAF_SIGNED_METHOD="$method" MAF_SIGNED_BODY="$body" \
+    MAF_SERVER_PRIVATE_KEY="$E2E_MAF_HOME/auth/server-private.pem" node <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const url = process.env.MAF_SIGNED_URL;
+const method = process.env.MAF_SIGNED_METHOD || "GET";
+const body = process.env.MAF_SIGNED_BODY || "";
+const privateKey = fs.readFileSync(process.env.MAF_SERVER_PRIVATE_KEY, "utf8");
+const timestamp = String(Date.now());
+const nonce = crypto.randomBytes(18).toString("base64url");
+const parsed = new URL(url);
+const target = `${parsed.pathname}${parsed.search}`;
+const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+const canonical = Buffer.from([method.toUpperCase(), target, timestamp, nonce, bodyHash].join("\n"));
+const headers = {
+  "X-MAF-Role": "server",
+  "X-MAF-ID": "maf-server",
+  "X-MAF-Timestamp": timestamp,
+  "X-MAF-Nonce": nonce,
+  "X-MAF-Signature": crypto.sign(null, canonical, privateKey).toString("base64url"),
 };
 if (body) headers["Content-Type"] = "application/json";
 fetch(url, { method, headers, body: body || undefined })
@@ -708,9 +761,8 @@ sleep 1
 wait_until 10 "get_agent_field status $SERVE_AGENT" "offline\|dead" || true
 SERVE_STATUS=$(get_agent_field status $SERVE_AGENT)
 assert "serve agent 已注册(非 online)" "true" "$(echo $SERVE_STATUS | grep -q 'offline\|dead' && echo true || echo false)"
-EXEC_RES=$(curl -s -X POST $DAEMON_URL/execute \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$SERVE_AGENT\",\"prompt\":\"e2e serve 测试\",\"runtime\":\"opencode\",\"project_path\":\"/tmp/e2e-serve-project\"}" 2>/dev/null)
+EXEC_RES=$(server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$SERVE_AGENT\",\"prompt\":\"e2e serve 测试\",\"runtime\":\"opencode\",\"project_path\":\"/tmp/e2e-serve-project\"}" 2>/dev/null)
 assert "按需拉起: 任务已接受" "auto-launch" "$EXEC_RES"
 echo -n "  等待 serve 拉起..."
 wait_until 60 "curl -s $DAEMON_URL/agents 2>/dev/null" "$SERVE_AGENT" || true
@@ -949,9 +1001,8 @@ curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json'
 sleep 1
 
 # 通过 Daemon /execute 直接推送一个带 workflow_id 的任务
-curl -s -X POST "$DAEMON_URL/execute" \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$TRACK_AGENT\",\"workflow_id\":\"wf-track-test\",\"node_id\":\"n1\",\"prompt\":\"跟踪测试\",\"intent\":\"query\"}" >/dev/null 2>&1
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$TRACK_AGENT\",\"workflow_id\":\"wf-track-test\",\"node_id\":\"n1\",\"prompt\":\"跟踪测试\",\"intent\":\"query\"}" >/dev/null 2>&1
 
 # 查 pending — 应该有这个 workflow
 PENDING=$(curl -s "$DAEMON_URL/workflows/pending" 2>/dev/null)
@@ -1011,16 +1062,16 @@ SERIAL_WORKER=$!
 sleep 2  # 等 worker long-poll 建立
 
 # 连续发 3 个任务
-R1=$(curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-1\",\"node_id\":\"n1\",\"prompt\":\"串行任务1\",\"intent\":\"query\"}" 2>/dev/null)
-R2=$(curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-2\",\"node_id\":\"n2\",\"prompt\":\"串行任务2\",\"intent\":\"query\"}" 2>/dev/null)
-R3=$(curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-3\",\"node_id\":\"n3\",\"prompt\":\"串行任务3\",\"intent\":\"query\"}" 2>/dev/null)
+R1=$(server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-1\",\"node_id\":\"n1\",\"prompt\":\"串行任务1\",\"intent\":\"query\"}" 2>/dev/null)
+R2=$(server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-2\",\"node_id\":\"n2\",\"prompt\":\"串行任务2\",\"intent\":\"query\"}" 2>/dev/null)
+R3=$(server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$SERIAL_AGENT\",\"workflow_id\":\"serial-3\",\"node_id\":\"n3\",\"prompt\":\"串行任务3\",\"intent\":\"query\"}" 2>/dev/null)
 
-assert "串行任务1 accepted" "true" "$(echo "$R1" | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
-assert "串行任务2 accepted" "true" "$(echo "$R2" | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
-assert "串行任务3 accepted" "true" "$(echo "$R3" | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
+assert "串行任务1 accepted" "true" "$(echo "$R1" | sed '1d' | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
+assert "串行任务2 accepted" "true" "$(echo "$R2" | sed '1d' | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
+assert "串行任务3 accepted" "true" "$(echo "$R3" | sed '1d' | python3 -c "import json,sys;print(str(json.load(sys.stdin).get('accepted',False)).lower())" 2>/dev/null)"
 
 # 等所有任务执行完（3 个任务各 1s 执行 + poll 间隔）
 sleep 12
@@ -1151,12 +1202,12 @@ curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json'
 sleep 1
 
 # 入队 3 个任务
-curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-1\",\"node_id\":\"n1\",\"prompt\":\"chain task 1\",\"intent\":\"query\"}" >/dev/null 2>&1
-curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-2\",\"node_id\":\"n2\",\"prompt\":\"chain task 2\",\"intent\":\"query\"}" >/dev/null 2>&1
-curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-3\",\"node_id\":\"n3\",\"prompt\":\"chain task 3\",\"intent\":\"query\"}" >/dev/null 2>&1
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-1\",\"node_id\":\"n1\",\"prompt\":\"chain task 1\",\"intent\":\"query\"}" >/dev/null 2>&1
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-2\",\"node_id\":\"n2\",\"prompt\":\"chain task 2\",\"intent\":\"query\"}" >/dev/null 2>&1
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"agent_name\":\"$CC_CHAIN_AGENT\",\"workflow_id\":\"chain-3\",\"node_id\":\"n3\",\"prompt\":\"chain task 3\",\"intent\":\"query\"}" >/dev/null 2>&1
 
 # 模拟 CC: take 第一个
 TAKE1=$(curl -s -X POST "$DAEMON_URL/tasks/take?agent=$CC_CHAIN_AGENT" 2>/dev/null)
@@ -1513,8 +1564,8 @@ DUP_NODE="same-agent-node-001"
 
 curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
   -d "{\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$DUP_PID_1,\"directory\":\"/tmp\"}" >/dev/null 2>&1
-curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"task_id\":\"$DUP_TASK\",\"workflow_id\":\"$DUP_WF\",\"node_id\":\"$DUP_NODE\",\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"title\":\"same agent context test\",\"description\":\"same agent context test\"}" >/dev/null 2>&1
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"task_id\":\"$DUP_TASK\",\"workflow_id\":\"$DUP_WF\",\"node_id\":\"$DUP_NODE\",\"agent_name\":\"$DUP_AGENT\",\"runtime\":\"opencode\",\"title\":\"same agent context test\",\"description\":\"same agent context test\"}" >/dev/null 2>&1
 DUP_WAIT=$(curl -s "$DAEMON_URL/tasks/wait?agent=$DUP_AGENT" 2>/dev/null)
 assert "同名测试任务已分发" "$DUP_TASK" "$DUP_WAIT"
 
@@ -1728,9 +1779,8 @@ wait_until 10 "get_agent_field runtime $CODEX_ATT_AGENT" "codex" || true
 assert "Codex attached runtime" "codex" "$(get_agent_field runtime $CODEX_ATT_AGENT)"
 assert "Codex explicit attached offline" "offline" "$(get_agent_field status $CODEX_ATT_AGENT)"
 
-ATT_EXEC=$(curl -s -w '\nHTTP:%{http_code}' -X POST "$CODEX_ATT_DAEMON/execute" \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"$CODEX_ATT_AGENT\",\"runtime\":\"codex\",\"prompt\":\"should fail attached clearly\"}")
+ATT_EXEC=$(server_signed_fetch "$CODEX_ATT_DAEMON/execute" POST \
+  "{\"agent_name\":\"$CODEX_ATT_AGENT\",\"runtime\":\"codex\",\"prompt\":\"should fail attached clearly\"}")
 assert "Codex attached execute rejected" "HTTP:409" "$ATT_EXEC"
 assert "Codex attached clear error" "attached delivery" "$ATT_EXEC"
 
@@ -2383,12 +2433,40 @@ if should_run 43; then
 echo -e "\n${YELLOW}Case 43: 管理鉴权 + Client 自动注册${NC}"
 
 assert "Server health 匿名可访问" "200" "$(command curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/health")"
-assert "Server 管理 API 拒绝匿名" "401" "$(command curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/agents")"
-assert "Server 管理 API 拒绝错误 Token" "401" "$(command curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-token-value-012345678901234567890' "$E2E_SERVER/api/agents")"
-assert "Server 管理 API 接受 Admin Token" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$E2E_SERVER/api/agents")"
+assert "E2E 具备非 loopback 地址" "true" "$([ -n "$E2E_REMOTE_HOST" ] && echo true || echo false)"
+LOCAL_ACCESS=$(command curl -s "$E2E_SERVER/api/access-context")
+REMOTE_ACCESS=$(command curl --noproxy '*' -s "$E2E_REMOTE_SERVER/api/access-context")
+assert "localhost Dashboard 识别为本机" '"local":true' "$LOCAL_ACCESS"
+assert "localhost Dashboard 具备写权限" '"can_write":true' "$LOCAL_ACCESS"
+assert "LAN Dashboard 识别为远端" '"local":false' "$REMOTE_ACCESS"
+assert "LAN Dashboard 只有只读权限" '"can_write":false' "$REMOTE_ACCESS"
+
+PUBLIC_AGENT_SUMMARY_URL="$E2E_REMOTE_SERVER/api/agents?fields=agent_name,status,runtime,capabilities"
+assert "Agent 安全摘要允许 LAN 匿名查询" "200" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$PUBLIC_AGENT_SUMMARY_URL")"
+assert "LAN Dashboard Agent 看板匿名可读" "200" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/agents?all=true")"
+assert "LAN Dashboard Task 看板匿名可读" "200" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/tasks?limit=80")"
+assert "LAN Dashboard Workflow 看板匿名可读" "200" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/workflows")"
+assert "LAN Dashboard Client 身份摘要匿名可读" "200" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/auth/clients")"
+assert "LAN Dashboard SSE 匿名可订阅" "200" "$(command curl --noproxy '*' -s --max-time 1 -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/events" || true)"
+assert "LAN 匿名 Client 任务轮询被拒绝" "401" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/tasks/poll?agent_name=$AGENT_NAME&user_id=e2e-testuser")"
+
+LOCAL_WORKFLOW_BODY='{"title":"localhost-management-e2e","nodes":[{"id":"n1","agent_name":"missing-localhost-e2e-agent","prompt":"localhost signed dispatch test"}]}'
+assert "localhost 无 Token 可创建 Workflow" "202" "$(command curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' -d "$LOCAL_WORKFLOW_BODY")"
+assert "LAN 匿名不能创建 Workflow" "401" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST "$E2E_REMOTE_SERVER/api/workflows" -H 'Content-Type: application/json' -d "$LOCAL_WORKFLOW_BODY")"
+assert "LAN 错误 Token 不能创建 Workflow" "401" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer wrong-token-value-012345678901234567890' "$E2E_REMOTE_SERVER/api/workflows" -H 'Content-Type: application/json' -d "$LOCAL_WORKFLOW_BODY")"
+assert "LAN Admin Token 也不能创建 Workflow" "401" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $MAF_AUTH_TOKEN" "$E2E_REMOTE_SERVER/api/workflows" -H 'Content-Type: application/json' -d "$LOCAL_WORKFLOW_BODY")"
+assert "LAN Admin Token 不能批准 Client" "401" "$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $MAF_AUTH_TOKEN" "$E2E_REMOTE_SERVER/api/auth/clients/nonexistent/approve")"
+
+assert "Dashboard 不再弹 Access Token" "not_found" "$(command curl -s "$E2E_SERVER/" | rg -o "window\\.prompt\\('MAF access token'\\)" || echo not_found)"
+assert "Dashboard 不再读取 Token" "not_found" "$(command curl -s "$E2E_SERVER/" | rg -o 'AUTH_TOKEN|maf_auth_token' || echo not_found)"
+assert "Dashboard 根据访问来源切换只读" "config.readonly = config.readonlyRequested" "$(command curl -s "$E2E_SERVER/")"
+assert "Dashboard 查询访问上下文" "/api/access-context" "$(command curl -s "$E2E_SERVER/")"
 
 assert "Daemon health 匿名可访问" "200" "$(command curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/health")"
 assert "Daemon 控制 API 拒绝匿名" "401" "$(command curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/status")"
+assert "匿名服务不能向 Daemon 下发任务" "401" "$(command curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' -d '{"agent_name":"test-agent","prompt":"anonymous command"}')"
+assert "本机 Token 不能向 Daemon 下发任务" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' -d '{"agent_name":"test-agent","prompt":"local token command"}')"
+assert "合法 Server 签名通过 Daemon 鉴权" "HTTP:400" "$(server_signed_fetch "$DAEMON_URL/execute" POST '{}')"
 assert "Daemon 控制 API 拒绝错误 Token" "401" "$(command curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-token-value-012345678901234567890' "$DAEMON_URL/status")"
 assert "Daemon 控制 API 接受本机 Token" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$DAEMON_URL/status")"
 
@@ -2443,7 +2521,32 @@ assert "Enrollment nonce 防重放" "200,401" "$ENROLL_REPLAY"
 
 SIGNED_POLL=$(client_signed_fetch "$E2E_SERVER/api/tasks/poll?agent_name=$AGENT_NAME&user_id=e2e-testuser")
 assert "Client 签名可访问 Client API" "HTTP:200" "$SIGNED_POLL"
-SIGNED_ADMIN=$(client_signed_fetch "$E2E_SERVER/api/agents")
+assert "Task poll 响应具有有效 Server 签名" "SERVER_SIGNATURE_VALID:true" "$SIGNED_POLL"
+
+POLL_AUTH_AGENT="poll-signature-agent-$$"
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$POLL_AUTH_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$$,\"directory\":\"/tmp\",\"user_id\":\"e2e-testuser\"}" >/dev/null
+wait_until 10 "get_agent_field status $POLL_AUTH_AGENT" "online" || true
+cp "$E2E_USER_HOME/.meta-agent-framework/auth/server-public.pem" \
+  "$E2E_USER_HOME/.meta-agent-framework/auth/server-public.pem.e2e-backup"
+cp "$E2E_USER_HOME/.meta-agent-framework/auth/client-public.pem" \
+  "$E2E_USER_HOME/.meta-agent-framework/auth/server-public.pem"
+POLL_TASK=$(command curl -s -X POST "$E2E_SERVER/api/tasks" -H 'Content-Type: application/json' \
+  -d '{"type":"custom","title":"poll response signature e2e","description":"must require Server signature"}')
+POLL_TASK_ID=$(echo "$POLL_TASK" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
+command curl -s -X POST "$E2E_SERVER/api/tasks/$POLL_TASK_ID/dispatch" -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"$POLL_AUTH_AGENT\"}" >/dev/null
+sleep 2
+POLL_REJECTED_QUEUE=$(curl -s "$DAEMON_URL/tasks/pending?agent=$POLL_AUTH_AGENT")
+assert "Daemon 拒绝错误 Server 公钥签名的 poll 任务" "not_found" \
+  "$(echo "$POLL_REJECTED_QUEUE" | rg -o "$POLL_TASK_ID" || echo not_found)"
+mv "$E2E_USER_HOME/.meta-agent-framework/auth/server-public.pem.e2e-backup" \
+  "$E2E_USER_HOME/.meta-agent-framework/auth/server-public.pem"
+wait_until 10 "curl -s '$DAEMON_URL/tasks/pending?agent=$POLL_AUTH_AGENT'" "$POLL_TASK_ID" || true
+assert "Daemon 恢复正确 Server 公钥后接收 poll 任务" "$POLL_TASK_ID" \
+  "$(curl -s "$DAEMON_URL/tasks/pending?agent=$POLL_AUTH_AGENT")"
+
+SIGNED_ADMIN=$(client_signed_fetch "$E2E_SERVER/api/clients")
 assert "Client 签名不能访问管理 API" "HTTP:403" "$SIGNED_ADMIN"
 assert "旧 pairing 接口已移除" "404" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/auth/pair")"
 assert "安装器不要求配对码" "not_found" "$(rg -o 'MAF_PAIRING_CODE|Pairing Code|配对码' "$SCRIPT_DIR/plugins/install.sh" "$ROOT_DIR/packages/client/bin/maf-install.mjs" 2>/dev/null || echo not_found)"
@@ -2489,8 +2592,8 @@ curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json'
   -d "{\"agent_name\":\"$STRICT_AGENT\",\"runtime\":\"claude-code\",\"directory\":\"/tmp\",\"user_id\":\"e2e-testuser\"}" >/dev/null
 wait_until 10 "get_agent_field status $STRICT_AGENT" "online" || true
 
-curl -s -X POST "$DAEMON_URL/execute" -H 'Content-Type: application/json' \
-  -d "{\"task_id\":\"strict-task-1\",\"agent_name\":\"$STRICT_AGENT\",\"runtime\":\"claude-code\",\"prompt\":\"strict task id test\"}" >/dev/null
+server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"task_id\":\"strict-task-1\",\"agent_name\":\"$STRICT_AGENT\",\"runtime\":\"claude-code\",\"prompt\":\"strict task id test\"}" >/dev/null
 TAKEN=$(curl -s -X POST "$DAEMON_URL/tasks/take?agent=$STRICT_AGENT")
 assert "严格校验测试任务已领取" "strict-task-1" "$TAKEN"
 assert "错误 task_id 返回 409" "409" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/tasks/done" -H 'Content-Type: application/json' -d "{\"agent_name\":\"$STRICT_AGENT\",\"task_id\":\"wrong-task\",\"status\":\"completed\",\"result\":\"bad\"}")"

@@ -22,6 +22,7 @@ import {
   ensureServerIdentity,
   getAuthToken,
   getServerPublicKey,
+  isLoopbackRequest,
   requestRawBody,
   requireAdminAuth,
   requireApiAuth,
@@ -135,6 +136,13 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// Dashboard 用它决定是否显示本机管理操作。该结果只用于 UI；真正权限仍由
+// requireApiAuth 基于 socket.remoteAddress 强制执行。
+app.get('/api/access-context', (req, res) => {
+  const local = isLoopbackRequest(req);
+  res.json({ local, can_write: local });
+});
+
 // Client 首次上线提交本机公钥及持有证明。私网/VPN来源默认自动准入；
 // 其他来源持久化为 pending，不依赖短期配对码。
 app.post('/api/auth/enroll', (req, res) => {
@@ -171,10 +179,13 @@ app.post('/api/auth/enroll', (req, res) => {
   }
 });
 
-// 管理调用使用本机 Admin Bearer；Client 调用使用机器密钥签名并受路径白名单限制。
+// localhost 是本机管理面；Dashboard 固定 GET/SSE 通路允许远端匿名只读；
+// Client 取任务/回报等调用使用机器密钥签名并受路径白名单限制。
 app.use('/api', requireApiAuth);
 
-app.get('/api/auth/clients', requireAdminAuth, (_req, res) => {
+// 身份摘要供远端只读 Dashboard 展示；list() 不返回 Client 公钥。
+// approve/revoke 仍由下面的 requireAdminAuth 限制为 localhost 管理请求。
+app.get('/api/auth/clients', (_req, res) => {
   res.json(clientIdentityService.list());
 });
 

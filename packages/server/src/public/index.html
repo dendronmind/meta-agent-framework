@@ -532,7 +532,8 @@
     const config = {
       embedded: params.get('embed') === '1' || location.pathname.startsWith('/embed'),
       compact: params.get('compact') === '1' || params.get('compact') === 'true',
-      readonly: params.get('readonly') === '1' || params.get('readonly') === 'true',
+      readonlyRequested: params.get('readonly') === '1' || params.get('readonly') === 'true',
+      readonly: true,
       theme: params.get('theme') || 'dark',
       workflowId: params.get('workflow_id') || params.get('workflow') || '',
       agentName: params.get('agent_name') || params.get('agent') || '',
@@ -550,6 +551,7 @@
 
     const state = {
       lang: detectLang(),
+      accessContext: { local: false, can_write: false },
       health: null,
       agents: [], tasks: [], workflows: [], sessions: [], inventory: null, otaStatus: null, evolveResults: [], clientIdentities: [], events: [],
       selectedWorkflowId: config.workflowId || null,
@@ -557,26 +559,6 @@
       lastError: '',
       masSubmit: { busy: false, status: '', message: '' },
     };
-
-    function resolveAuthToken() {
-      const fromHash = new URLSearchParams(location.hash.replace(/^#/, '')).get('token') || '';
-      if (fromHash) {
-        try { sessionStorage.setItem('maf_auth_token', fromHash); } catch {}
-        history.replaceState(null, '', `${location.pathname}${location.search}`);
-        return fromHash;
-      }
-      try {
-        const stored = sessionStorage.getItem('maf_auth_token');
-        if (stored) return stored;
-      } catch {}
-      const entered = window.prompt('MAF access token') || '';
-      if (entered) {
-        try { sessionStorage.setItem('maf_auth_token', entered); } catch {}
-      }
-      return entered;
-    }
-    const AUTH_TOKEN = resolveAuthToken();
-    const authHeaders = (headers = {}) => ({ ...headers, Authorization: `Bearer ${AUTH_TOKEN}` });
 
     function $(id) { return document.getElementById(id); }
     function t(key) { return I18N[state.lang]?.[key] ?? I18N.en[key] ?? key; }
@@ -624,7 +606,7 @@
 
     async function apiGet(path, fallback) {
       try {
-        const res = await fetch(`${API}${path}`, { cache: 'no-store', headers: authHeaders() });
+        const res = await fetch(`${API}${path}`, { cache: 'no-store' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (err) {
@@ -636,7 +618,7 @@
     async function apiPost(path, payload) {
       const res = await fetch(`${API}${path}`, {
         method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const text = await res.text();
@@ -682,8 +664,9 @@
     }
 
     async function refreshAll() {
-      const [health, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults, clientIdentities] = await Promise.all([
+      const [health, accessContext, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults, clientIdentities] = await Promise.all([
         apiGet('/api/health', null),
+        apiGet('/api/access-context', { local: false, can_write: false }),
         apiGet('/api/agents?all=true', []),
         apiGet('/api/tasks?limit=80', []),
         apiGet('/api/workflows', []),
@@ -695,6 +678,8 @@
       ]);
 
       state.health = health;
+      state.accessContext = accessContext || { local: false, can_write: false };
+      config.readonly = config.readonlyRequested || !Boolean(state.accessContext.can_write);
       state.agents = Array.isArray(agents) ? agents : [];
       state.tasks = Array.isArray(tasks) ? tasks : [];
       state.workflows = Array.isArray(workflows) ? workflows : [];
@@ -1151,7 +1136,7 @@
     async function connectSSE() {
       try {
         const res = await fetch(`${API}/api/events`, {
-          headers: authHeaders({ Accept: 'text/event-stream' }),
+          headers: { Accept: 'text/event-stream' },
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
         $('sse-dot').className = 'dot green';

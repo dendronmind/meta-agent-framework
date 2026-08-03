@@ -166,13 +166,19 @@ function clientAuthHeaders(method, url, body = "", headers = {}) {
 let enrollmentStatus = "unknown";
 const serverNonces = new Map();
 
-function serverSignatureAuthorized(req, body = Buffer.alloc(0)) {
+function headerValue(headers, name) {
+  if (typeof headers?.get === "function") return String(headers.get(name) || "");
+  return String(headers?.[name.toLowerCase()] || headers?.[name] || "");
+}
+
+function serverMessageAuthorized(headers, method, target, body = Buffer.alloc(0)) {
   if (enrollmentStatus !== "active") return false;
   const publicKey = readText(SERVER_PUBLIC_KEY_FILE);
-  if (!publicKey || String(req.headers["x-maf-role"] || "") !== "server") return false;
-  const timestamp = String(req.headers["x-maf-timestamp"] || "");
-  const nonce = String(req.headers["x-maf-nonce"] || "");
-  const signature = String(req.headers["x-maf-signature"] || "");
+  if (!publicKey || headerValue(headers, "x-maf-role") !== "server"
+      || headerValue(headers, "x-maf-id") !== "maf-server") return false;
+  const timestamp = headerValue(headers, "x-maf-timestamp");
+  const nonce = headerValue(headers, "x-maf-nonce");
+  const signature = headerValue(headers, "x-maf-signature");
   const now = Date.now();
   const timestampMs = Number(timestamp);
   if (!Number.isFinite(timestampMs) || Math.abs(now - timestampMs) > 60_000) return false;
@@ -183,7 +189,7 @@ function serverSignatureAuthorized(req, body = Buffer.alloc(0)) {
   try {
     const ok = verify(
       null,
-      canonicalRequest(req.method, req.url, timestamp, nonce, body),
+      canonicalRequest(method, target, timestamp, nonce, body),
       publicKey,
       Buffer.from(signature, "base64url"),
     );
@@ -192,6 +198,10 @@ function serverSignatureAuthorized(req, body = Buffer.alloc(0)) {
   } catch {
     return false;
   }
+}
+
+function serverSignatureAuthorized(req, body = Buffer.alloc(0)) {
+  return serverMessageAuthorized(req.headers, req.method, req.url, body);
 }
 
 function requestAuthorized(req, body = Buffer.alloc(0)) {
@@ -1625,7 +1635,12 @@ async function pollTasks() {
       const url = `${META_AGENT_SERVER}/api/tasks/poll?agent_name=${encodeURIComponent(name)}&user_id=${encodeURIComponent(userId)}`;
       const res = await fetch(url, { headers: clientAuthHeaders("GET", url), signal: AbortSignal.timeout(5000) });
       if (!res.ok) continue;
-      const data = await res.json();
+      const responseBody = await res.text();
+      if (!serverMessageAuthorized(res.headers, "GET", url, responseBody)) {
+        log(`⛔ 拒绝未签名的 Server 轮询响应: ${name}`);
+        continue;
+      }
+      const data = JSON.parse(responseBody);
       if (!data.has_task) continue;
       log(`📥 轮询到任务: "${data.task.title}" → ${name}`);
       const task = {
@@ -1907,7 +1922,10 @@ const httpServer = createServer(async (req, res) => {
   const signedBody = String(req.headers["x-maf-role"] || "") === "server"
     ? await readRawBody()
     : Buffer.alloc(0);
-  if (!requestAuthorized(req, signedBody)) {
+  const authorized = req.method === "POST" && pathname === "/execute"
+    ? serverSignatureAuthorized(req, signedBody)
+    : requestAuthorized(req, signedBody);
+  if (!authorized) {
     json(401, { error: "Unauthorized" });
     return;
   }

@@ -99,6 +99,11 @@ function tokenMatches(actual: string, expected: string): boolean {
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+export function isLoopbackRequest(req: Request): boolean {
+  const address = String(req.socket.remoteAddress || '').toLowerCase();
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 function rawBody(req: Request): Buffer {
   return (req as Request & { rawBody?: Buffer }).rawBody || Buffer.alloc(0);
 }
@@ -129,51 +134,89 @@ function clientPathAllowed(req: Request): boolean {
   return false;
 }
 
+const PUBLIC_DASHBOARD_READ_PATHS = new Set([
+  '/api/agents',
+  '/api/agents/inventory',
+  '/api/auth/clients',
+  '/api/events',
+  '/api/evolve',
+  '/api/ota/status',
+  '/api/tasks',
+  '/api/workflows',
+  '/api/workflows/mas/sessions',
+]);
+
+function publicDashboardReadAllowed(req: Request): boolean {
+  if (req.method.toUpperCase() !== 'GET') return false;
+  const url = new URL(req.originalUrl, 'http://maf.local');
+  return PUBLIC_DASHBOARD_READ_PATHS.has(url.pathname);
+}
+
 export const requireApiAuth: RequestHandler = (req, res, next) => {
-  const bearer = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
-  if (bearer && tokenMatches(bearer[1], getAuthToken())) {
-    res.locals.mafPrincipal = { role: 'admin', id: 'maf-server' };
+  const role = req.get('x-maf-role') || '';
+  const clientId = req.get('x-maf-id') || '';
+  if (role === 'client') {
+    const timestamp = req.get('x-maf-timestamp') || '';
+    const nonce = req.get('x-maf-nonce') || '';
+    const signature = req.get('x-maf-signature') || '';
+    const identity = clientIdentityService.get(clientId);
+    const verified = identity?.status === 'active'
+      && verifySignedRequest(identity.public_key, req.method, req.originalUrl, rawBody(req), timestamp, nonce, signature)
+      && acceptSignedNonce(`client:${clientId}`, nonce, timestamp);
+    if (!verified) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (!clientPathAllowed(req)) {
+      res.status(403).json({ error: 'Client credential is not allowed for this endpoint' });
+      return;
+    }
+    const apiPath = new URL(req.originalUrl, 'http://maf.local').pathname.replace(/^\/api/, '');
+    if (/^\/clients\/(register|heartbeat|sync)$/.test(apiPath) && req.body?.client_id !== clientId) {
+      res.status(403).json({ error: 'Client identity mismatch' });
+      return;
+    }
+    if (/^\/clients\/(register|heartbeat|sync)$/.test(apiPath)
+        && ((identity.user_id && req.body?.user_id !== identity.user_id)
+          || (identity.host_user && String(req.body?.host_user || '') !== identity.host_user))) {
+      res.status(403).json({ error: 'Client machine metadata mismatch' });
+      return;
+    }
+    if (apiPath === '/clients/my-agents'
+        && ((identity.user_id && req.query.user_id !== identity.user_id)
+          || (identity.host_user && String(req.query.host_user || '') !== identity.host_user))) {
+      res.status(403).json({ error: 'Client machine metadata mismatch' });
+      return;
+    }
+    clientIdentityService.touch(clientId);
+    res.locals.mafPrincipal = { role: 'client', id: clientId };
     next();
     return;
   }
 
-  const role = req.get('x-maf-role') || '';
-  const clientId = req.get('x-maf-id') || '';
-  const timestamp = req.get('x-maf-timestamp') || '';
-  const nonce = req.get('x-maf-nonce') || '';
-  const signature = req.get('x-maf-signature') || '';
-  const identity = role === 'client' ? clientIdentityService.get(clientId) : undefined;
-  const verified = identity?.status === 'active'
-    && verifySignedRequest(identity.public_key, req.method, req.originalUrl, rawBody(req), timestamp, nonce, signature)
-    && acceptSignedNonce(`client:${clientId}`, nonce, timestamp);
-  if (!verified) {
-    res.status(401).json({ error: 'Unauthorized' });
+  // Only processes on the Server machine receive management authority without a token.
+  // socket.remoteAddress is used deliberately; forwarded headers are not trusted.
+  if (isLoopbackRequest(req)) {
+    res.locals.mafPrincipal = { role: 'admin', id: 'maf-server-local' };
+    next();
     return;
   }
-  if (!clientPathAllowed(req)) {
-    res.status(403).json({ error: 'Client credential is not allowed for this endpoint' });
+
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
+  if (req.method.toUpperCase() === 'GET' && bearer && tokenMatches(bearer[1], getAuthToken())) {
+    res.locals.mafPrincipal = { role: 'admin', id: 'maf-server-readonly' };
+    next();
     return;
   }
-  const apiPath = new URL(req.originalUrl, 'http://maf.local').pathname.replace(/^\/api/, '');
-  if (/^\/clients\/(register|heartbeat|sync)$/.test(apiPath) && req.body?.client_id !== clientId) {
-    res.status(403).json({ error: 'Client identity mismatch' });
+
+  // Remote dashboards are public and read-only. Client task polling, machine
+  // configuration reads, and every mutating endpoint remain authenticated.
+  if (publicDashboardReadAllowed(req)) {
+    next();
     return;
   }
-  if (/^\/clients\/(register|heartbeat|sync)$/.test(apiPath)
-      && ((identity.user_id && req.body?.user_id !== identity.user_id)
-        || (identity.host_user && String(req.body?.host_user || '') !== identity.host_user))) {
-    res.status(403).json({ error: 'Client machine metadata mismatch' });
-    return;
-  }
-  if (apiPath === '/clients/my-agents'
-      && ((identity.user_id && req.query.user_id !== identity.user_id)
-        || (identity.host_user && String(req.query.host_user || '') !== identity.host_user))) {
-    res.status(403).json({ error: 'Client machine metadata mismatch' });
-    return;
-  }
-  clientIdentityService.touch(clientId);
-  res.locals.mafPrincipal = { role: 'client', id: clientId };
-  next();
+
+  res.status(401).json({ error: 'Local Server access or Client signature required' });
 };
 
 export const requireAdminAuth: RequestHandler = (_req, res, next) => {

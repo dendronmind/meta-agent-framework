@@ -4,13 +4,14 @@ Base URL: `http://localhost:3000`（默认端口，实际以 `~/.meta-agent-fram
 
 Daemon URL: `http://127.0.0.1:4100`（默认端口，实际以配置中 `daemon.port` 为准）
 
-鉴权：除 `/api/health` 外，Server 管理 API 使用 `Authorization: Bearer $MAF_AUTH_TOKEN`。该变量由 `maf-server` 注入本机 Server runtime；不得下发给 Client。Client 与 Server 的内部通信由 Node Daemon 自动使用机器密钥签名，Agent 不手工构造签名。
+鉴权：Dashboard 不登录、不读取 Access Token。通过 `localhost` / `127.0.0.1` / `::1` 访问时具备管理写权限；通过 LAN/VPN 地址访问时只能匿名读取 Dashboard 固定 GET/SSE 通路。Server 只依据 TCP 对端 `socket.remoteAddress` 判断本机，不信任 Host、Origin 或转发 Header。远端即使携带 Admin Bearer 也不能执行写操作。Client 的任务领取、机器配置读取和结果回报由 Client 机器密钥签名；Server 下发到 Daemon 的任务由 Server Ed25519 密钥签名，Agent 不手工构造签名。
 
 ## Server API
 
 | 操作 | 方法 | 端点 | 返回关键字段 |
 |------|------|------|-------------|
-| 查看所有 Agent | GET | `/api/agents` | 全量字段；支持 `?fields=agent_name,status,runtime` 逗号过滤 |
+| 查看所有 Agent | GET | `/api/agents` | Dashboard 只读接口，允许匿名；支持 `?fields=...` 和 `?all=true` |
+| Dashboard 访问上下文 | GET | `/api/access-context` | `{local, can_write}`；仅供 UI 展示，Server 仍独立强制鉴权 |
 | 删除 Agent | DELETE | `/api/agents/<id>` | 被删除的 agent 对象（404 如不存在） |
 | 搜索 Agent | GET | `/api/agents/search?q=关键词` | 按 capabilities/agent_name 模糊匹配 |
 | 按用户查 Agent | GET | `/api/agents/by-user/<user_id>` | 该用户的所有 agent |
@@ -99,7 +100,7 @@ Evolve cookbook 见 `common_agent/rules/evolve-guide.md`。
 | 健康检查 | GET | `/health` | `{ok, agents, version, server}` |
 | 查看管理的 agent | GET | `/agents` | `{agents: [{agent_name, runtime, lastSeen}]}` |
 
-`/health` 匿名；其余 Daemon API 使用本机 `Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)`。Server 调 Daemon 时由框架自动使用 Server 机器签名。
+`/health` 匿名；Plugin/Hook 调本机 Daemon 的进程间接口时使用 `Authorization: Bearer $(cat ~/.meta-agent-framework/auth/local-token)`。任务入口 `POST /execute` 是例外：它只接受 `X-MAF-Role: server`、`X-MAF-ID: maf-server` 和有效 Server Ed25519 签名，本机 `local-token` 也不能下发任务。Workflow 统一通过该签名入口派发；旧 `/api/tasks/poll` 的响应同样由 Server 签名，Client 验签通过后才入队。
 
 ## Agent 状态字段
 

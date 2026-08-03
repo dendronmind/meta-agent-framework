@@ -518,7 +518,6 @@ export class WorkflowEngine {
     }
 
     try {
-      // 尝试两种派发模式
       const dispatched = await this.dispatchToEndpoint(agent, workflow, node, fullPrompt, agentSessionId);
       if (!dispatched) return; // dispatchToEndpoint 内部已处理失败
 
@@ -553,17 +552,7 @@ export class WorkflowEngine {
     }
   }
 
-  /**
-   * 向端点派发任务（自动检测模式）
-   *
-   * 模式 1 — opencode HTTP API（plugin 注册的实例）
-   *   端点有 /session 接口 → 创建 session → 通过 prompt_async 下发
-   *   Plugin 的 event hook 会在 session idle 时自动回报结果
-   *
-   * 模式 2 — Client /execute（join.sh 注册的传统 Client）
-   *   端点有 /execute 接口 → 传统推送模式
-   *   Client 的 executeWorkflowNode 处理执行和回报
-   */
+  /** 所有远端任务统一通过带 Server Ed25519 签名的 Daemon /execute 下发。 */
   private async dispatchToEndpoint(
     agent: Agent,
     workflow: Workflow,
@@ -571,108 +560,10 @@ export class WorkflowEngine {
     prompt: string,
     sessionId?: string,
   ): Promise<boolean> {
-    const endpoint = agent.client_endpoint;
-
-    // 先尝试 opencode HTTP API 模式：探测 /session 端点
-    try {
-      const probe = await fetch(`${endpoint}/session`, {
-        signal: AbortSignal.timeout(3_000),
-      });
-      if (probe.ok) {
-        // opencode 实例 → 用 HTTP API 派发
-        return await this.dispatchViaOpencodeAPI(agent, workflow, node, prompt, sessionId);
-      }
-    } catch {
-      // /session 不可用，不是 opencode 实例
-    }
-
-    // 降级到传统 Client /execute 模式
     return await this.dispatchViaClientExecute(agent, workflow, node, prompt, sessionId);
   }
 
-  /**
-   * 模式 1：通过 opencode HTTP API 派发
-   *
-   * 1. 创建 session（或复用已有）
-   * 2. prompt_async 异步下发任务
-   * 3. Plugin 的 event hook 自动在 session idle 时回报结果
-   */
-  private async dispatchViaOpencodeAPI(
-    agent: Agent,
-    workflow: Workflow,
-    node: WorkflowNode,
-    prompt: string,
-    sessionId?: string,
-  ): Promise<boolean> {
-    const endpoint = agent.client_endpoint;
-    console.log(`[Workflow] 📡 opencode API 模式: ${endpoint}`);
-
-    try {
-      // 1. 创建或复用 session
-      let sid = sessionId;
-      if (!sid) {
-        const createBody = JSON.stringify({ directory: agent.project_path || undefined });
-        const createRes = await fetch(`${endpoint}/session`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: createBody,
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!createRes.ok) throw new Error(`创建 session 失败: HTTP ${createRes.status}`);
-        const sessionData = await createRes.json() as any;
-        sid = sessionData.id;
-        console.log(`[Workflow]    session 创建: ${sid}`);
-      }
-
-      // 缓存 session ID
-      if (!workflowAgentSessions.has(workflow.id)) {
-        workflowAgentSessions.set(workflow.id, {});
-      }
-      workflowAgentSessions.get(workflow.id)![node.agent_name] = sid!;
-
-      // 2. 更新 session title 带上 meta-agent 标记（Plugin 用来识别）
-      try {
-        const titleBody = JSON.stringify({
-          title: `[meta-agent:${workflow.id}:${node.id}:${node.execution_id}] ${prompt.slice(0, 80)}`,
-        });
-        await fetch(`${endpoint}/session/${sid}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: titleBody,
-          signal: AbortSignal.timeout(5_000),
-        });
-      } catch {
-        // title 更新失败不影响主流程
-      }
-
-      // 3. 异步下发任务
-      const promptBody = JSON.stringify({
-        parts: [{ type: 'text', text: prompt }],
-        agent: node.agent_name,
-      });
-      const promptRes = await fetch(`${endpoint}/session/${sid}/prompt_async`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: promptBody,
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      if (!promptRes.ok && promptRes.status !== 204) {
-        throw new Error(`prompt_async 失败: HTTP ${promptRes.status}`);
-      }
-
-      console.log(`[Workflow]    ✅ 任务已下发到 opencode (session: ${sid})`);
-      return true;
-    } catch (err: any) {
-      console.error(`[Workflow]    ❌ opencode API 失败: ${err.message}，尝试 Client 模式`);
-      // 降级到 Client 模式
-      return await this.dispatchViaClientExecute(agent, workflow, node, prompt, sessionId);
-    }
-  }
-
-  /**
-   * 模式 2：通过传统 Client /execute 派发（join.sh 模式）
-   */
+  /** 通过 Node Daemon /execute 派发。 */
   private async dispatchViaClientExecute(
     agent: Agent,
     workflow: Workflow,
