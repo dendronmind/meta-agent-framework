@@ -42,7 +42,7 @@
 - **按需拉起** — Agent 离线时 Daemon 自动通过 screen 拉起 TUI 执行
 - **三 Runtime** — 支持 [opencode](https://opencode.ai)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code) 和 [Codex CLI](https://github.com/openai/codex)
 - **任务队列** — 连续多任务串行执行，不丢不乱
-- **OTA 热更新** — Plugin 代码远程更新，Daemon 自重启，零停机
+- **全 Client OTA** — 自动同步 Daemon、OpenCode、Claude Code 与 Codex 运行组件，按 bundle hash 校验并由 Daemon 自恢复
 
 ## 快速开始
 

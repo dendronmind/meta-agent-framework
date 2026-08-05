@@ -10,11 +10,11 @@ bash scripts/poll-workflow.sh <workflow_id>
 
 脚本使用 **long-poll 模式**（`?wait=true`）：
 - Server hold 连接直到工作流完成，零轮询延迟
-- 每轮最多等 55 秒，超时自动发起下一轮
-- 默认最多 8 轮（~7 分钟总时限）
+- 每轮最多等 10 秒，超时自动发起下一轮
+- 默认最多 360 轮（约 60 分钟总时限）
 - 完成时打印结果，失败时打印错误，超时时提示
 
-可选参数：`bash scripts/poll-workflow.sh <id> [timeout_per_poll=55] [max_retries=8]`
+可选参数：`bash scripts/poll-workflow.sh <id> [timeout_per_poll=10] [max_retries=360]`
 
 ## 失败处理
 

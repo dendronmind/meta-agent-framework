@@ -46,8 +46,8 @@ export interface ClientRegisterPayload {
   host_user: string;               // 宿主机用户名，如 mi
   client_endpoint: string;         // http://ip:port
   agents: AgentInfo[];             // 该用户的所有 agent
-  client_version?: string;         // Client（Plugin）版本号
-  plugin_hash?: string;            // Plugin index.js 的 content hash
+  client_version?: string;         // Client bundle 版本号
+  plugin_hash?: string;            // Client OTA bundle hash（字段名保留向后兼容）
   daemon_port?: number;            // Daemon HTTP 端口
 }
 
@@ -95,8 +95,8 @@ export interface Agent {
   runtime: AgentRuntime;           // 运行时：opencode / claude-code / codex
   skills: string;                  // JSON 字符串: SkillInfo[]
   mcps: string;                    // JSON 字符串: McpInfo[]
-  client_version: string;          // Client（Plugin）版本号
-  plugin_hash: string;             // Plugin index.js content hash
+  client_version: string;          // Client bundle 版本号
+  plugin_hash: string;             // Client OTA bundle hash（字段名保留向后兼容）
   daemon_port: number;             // Daemon HTTP 端口
   registered_at: string;
 }
@@ -106,8 +106,8 @@ export interface HeartbeatPayload {
   agent_statuses?: Record<string, AgentStatus>;  // agent_name → status
   /** 增量更新 agent 的 skills/mcps（进化后、配置变更后） */
   agent_inventory?: Record<string, { skills?: SkillInfo[]; mcps?: McpInfo[] }>;
-  client_version?: string;         // Client（Plugin）版本号
-  plugin_hash?: string;            // Plugin index.js 的 content hash
+  client_version?: string;         // Client bundle 版本号
+  plugin_hash?: string;            // Client OTA bundle hash（字段名保留向后兼容）
   daemon_port?: number;            // Daemon HTTP 端口
 }
 

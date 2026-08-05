@@ -19,14 +19,15 @@
  *   MAF_DIRECTORY      — 工作目录
  *   MAF_PLUGIN_DIR     — Plugin 安装目录
  *   MAF_PARENT_PID     — 仅 Claude Code 首次拉起时使用（不再跟随退出）
- *   MAF_CODEX_DELIVERY  — Codex 投递语义：auto（默认）| attached | detached
+ *   MAF_CODEX_DELIVERY  — Codex 投递语义：detached（默认）| attached | auto
  */
 
 import { createServer } from "node:http";
 import { spawn, execSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { homedir, hostname, userInfo, networkInterfaces } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   createHash,
   createPublicKey,
@@ -115,7 +116,9 @@ const MACHINE_IDENTITY = ensureMachineIdentity();
 
 const NODE_PORT = parseInt(process.env.MAF_NODE_PORT || "0") || parseInt(process.env.MAF_DAEMON_PORT || "0") || _mafCfg.daemon?.port || 4100;
 const DIRECTORY = process.env.MAF_DIRECTORY || process.cwd();
-const PLUGIN_DIR = process.env.MAF_PLUGIN_DIR || dirname(new URL(import.meta.url).pathname);
+const DAEMON_FILE = fileURLToPath(import.meta.url);
+const DAEMON_DIR = dirname(DAEMON_FILE);
+const PLUGIN_DIR = process.env.MAF_PLUGIN_DIR || DAEMON_DIR;
 const META_AGENT_SERVER = process.env.META_AGENT_SERVER || _mafCfg.server?.url || "";
 const LOCAL_AUTH_TOKEN = String(
   process.env.MAF_LOCAL_TOKEN
@@ -226,7 +229,7 @@ function readVersionFromPackageTree(startDir) {
   }
 }
 
-const CLIENT_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(PLUGIN_DIR) || "0.0.0";
+const CLIENT_VERSION = process.env.MAF_VERSION || readVersionFromPackageTree(DAEMON_DIR) || readVersionFromPackageTree(PLUGIN_DIR) || "0.0.0";
 const HEARTBEAT_INTERVAL = 1_000;
 const POLL_INTERVAL = 1_000;
 const SERVER_AGENT_NAME = "Meta-Agent-Server";
@@ -289,6 +292,27 @@ function fileHash(path) {
   try { return createHash("sha256").update(readFileSync(path, "utf-8")).digest("hex").substring(0, 16); } catch { return ""; }
 }
 
+function expandHomePath(path) {
+  return resolve(String(path || "").replace(/^~(?=\/|$)/, homedir()));
+}
+
+function currentClientBundleHash() {
+  const manifestPath = join(STATE_DIR, "ota-manifest.json");
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    if (!/^[a-f0-9]{16}$/.test(String(manifest.bundle_hash || "")) || !Array.isArray(manifest.assets)) return "";
+    const complete = manifest.assets.every(asset =>
+      asset && typeof asset.path === "string" && /^[a-f0-9]{16}$/.test(String(asset.hash || ""))
+      && fileHash(expandHomePath(asset.path)) === asset.hash
+    );
+    if (complete) return manifest.bundle_hash;
+  } catch {}
+  // Backward-compatible signal for Servers that still understand plugin_hash
+  // as the OpenCode entry hash. A full OTA replaces it with the bundle hash.
+  return fileHash(join(homedir(), ".config", "opencode", "plugins", "opencode-plugin-meta-agent-framework", "index.js"))
+    || fileHash(join(PLUGIN_DIR, "index.js"));
+}
+
 function detectUserId() {
   if (process.env.MAF_USER_ID) return process.env.MAF_USER_ID;
   try {
@@ -296,7 +320,8 @@ function detectUserId() {
   } catch { return userInfo().username; }
 }
 
-const DAEMON_SELF_HASH = fileHash(join(PLUGIN_DIR, "daemon.mjs"));
+const DAEMON_SELF_HASH = fileHash(DAEMON_FILE);
+let CLIENT_BUNDLE_HASH = currentClientBundleHash();
 
 // ============================================================
 // Agent Manager — 管理本机所有 agent
@@ -322,20 +347,21 @@ let lastInventoryFP = "";
 const AGENT_ALIVE_TIMEOUT = 5_000;  // 5s（long-poll 2s 周期 × 2 + 裕量）
 
 const MAX_QUEUE_SIZE = 10;
-const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 330_000;
+const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 45 * 60_000;
 const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
-const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "auto");
+const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "detached");
 const codexQueueRunners = new Set();
 const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
 
 function normalizeCodexDelivery(value) {
-  const v = String(value || "attached").trim().toLowerCase();
+  const v = String(value || "detached").trim().toLowerCase();
   if (["detached", "screen", "tui", "daemon", "offline"].includes(v)) return "detached";
   if (["auto", "fallback"].includes(v)) return "auto";
-  return "attached";
+  if (["attached", "current", "foreground"].includes(v)) return "attached";
+  return "detached";
 }
 
 function codexDeliveryForTask(task = {}) {
@@ -440,7 +466,7 @@ function getAgentStatuses() {
   for (const [name, info] of agents) {
     const q = taskQueues.get(name);
 
-    // Codex：默认 auto 语义下，有 attached receiver 就注入当前 TUI；否则由 Daemon 通过 screen/exec 兜底执行。
+    // Codex：默认 detached，由 Daemon 通过 screen/exec 后台执行；只有显式 attached 才注入当前 TUI。
     // 只有显式 attached 时，才要求当前 TUI 接收器在线。
     if (info.runtime === "codex") {
       if (q?.executingTaskId) {
@@ -1007,7 +1033,7 @@ async function registerToServer() {
       agents: agentDefs,
       agent_statuses: getAgentStatuses(),
       client_version: CLIENT_VERSION,
-      plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+      plugin_hash: CLIENT_BUNDLE_HASH,
       daemon_port: parseInt(daemonUrl.split(":").pop()),
     });
     const res = await fetch(url, {
@@ -1054,7 +1080,7 @@ async function heartbeat() {
       host_user: hostUser,
       agent_statuses: getAgentStatuses(),
       client_version: CLIENT_VERSION,
-      plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+      plugin_hash: CLIENT_BUNDLE_HASH,
       daemon_port: parseInt(daemonUrl.split(":").pop()),
     };
 
@@ -1097,7 +1123,7 @@ async function reportAgentStatusToServer(agentName, status) {
       host_user: hostUser,
       agent_statuses: { [agentName]: status },
       client_version: CLIENT_VERSION,
-      plugin_hash: fileHash(join(PLUGIN_DIR, "index.js")),
+      plugin_hash: CLIENT_BUNDLE_HASH,
       daemon_port: parseInt(daemonUrl.split(":").pop()),
     });
     const res = await fetch(url, {
@@ -1659,6 +1685,83 @@ async function pollTasks() {
 // ============================================================
 // OTA
 // ============================================================
+function pathInside(target, base) {
+  const absoluteTarget = resolve(target);
+  const absoluteBase = resolve(base);
+  return absoluteTarget === absoluteBase || absoluteTarget.startsWith(`${absoluteBase}${sep}`);
+}
+
+function otaPathAllowed(target) {
+  const home = homedir();
+  const allowed = [
+    join(home, ".config", "opencode"),
+    join(home, ".opencode"),
+    join(home, ".claude"),
+    join(home, ".codex"),
+    join(home, ".agents"),
+    join(home, ".meta-agent-framework"),
+    join(home, "plugins", "maf"),
+    DAEMON_DIR,
+  ];
+  return allowed.some(base => pathInside(target, base));
+}
+
+function resolveOtaTarget(path) {
+  if (String(path || "").startsWith("plugin/")) {
+    const relName = String(path).slice(7);
+    return resolve(relName === "daemon.mjs" ? DAEMON_FILE : join(PLUGIN_DIR, relName));
+  }
+  return expandHomePath(path);
+}
+
+function safeOtaRelativePath(path) {
+  const value = String(path || "");
+  if (!value || value.startsWith("/") || value.split(/[\\/]+/).includes("..")) return "";
+  return value;
+}
+
+function claudeActivePluginDirs() {
+  const cacheRoot = join(homedir(), ".claude", "plugins", "cache");
+  try {
+    const installed = JSON.parse(readFileSync(join(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf-8"));
+    const entries = installed?.plugins?.["maf@maf-plugins"];
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map(entry => resolve(String(entry?.installPath || "")))
+      .filter(path => pathInside(path, cacheRoot));
+  } catch {
+    return [];
+  }
+}
+
+function otaTargets(file) {
+  const targets = [resolveOtaTarget(file.path)];
+  const relativePath = safeOtaRelativePath(file.relative_path);
+  if (file.runtime === "claude-code" && relativePath) {
+    for (const installDir of claudeActivePluginDirs()) targets.push(resolve(installDir, relativePath));
+  }
+  if (file.runtime === "codex" && relativePath) {
+    targets.push(resolve(homedir(), ".codex", "plugins", "cache", "personal", "maf", "local", relativePath));
+  }
+  return [...new Set(targets)];
+}
+
+function writeOtaTarget(target, file) {
+  if (!otaPathAllowed(target)) throw new Error(`白名单外: ${target}`);
+  if (file.hash && fileHash(target) === file.hash) return false;
+
+  mkdirSync(dirname(target), { recursive: true });
+  const temp = `${target}.maf-ota-${process.pid}-${randomBytes(6).toString("hex")}`;
+  try {
+    writeFileSync(temp, file.content, "utf-8");
+    if (file.hash && fileHash(temp) !== file.hash) throw new Error(`hash 不匹配: ${file.path}`);
+    renameSync(temp, target);
+  } finally {
+    try { unlinkSync(temp); } catch {}
+  }
+  return true;
+}
+
 function performOTA(payload) {
   const { files = [] } = payload;
   let applied = 0, failed = 0;
@@ -1666,39 +1769,63 @@ function performOTA(payload) {
   let daemonUpdated = false;
 
   for (const f of files) {
+    if (String(f.path || "").endsWith("/ota-manifest.json") && failed > 0) {
+      errors.push("前序文件失败，未更新 ota-manifest.json");
+      failed++;
+      continue;
+    }
     try {
-      let target = f.path;
-      if (target.startsWith("plugin/")) {
-        const relName = target.slice(7);
-        if (relName === "daemon.mjs") {
-          target = join(dirname(new URL(import.meta.url).pathname), relName);
-        } else {
-          target = join(PLUGIN_DIR, relName);
-        }
-      } else {
-        target = target.replace(/^~/, homedir());
+      let changed = false;
+      const targets = otaTargets(f);
+      for (const target of targets) {
+        const targetChanged = writeOtaTarget(target, f);
+        changed = changed || targetChanged;
+        log(`✅ OTA: ${f.path} → ${target}${targetChanged ? "" : " (unchanged)"}`);
       }
-      const selfDir = dirname(new URL(import.meta.url).pathname);
-      const allowed = [
-        join(homedir(), ".config", "opencode"),
-        join(homedir(), ".opencode"),
-        join(homedir(), ".claude"),
-        join(homedir(), ".codex"),
-        join(homedir(), ".agents"),
-        join(homedir(), ".meta-agent-framework"),
-        selfDir,
-      ];
-      if (!allowed.some(d => target.startsWith(d))) { errors.push(`白名单外: ${target}`); failed++; continue; }
-
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, f.content, "utf-8");
-      if (f.hash && fileHash(target) !== f.hash) { errors.push(`hash 不匹配: ${f.path}`); failed++; continue; }
-      log(`✅ OTA: ${f.path} → ${target}`);
       applied++;
-      if (f.path === "plugin/daemon.mjs" || target.endsWith("daemon.mjs")) daemonUpdated = true;
+      if (changed && (f.runtime === "daemon" && f.relative_path === "daemon.mjs"
+          || f.path === "plugin/daemon.mjs"
+          || targets.includes(DAEMON_FILE))) daemonUpdated = true;
     } catch (err) { errors.push(`${f.path}: ${err.message}`); failed++; }
   }
-  return { applied, failed, restarted: daemonUpdated ? 1 : 0, daemon_updated: daemonUpdated, errors };
+  if (failed === 0) CLIENT_BUNDLE_HASH = currentClientBundleHash();
+  return {
+    applied,
+    failed,
+    restarted: daemonUpdated ? 1 : 0,
+    daemon_updated: daemonUpdated,
+    bundle_hash: CLIENT_BUNDLE_HASH,
+    errors,
+  };
+}
+
+function restartDaemonAfterOTA() {
+  let restarted = false;
+  const launch = () => {
+    if (restarted) return;
+    restarted = true;
+    try {
+      const child = spawn(process.execPath, [DAEMON_FILE], {
+        env: { ...process.env },
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    } catch (err) {
+      log(`❌ OTA Daemon 重新拉起失败: ${err.message}`);
+    }
+    process.exit(0);
+  };
+
+  setTimeout(() => {
+    const force = setTimeout(launch, 5_000);
+    force.unref?.();
+    httpServer.close(() => {
+      clearTimeout(force);
+      launch();
+    });
+    httpServer.closeAllConnections?.();
+  }, 1_000).unref?.();
 }
 
 // ============================================================
@@ -2128,7 +2255,7 @@ const httpServer = createServer(async (req, res) => {
       });
     }
 
-    // Codex runtime：默认 auto；有 attached receiver 就注入当前 TUI，否则由 Daemon screen/exec 托管执行。
+    // Codex runtime：默认 detached，由 Daemon screen/exec 托管执行；attached/auto 需要任务或环境显式选择。
     if (runtime === "codex") {
       const existing = agents.get(targetAgent);
       const directory = projectPath || existing?.directory || DIRECTORY;
@@ -2511,8 +2638,8 @@ const httpServer = createServer(async (req, res) => {
     log(`📦 OTA 结果: applied=${result.applied} failed=${result.failed} daemon_updated=${result.daemon_updated}`);
     json(200, result);
     if (result.daemon_updated) {
-      log("🔄 daemon.mjs 已更新，1 秒后自重启...");
-      setTimeout(() => process.exit(0), 1000);
+      log("🔄 daemon.mjs 已更新，1 秒后重新拉起...");
+      restartDaemonAfterOTA();
     }
     return;
   }

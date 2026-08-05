@@ -62,7 +62,7 @@ router.get('/', (_req: Request, res: Response) => {
 /**
  * GET /api/workflows/:id — 获取工作流详情
  *
- * ?wait=true  — long-poll 模式：工作流未完成时 hold 连接（最多 60s），完成后立即返回
+ * ?wait=true  — long-poll 模式：工作流未完成时短暂 hold 连接（默认 10s），完成后立即返回
  * ?wait=false — 立即返回当前状态（默认）
  */
 router.get('/:id', async (req: Request, res: Response) => {
@@ -76,7 +76,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 
   // long-poll：等待工作流完成或超时
-  const timeout = parseInt(req.query.timeout as string) || 60_000;
+  const timeout = parseInt(req.query.timeout as string) || 10_000;
   await Promise.race([
     workflowEngine.waitForCompletion(wf.id),
     new Promise<null>(resolve => setTimeout(() => resolve(null), timeout)),

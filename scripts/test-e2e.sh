@@ -14,8 +14,8 @@
 #   3  Agent 注册验证
 #   4  Skills/MCPs 上报
 #   5  CC agent 注册（共用 Daemon）
-#   6  OTA 写文件
-#   7  OTA Daemon 自更新
+#   6  全 Runtime Client OTA + bundle hash + 原子写入
+#   7  OTA Daemon 自更新 + 自拉起
 #   8  单 agent 正常退出
 #   9  单 agent 异常退出
 #   10 Daemon 被杀 → 自动恢复
@@ -611,14 +611,53 @@ assert "CC 心跳后 online（lastSeen 新鲜）" "online" "$(get_agent_field st
 fi
 
 # ============================================================
-# Case 6: OTA 写文件
+# Case 6: 全 Runtime Client OTA + 原子 hash 校验
 # ============================================================
 if should_run 6; then
-echo -e "${YELLOW}[6] OTA 写文件${NC}"
+echo -e "${YELLOW}[6] 全 Runtime Client OTA + 原子 hash 校验${NC}"
+wait_until 10 "test -f '$E2E_USER_HOME/.meta-agent-framework/ota-manifest.json' && echo ready" "ready" || true
+AUTO_OTA_VERSION=$(python3 -c "import json;print(json.load(open('$E2E_USER_HOME/.meta-agent-framework/ota-manifest.json')).get('version',''))" 2>/dev/null)
+assert "同 semver 不同 bundle hash 自动 OTA" "$EXPECTED_VERSION" "$AUTO_OTA_VERSION"
 R=$(curl -s -X POST $DAEMON_URL/ota -H 'Content-Type: application/json' \
   -d '{"files":[{"path":"~/.meta-agent-framework/ota-e2e-test.txt","content":"e2e-pass"}]}' 2>/dev/null)
 assert "OTA applied" '"applied":1' "$R"
 assert "OTA 内容" "e2e-pass" "$(cat "$E2E_USER_HOME/.meta-agent-framework/ota-e2e-test.txt" 2>/dev/null)"
+
+CLAUDE_OTA_SOURCE="$E2E_USER_HOME/.claude/plugins/marketplaces/maf-plugins/claude-code-plugin-maf"
+CLAUDE_OTA_CACHE="$E2E_USER_HOME/.claude/plugins/cache/maf-plugins/maf/$EXPECTED_VERSION"
+CODEX_OTA_SOURCE="$E2E_USER_HOME/plugins/maf"
+CODEX_OTA_CACHE="$E2E_USER_HOME/.codex/plugins/cache/personal/maf/local"
+mkdir -p "$CLAUDE_OTA_SOURCE/scripts" "$CLAUDE_OTA_CACHE/scripts" "$CODEX_OTA_SOURCE/scripts" "$CODEX_OTA_CACHE/scripts"
+printf 'stale claude source\n' > "$CLAUDE_OTA_SOURCE/scripts/maf-agent.mjs"
+printf 'stale claude cache\n' > "$CLAUDE_OTA_CACHE/scripts/maf-agent.mjs"
+printf 'stale codex source\n' > "$CODEX_OTA_SOURCE/scripts/maf-codex-attached-receiver.mjs"
+printf 'stale codex cache\n' > "$CODEX_OTA_CACHE/scripts/maf-codex-attached-receiver.mjs"
+mkdir -p "$E2E_USER_HOME/.claude/plugins"
+cat > "$E2E_USER_HOME/.claude/plugins/installed_plugins.json" << JSON
+{"version":2,"plugins":{"maf@maf-plugins":[{"scope":"user","installPath":"$CLAUDE_OTA_CACHE","version":"$EXPECTED_VERSION"}]}}
+JSON
+
+OTA_PUSH=$(curl -s -X POST "$E2E_SERVER/api/ota/push" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$AGENT_NAME\"}" 2>/dev/null)
+assert "全 Runtime OTA 无失败" '"failed":0' "$OTA_PUSH"
+assert "Claude source OTA" "same" "$(cmp -s "$SCRIPT_DIR/plugins/claude-code-plugin-maf/scripts/maf-agent.mjs" "$CLAUDE_OTA_SOURCE/scripts/maf-agent.mjs" && echo same || echo different)"
+assert "Claude active cache OTA" "same" "$(cmp -s "$SCRIPT_DIR/plugins/claude-code-plugin-maf/scripts/maf-agent.mjs" "$CLAUDE_OTA_CACHE/scripts/maf-agent.mjs" && echo same || echo different)"
+assert "Codex source receiver OTA" "same" "$(cmp -s "$SCRIPT_DIR/plugins/codex/scripts/maf-codex-attached-receiver.mjs" "$CODEX_OTA_SOURCE/scripts/maf-codex-attached-receiver.mjs" && echo same || echo different)"
+assert "Codex active cache receiver OTA" "same" "$(cmp -s "$SCRIPT_DIR/plugins/codex/scripts/maf-codex-attached-receiver.mjs" "$CODEX_OTA_CACHE/scripts/maf-codex-attached-receiver.mjs" && echo same || echo different)"
+assert "Codex hook OTA" "same" "$(cmp -s "$SCRIPT_DIR/plugins/codex/scripts/maf-codex-hook.mjs" "$CODEX_OTA_CACHE/scripts/maf-codex-hook.mjs" && echo same || echo different)"
+
+OTA_BUNDLE_HASH=$(python3 -c "import json;print(json.load(open('$E2E_USER_HOME/.meta-agent-framework/ota-manifest.json')).get('bundle_hash',''))" 2>/dev/null)
+assert "OTA bundle manifest hash" "true" "$([[ "$OTA_BUNDLE_HASH" =~ ^[a-f0-9]{16}$ ]] && echo true || echo false)"
+wait_until 5 "get_agent_field plugin_hash" "$OTA_BUNDLE_HASH" || true
+assert "Client 上报 bundle hash" "$OTA_BUNDLE_HASH" "$(get_agent_field plugin_hash)"
+OTA_STATUS=$(curl -s "$E2E_SERVER/api/ota/status" 2>/dev/null)
+assert "OTA status 返回 bundle hash" "$OTA_BUNDLE_HASH" "$OTA_STATUS"
+
+printf 'ota-original\n' > "$E2E_USER_HOME/.meta-agent-framework/ota-atomic-test.txt"
+OTA_BAD_HASH=$(curl -s -X POST "$DAEMON_URL/ota" -H 'Content-Type: application/json' \
+  -d '{"files":[{"path":"~/.meta-agent-framework/ota-atomic-test.txt","content":"ota-corrupt","hash":"0000000000000000"}]}' 2>/dev/null)
+assert "OTA 错误 hash 失败" '"failed":1' "$OTA_BAD_HASH"
+assert "OTA 错误 hash 不覆盖旧文件" "ota-original" "$(cat "$E2E_USER_HOME/.meta-agent-framework/ota-atomic-test.txt" 2>/dev/null)"
 fi
 
 # ============================================================
@@ -1484,7 +1523,11 @@ assert "Server Codex plugin source" '"name": "maf"' "$(cat "$SCRIPT_DIR/plugins/
 assert "Server Codex installer source" "Server-served Codex client installer" "$(head -n 8 "$SCRIPT_DIR/plugins/codex-install.mjs" 2>/dev/null || true)"
 assert "Server install.sh detects Codex" "HAS_CODEX" "$(grep 'HAS_CODEX' "$SCRIPT_DIR/plugins/install.sh" 2>/dev/null || true)"
 assert "sync-client-pkg syncs Codex" 'cp -r "$SRC/codex" "$DST/codex"' "$(grep 'SRC/codex' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
-assert "Codex default delivery is auto" 'MAF_CODEX_DELIVERY || "auto"' "$(grep 'MAF_CODEX_DELIVERY || "auto"' "$ROOT_DIR/packages/server/plugins/node-daemon/daemon.mjs" 2>/dev/null || true)"
+assert "Codex default delivery is detached" 'MAF_CODEX_DELIVERY || "detached"' "$(grep 'MAF_CODEX_DELIVERY || "detached"' "$ROOT_DIR/packages/server/plugins/node-daemon/daemon.mjs" 2>/dev/null || true)"
+assert "Codex detached exec default timeout is 45m" '45 \* 60_000' "$(grep 'CODEX_TASK_TIMEOUT_MS' "$ROOT_DIR/packages/server/plugins/node-daemon/daemon.mjs" 2>/dev/null || true)"
+assert "Codex attached overall timeout is 45m" '45 \* 60 \* 1000' "$(grep 'TASK_TIMEOUT_MS' "$ROOT_DIR/packages/client/codex/scripts/maf-codex-attached-receiver.mjs" 2>/dev/null || true)"
+assert "Workflow node timeout is 50m" '3000000' "$(grep 'NODE_TIMEOUT_MS' "$ROOT_DIR/packages/server/src/services/workflow-engine.ts" 2>/dev/null || true)"
+assert "Workflow poll uses short repeated waits" 'POLL_TIMEOUT="\${2:-10}"' "$(grep 'POLL_TIMEOUT=' "$ROOT_DIR/packages/server/scripts/poll-workflow.sh" 2>/dev/null || true)"
 assert "sync-client-pkg verifies copies" "check-client-sync.sh" "$(grep 'check-client-sync.sh' "$ROOT_DIR/scripts/sync-client-pkg.sh" 2>/dev/null || true)"
 assert "GitHub release syncs client package" "sync-client-pkg.sh" "$(grep 'sync-client-pkg.sh' "$ROOT_DIR/.github/workflows/release.yml" 2>/dev/null || true)"
 assert "版本只保留根 package.json" "package.json" "$(git -C "$ROOT_DIR" grep -l '"version": "'$EXPECTED_VERSION'"' -- ':!package.json' ':!node_modules' ':!package-lock.json' ':!packages/server/package-lock.json' 2>/dev/null || echo package.json)"
@@ -1843,7 +1886,7 @@ assert "Codex attached receiver runtime" "codex" "$(get_agent_field runtime $COD
 
 RECV_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
   -H 'Content-Type: application/json' \
-  -d "{\"title\":\"Codex attached receiver e2e\",\"nodes\":[{\"id\":\"recv-1\",\"agent_name\":\"$CODEX_RECV_AGENT\",\"prompt\":\"Codex attached e2e task: say hello from current receiver\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+  -d "{\"title\":\"Codex attached receiver e2e\",\"nodes\":[{\"id\":\"recv-1\",\"agent_name\":\"$CODEX_RECV_AGENT\",\"prompt\":\"Codex attached e2e task: say hello from current receiver\",\"scope\":\"project\",\"intent\":\"query\",\"delivery_mode\":\"attached\"}]}")
 RECV_WF_ID=$(echo "$RECV_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
 assert "Codex attached workflow 创建" "true" "$([ -n "$RECV_WF_ID" ] && echo true || echo false)"
 
@@ -2069,7 +2112,7 @@ assert "Codex auto-remote runtime" "codex" "$(get_agent_field runtime $CODEX_REM
 
 REMOTE_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
   -H 'Content-Type: application/json' \
-  -d "{\"title\":\"Codex auto remote receiver e2e\",\"nodes\":[{\"id\":\"remote-1\",\"agent_name\":\"$CODEX_REMOTE_AGENT\",\"prompt\":\"Codex attached e2e task: hello from auto remote wrapper\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+  -d "{\"title\":\"Codex auto remote receiver e2e\",\"nodes\":[{\"id\":\"remote-1\",\"agent_name\":\"$CODEX_REMOTE_AGENT\",\"prompt\":\"Codex attached e2e task: hello from auto remote wrapper\",\"scope\":\"project\",\"intent\":\"query\",\"delivery_mode\":\"attached\"}]}")
 REMOTE_WF_ID=$(echo "$REMOTE_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
 assert "Codex auto-remote workflow 创建" "true" "$([ -n "$REMOTE_WF_ID" ] && echo true || echo false)"
 
@@ -2131,7 +2174,7 @@ HOME="$CODEX_POLL_HOME" XDG_CONFIG_HOME="$CODEX_POLL_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_POLL_PORT" \
   MAF_AGENT_NAME="$CODEX_POLL_AGENT" MAF_DIRECTORY="$CODEX_POLL_PROJECT" \
   MAF_CODEX_TURN_POLL_MS=100 \
-  MAF_CODEX_APP_SERVER_CMD="MOCK_CODEX_NO_TURN_COMPLETED=1 MOCK_CODEX_TURN_STATUS_OBJECT=1 MOCK_CODEX_REQUIRE_WORKSPACE_WRITE=1 node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
+  MAF_CODEX_APP_SERVER_CMD="MOCK_CODEX_NO_TURN_COMPLETED=1 MOCK_CODEX_TURN_STATUS_OBJECT=1 MOCK_CODEX_REQUIRE_WORKSPACE_WRITE=1 MOCK_CODEX_TURN_DELAY_MS=450 node $ROOT_DIR/scripts/mock-codex-app-server.mjs" \
   node "$ROOT_DIR/packages/client/codex/scripts/maf-codex-hook.mjs" << HOOKJSON >/tmp/e2e-codex-poll-hook.log 2>&1
 {"cwd":"$CODEX_POLL_PROJECT","eventName":"SessionStart"}
 HOOKJSON
@@ -2145,7 +2188,7 @@ assert "Codex poll receiver runtime" "codex" "$(get_agent_field runtime $CODEX_P
 
 POLL_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
   -H 'Content-Type: application/json' \
-  -d "{\"title\":\"Codex attached receiver poll fallback e2e\",\"nodes\":[{\"id\":\"poll-1\",\"agent_name\":\"$CODEX_POLL_AGENT\",\"prompt\":\"Codex attached e2e task: complete via thread read polling\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+  -d "{\"title\":\"Codex attached receiver poll fallback e2e\",\"nodes\":[{\"id\":\"poll-1\",\"agent_name\":\"$CODEX_POLL_AGENT\",\"prompt\":\"Codex attached e2e task: complete via thread read polling\",\"scope\":\"project\",\"intent\":\"query\",\"delivery_mode\":\"attached\"}]}")
 POLL_WF_ID=$(echo "$POLL_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
 assert "Codex poll workflow 创建" "true" "$([ -n "$POLL_WF_ID" ] && echo true || echo false)"
 
@@ -2157,6 +2200,7 @@ done
 assert "Codex poll workflow completed" "completed" "$POLL_STATUS"
 POLL_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$POLL_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
 assert "Codex poll result from mock" "mock attached codex completed" "$POLL_RESULT"
+assert "Codex poll observes running before completion" "inProgress" "$(cat "$CODEX_POLL_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
 assert "Codex poll used thread/read fallback" "turn poll completed" "$(cat "$CODEX_POLL_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
 assert "Codex poll did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
 

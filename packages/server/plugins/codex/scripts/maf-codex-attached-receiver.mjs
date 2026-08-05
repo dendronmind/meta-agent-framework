@@ -60,7 +60,7 @@ function clientSignedHeaders(method, url, body = "", headers = {}) {
 const APP_SERVER_URL = process.env.MAF_CODEX_APP_SERVER_URL || "";
 const APP_SERVER_CMD = process.env.MAF_CODEX_APP_SERVER_CMD || "";
 const THREAD_ID_ENV = process.env.MAF_CODEX_THREAD_ID || "";
-const TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS || "0", 10) || 10 * 60 * 1000;
+const TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS || "0", 10) || 45 * 60 * 1000;
 const WAIT_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_ATTACHED_WAIT_TIMEOUT_MS || "0", 10) || 15_000;
 const LOG_DIR = join(MAF_HOME, "logs");
 const LOG_FILE = join(LOG_DIR, "codex-plugin.log");
@@ -91,8 +91,8 @@ const PID_FILE = process.env.MAF_CODEX_RECEIVER_PID_FILE || "";
 const META_FILE = process.env.MAF_CODEX_RECEIVER_META_FILE || "";
 const THREAD_WAIT_MS = parseInt(process.env.MAF_CODEX_THREAD_WAIT_MS || "0", 10) || 120_000;
 const THREAD_POLL_MS = parseInt(process.env.MAF_CODEX_THREAD_POLL_MS || "0", 10) || 1000;
-const TURN_POLL_MS = parseInt(process.env.MAF_CODEX_TURN_POLL_MS || "0", 10) || 1000;
-const TURN_READ_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TURN_READ_TIMEOUT_MS || "0", 10) || 10_000;
+const TURN_POLL_MS = parseInt(process.env.MAF_CODEX_TURN_POLL_MS || "0", 10) || 15_000;
+const TURN_READ_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TURN_READ_TIMEOUT_MS || "0", 10) || 5_000;
 const NOTIFY_TURN_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_NOTIFY_TURN_TIMEOUT_MS || "0", 10) || 10_000;
 const SESSION_PID = parseInt(process.env.MAF_CODEX_SESSION_PID || "0", 10) || 0;
 const NOTIFY_ACK = process.env.MAF_CODEX_NOTIFY_ACK === "1";
@@ -784,7 +784,7 @@ async function runTurn(client, threadId, task) {
     let pollTimer = null;
     let onAbort = null;
     const timer = setTimeout(() => {
-      finishErr(new Error(`Codex attached turn timeout (${TASK_TIMEOUT_MS}ms)`));
+      finishErr(new Error(`Codex attached turn overall timeout after repeated polling (${TASK_TIMEOUT_MS}ms)`));
     }, TASK_TIMEOUT_MS);
 
     const finishOk = (source, output) => {

@@ -3,7 +3,7 @@ import { agentRegistry } from '../services/agent-registry';
 import { healthMonitor } from '../services/health-monitor';
 import { getRegistry } from '../services/registry';
 import { getConfig } from '../config';
-import { serverAuthHeaders } from '../auth';
+import { buildClientOtaBundle, getClientOtaBundleHash, pushClientOta } from '../services/client-ota';
 import type { ClientRegisterPayload, HeartbeatPayload } from '../types';
 
 const router = Router();
@@ -337,52 +337,30 @@ router.post('/ota/push', async (req: Request, res: Response) => {
   const daemonPort = agent.daemon_port || Number.parseInt(clientUrl.port, 10) || getConfig().daemon.port;
   const daemonUrl = `http://${clientUrl.hostname}:${daemonPort}`;
 
-  // 如果没传 files，自动打包本地最新 Plugin
+  // 如果没传 files，自动构建 Daemon + OpenCode + Claude Code + Codex 完整 Client bundle。
   let otaFiles = files;
+  let bundleHash = '';
+  let bundleVersion = '';
   if (!otaFiles) {
-    const { readFileSync, existsSync } = await import('fs');
-    const { join } = await import('path');
-    const { createHash } = await import('crypto');
-
-    const pluginDir = join(process.cwd(), 'plugins', 'opencode-plugin-meta-agent-framework');
-    const indexJs = join(pluginDir, 'index.js');
-    const daemonMjs = join(process.cwd(), 'plugins', 'node-daemon', 'daemon.mjs');
-    const pkgJson = join(pluginDir, 'package.json');
-
-    otaFiles = [];
-    for (const [filePath, remoteName] of [
-      [indexJs, 'index.js'],
-      [daemonMjs, 'daemon.mjs'],
-      [pkgJson, 'package.json'],
-    ] as const) {
-      if (!existsSync(filePath)) continue;
-      const content = readFileSync(filePath, 'utf-8');
-      const hash = createHash('sha256').update(content).digest('hex').substring(0, 16);
-      // 远端路径：推到 Plugin 安装位置（从 agent 的 client_endpoint 推导）
-      // 通用方案：推到 Daemon 让它自己决定写到哪
-      otaFiles.push({ path: `plugin/${remoteName}`, content, hash });
+    const bundle = buildClientOtaBundle(agent.client_version);
+    if (bundle.missing.length > 0) {
+      res.status(500).json({ error: 'Client OTA bundle 源文件不完整', missing: bundle.missing });
+      return;
     }
+    otaFiles = bundle.files;
+    bundleHash = bundle.bundle_hash;
+    bundleVersion = bundle.version;
   }
 
   // 推送到 Daemon
   try {
-    const url = `${daemonUrl}/ota`;
-    const body = JSON.stringify({ files: otaFiles, restart_agents: restart });
-    const otaRes = await fetch(url, {
-      method: 'POST',
-      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
-      body,
-      signal: AbortSignal.timeout(30_000),
-    });
-
-    if (!otaRes.ok) {
-      const text = await otaRes.text();
-      res.status(502).json({ error: `Daemon OTA 失败: ${otaRes.status}`, detail: text });
-      return;
-    }
-
-    const result = await otaRes.json() as Record<string, unknown>;
-    console.log(`[OTA] 推送到 ${agent_name} (${daemonUrl}): applied=${result.applied} failed=${result.failed} restarted=${result.restarted}`);
+    const payload = {
+      files: otaFiles,
+      restart_agents: restart,
+      ...(bundleHash ? { bundle_hash: bundleHash, client_version: bundleVersion } : {}),
+    };
+    const result = await pushClientOta(daemonUrl, payload);
+    console.log(`[OTA] 推送到 ${agent_name} (${daemonUrl}): applied=${result.applied} failed=${result.failed} restarted=${result.restarted} attempts=${result.attempts}`);
     res.json({ target: agent_name, daemon: daemonUrl, ...(result as object) });
   } catch (err: any) {
     res.status(502).json({ error: `Daemon 不可达: ${err.message}`, daemon: daemonUrl });
@@ -396,27 +374,17 @@ router.post('/ota/push', async (req: Request, res: Response) => {
  */
 router.get('/ota/status', (_req: Request, res: Response) => {
   const agents = agentRegistry.listAll();
-
-  // 读取本地最新 Plugin hash 作为基准
-  let latestHash = '';
-  try {
-    const { readFileSync, existsSync } = require('fs');
-    const { join } = require('path');
-    const { createHash } = require('crypto');
-    const indexJs = join(process.cwd(), 'plugins', 'opencode-plugin-meta-agent-framework', 'index.js');
-    if (existsSync(indexJs)) {
-      latestHash = createHash('sha256').update(readFileSync(indexJs, 'utf-8')).digest('hex').substring(0, 16);
-    }
-  } catch {}
-
-  // TODO: 从心跳上报里收集各 client 的 plugin_hash 进行对比
+  const latestHash = getClientOtaBundleHash();
   res.json({
     latest_hash: latestHash,
+    latest_bundle_hash: latestHash,
     agents: agents.map(a => ({
       agent_name: a.agent_name,
       status: a.status,
       client_endpoint: a.client_endpoint,
-      // plugin_hash: 需要从心跳扩展字段获取
+      client_version: a.client_version,
+      bundle_hash: a.plugin_hash,
+      up_to_date: a.plugin_hash === latestHash,
     })),
   });
 });

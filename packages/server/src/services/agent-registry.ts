@@ -4,7 +4,7 @@ import { eventBus } from './event-bus';
 import { getRegistry } from './registry';
 import { CLIENT_MIN_VERSION, SERVER_AGENT_NAME, isServerAgentName } from '../types';
 import { getConfig } from '../config';
-import { serverAuthHeaders } from '../auth';
+import { buildClientOtaBundle, getClientOtaBundleHash, pushClientOta } from './client-ota';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
 
 export interface RegistryReconcileResult {
@@ -242,11 +242,15 @@ export class AgentRegistry {
       timestamp: now,
     });
 
-    // 版本检查 → 自动触发 OTA（带冷却）
-    if (clientVersion && isVersionLess(clientVersion, CLIENT_MIN_VERSION)) {
+    // 版本或完整 Client bundle hash 不一致 → 自动触发 OTA（带冷却）。
+    // 旧 Client 上报的是单个 OpenCode index.js hash，也会自然进入一次全量升级。
+    const latestBundleHash = getClientOtaBundleHash();
+    const versionOutdated = Boolean(clientVersion && isVersionLess(clientVersion, CLIENT_MIN_VERSION));
+    const bundleOutdated = Boolean(clientVersion && clientPluginHash !== latestBundleHash);
+    if (versionOutdated || bundleOutdated) {
       const otaKey = `${payload.user_id}:${payload.host_user}`;
       if (this.canTriggerOTA(otaKey)) {
-        console.log(`[OTA] ⚠ ${payload.user_id} client v=${clientVersion} < min=${CLIENT_MIN_VERSION}，触发 OTA`);
+        console.log(`[OTA] ⚠ ${payload.user_id} client v=${clientVersion || '?'} hash=${clientPluginHash || '?'}，目标 v=${CLIENT_MIN_VERSION} hash=${latestBundleHash}，触发 OTA`);
         if (agents.length > 0) {
           this.triggerOTA(agents[0]).catch(() => {});
         }
@@ -337,17 +341,20 @@ export class AgentRegistry {
       );
     }
 
-    // 4. 版本检查 → 自动触发 OTA（带冷却，同一用户 5 分钟只推一次）
-    if (payload.client_version && isVersionLess(payload.client_version, CLIENT_MIN_VERSION)) {
+    // 4. 版本或完整 Client bundle hash 检查（同一用户 5 分钟只推一次）
+    const latestBundleHash = getClientOtaBundleHash();
+    const versionOutdated = Boolean(payload.client_version && isVersionLess(payload.client_version, CLIENT_MIN_VERSION));
+    const bundleOutdated = Boolean(payload.client_version && payload.plugin_hash !== latestBundleHash);
+    if (versionOutdated || bundleOutdated) {
       const otaKey = `${userId}:${hostUser}`;
       if (this.canTriggerOTA(otaKey)) {
-        console.log(`[OTA] ⚠ ${userId}(${hostUser}) client v=${payload.client_version} < min=${CLIENT_MIN_VERSION}，触发 OTA`);
+        console.log(`[OTA] ⚠ ${userId}(${hostUser}) client v=${payload.client_version || '?'} hash=${payload.plugin_hash || '?'}，目标 v=${CLIENT_MIN_VERSION} hash=${latestBundleHash}，触发 OTA`);
         const userAgents = this.listByUser(userId).filter(a => a.host_user === hostUser && a.status === 'online');
         if (userAgents.length > 0) {
           this.triggerOTA(userAgents[0]).catch(() => {});
         }
       } else {
-        console.log(`[OTA] ${userId}(${hostUser}) client v=${payload.client_version} 需要更新，冷却期内，跳过`);
+        console.log(`[OTA] ${userId}(${hostUser}) client v=${payload.client_version || '?'} hash=${payload.plugin_hash || '?'} 需要更新，冷却期内，跳过`);
       }
     }
 
@@ -484,59 +491,31 @@ export class AgentRegistry {
   // OTA
   // ============================================================
 
-  /** 自动触发 OTA：读取本地最新 Plugin 文件，推送到 Client 的 Daemon */
+  /** 自动触发 OTA：构建完整 Client bundle，推送到 Client 的 Daemon。 */
   async triggerOTA(agent: Agent): Promise<void> {
     // Node Daemon 使用固定端口，优先从 daemon_port 字段取，兜底从 client_endpoint 提取
     const clientUrl = new URL(agent.client_endpoint);
     const daemonPort = agent.daemon_port || parseInt(clientUrl.port) || getConfig().daemon.port;
     const daemonUrl = `http://${clientUrl.hostname}:${daemonPort}`;
 
-    // 读取本地最新 Plugin 文件
-    const { readFileSync, existsSync } = await import('fs');
-    const { join } = await import('path');
-    const { createHash } = await import('crypto');
-
-    const pluginDir = join(process.cwd(), 'plugins', 'opencode-plugin-meta-agent-framework');
-    const daemonFile = join(process.cwd(), 'plugins', 'node-daemon', 'daemon.mjs');
-    const files: { path: string; content: string; hash: string }[] = [];
-
-    for (const [filePath, remoteName] of [
-      [join(pluginDir, 'index.js'), 'index.js'],
-      [daemonFile, 'daemon.mjs'],
-      [join(pluginDir, 'package.json'), 'package.json'],
-    ] as const) {
-      if (!existsSync(filePath)) continue;
-      const content = readFileSync(filePath, 'utf-8');
-      const hash = createHash('sha256').update(content).digest('hex').substring(0, 16);
-      files.push({ path: `plugin/${remoteName}`, content, hash });
-    }
-
-    if (files.length === 0) {
-      console.log(`[OTA] ⚠ 本地 Plugin 文件未找到，跳过 OTA`);
+    const bundle = buildClientOtaBundle(agent.client_version);
+    if (bundle.missing.length > 0) {
+      console.log(`[OTA] ⚠ Client bundle 源文件不完整，跳过 OTA: ${bundle.missing.join(', ')}`);
       return;
     }
 
     try {
-      console.log(`[OTA] 🚀 自动推送到 ${agent.agent_name} (${daemonUrl}), ${files.length} 个文件...`);
-      const url = `${daemonUrl}/ota`;
-      const body = JSON.stringify({
-        files,
+      console.log(`[OTA] 🚀 自动推送 Client bundle ${bundle.bundle_hash} 到 ${agent.agent_name} (${daemonUrl}), ${bundle.assets} 个资产 / ${bundle.files.length} 个目标...`);
+      const payload = {
+        files: bundle.files,
+        bundle_hash: bundle.bundle_hash,
+        client_version: bundle.version,
         restart_agents: true,
         target_agents: [agent.agent_name],
         agent_info: { [agent.agent_name]: { directory: agent.project_path, session_id: null } },
-      });
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
-        body,
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (res.ok) {
-        const result = await res.json() as Record<string, unknown>;
-        console.log(`[OTA] ✅ ${agent.agent_name}: applied=${result.applied} restarted=${result.restarted}`);
-      } else {
-        console.log(`[OTA] ❌ ${agent.agent_name}: HTTP ${res.status}`);
-      }
+      };
+      const result = await pushClientOta(daemonUrl, payload);
+      console.log(`[OTA] ✅ ${agent.agent_name}: applied=${result.applied} failed=${result.failed} restarted=${result.restarted} attempts=${result.attempts}`);
     } catch (err: any) {
       console.log(`[OTA] ❌ ${agent.agent_name}: Daemon 不可达 (${err.message})`);
     }

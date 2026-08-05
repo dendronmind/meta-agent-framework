@@ -43,13 +43,13 @@ const workflowAgentSessions = new Map<string, Record<string, string>>();
 const nodeTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * 默认节点超时：12 分钟。
+ * 默认节点超时：50 分钟。
  *
  * 该值需要大于各 Client/Receiver 自身的任务超时，避免 Client 仍在等待最终
- * assistant 回答时，Server 先把 workflow 节点标记为 failed。当前 Codex attached
- * receiver 默认任务超时为 10 分钟，这里保留 2 分钟网络/回报裕量。
+ * assistant 回答时，Server 先把 workflow 节点标记为 failed。Codex attached 和
+ * headless executor 默认任务上限为 45 分钟，这里保留 5 分钟网络/回报裕量。
  */
-const NODE_TIMEOUT_MS = parseInt(process.env.NODE_TIMEOUT_MS || '720000', 10);
+const NODE_TIMEOUT_MS = parseInt(process.env.NODE_TIMEOUT_MS || '3000000', 10);
 
 export interface WorkflowSummary {
   workflow_id: string;

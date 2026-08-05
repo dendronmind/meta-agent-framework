@@ -42,7 +42,7 @@ English | [中文](./README.md)
 - **Auto-launch** — Offline Agents are automatically started via screen when tasks arrive
 - **Three runtimes** — Supports [opencode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and [Codex CLI](https://github.com/openai/codex)
 - **Task queue** — Multiple consecutive tasks execute serially without loss
-- **OTA updates** — Remote Plugin updates with zero-downtime Daemon restart
+- **Full Client OTA** — Automatically syncs Daemon, OpenCode, Claude Code, and Codex runtime components with bundle-hash verification and Daemon self-recovery
 
 ## Quick Start
 

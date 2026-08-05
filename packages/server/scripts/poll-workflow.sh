@@ -2,16 +2,17 @@
 #
 # 等待工作流完成（long-poll 模式，零延迟）
 #
-# Server 支持 ?wait=true：工作流未完成时 hold 连接（最多 55s），完成后立即返回。
+# Server 支持 ?wait=true：工作流未完成时短暂 hold 连接，完成后立即返回。
 # 脚本循环发起 long-poll，直到工作流完成/失败或超过总时限。
 #
-# 用法：bash scripts/poll-workflow.sh <workflow_id> [timeout_per_poll=55] [max_retries=8]
+# 默认每次等待 10 秒、最多 360 轮，总等待约 60 分钟。
+# 用法：bash scripts/poll-workflow.sh <workflow_id> [timeout_per_poll=10] [max_retries=360]
 #
 set -uo pipefail
 
 WF_ID="${1:?用法: bash scripts/poll-workflow.sh <workflow_id> [timeout_per_poll] [max_retries]}"
-POLL_TIMEOUT="${2:-55}"
-MAX="${3:-8}"
+POLL_TIMEOUT="${2:-10}"
+MAX="${3:-360}"
 
 # Server URL：环境变量 > maf.config.json > 默认
 if [[ -n "${META_AGENT_SERVER:-}" ]]; then

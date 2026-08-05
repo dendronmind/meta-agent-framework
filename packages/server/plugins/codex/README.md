@@ -45,9 +45,10 @@ and forks) are auto-remote-ized:
 2. The wrapper injects `--remote ws://127.0.0.1:<port>` before exec'ing the real
    Codex TUI.
 3. `scripts/maf-codex-attached-receiver.mjs` registers with the local Node
-   Daemon using `plugin_pid`, long-polls `/tasks/wait`, forwards each task to
-   Codex app-server `turn/start`, and reports the assistant result via
-   `/tasks/done`.
+   Daemon using `plugin_pid`, long-polls `/tasks/wait`, forwards explicitly
+   attached tasks to Codex app-server `turn/start`, and reports the assistant
+   result via `/tasks/done`. It listens for completion notifications and also
+   polls `thread/read` every 15 seconds with a 5-second per-read timeout.
 
 Non-interactive/admin commands such as `codex exec`, `codex review`,
 `codex plugin`, `codex mcp`, `codex app-server`, `codex debug`, and login/update
@@ -55,7 +56,10 @@ commands pass through to the real Codex binary without auto-remote conversion.
 
 Useful environment variables:
 
-- `MAF_CODEX_DELIVERY=auto|attached|detached`: task delivery policy; default `auto` uses the attached receiver when present and falls back to Daemon-managed screen/TUI execution when no current Codex session is attached.
+- `MAF_CODEX_DELIVERY=detached|attached|auto`: task delivery policy; default `detached` starts a Daemon-managed background screen/TUI and never occupies the user's current Codex session. Use `attached` or `auto` only when current-session injection is explicitly wanted.
+- `MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS=<ms>`: overall attached-turn limit; default 45 minutes while short `thread/read` attempts continue throughout the wait.
+- `MAF_CODEX_TURN_POLL_MS=<ms>`: attached `thread/read` poll interval; default 15000 ms.
+- `MAF_CODEX_TURN_READ_TIMEOUT_MS=<ms>`: timeout for one `thread/read` request; default 5000 ms. A failed read is retried until the overall task limit.
 - `MAF_AGENT_NAME=<agent>`: explicit temporary MAF agent-name override.
 - `MAF_CODEX_APP_SERVER_URL=ws://127.0.0.1:<port>`: explicit app-server URL.
 - `MAF_CODEX_APP_SERVER_CMD='codex app-server --stdio'`: start/connect via stdio command.
