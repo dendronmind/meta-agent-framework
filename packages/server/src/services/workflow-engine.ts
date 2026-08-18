@@ -13,7 +13,7 @@ import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import { serverAuthHeaders } from '../auth';
 import type {
-  Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult, WorkflowFailurePolicy,
+  Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult, WorkflowFailurePolicy, ExecutionErrorCode, ExecutionRunContext,
 } from '../types';
 
 // ============================================================
@@ -50,6 +50,29 @@ const nodeTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
  * headless executor 默认任务上限为 45 分钟，这里保留 5 分钟网络/回报裕量。
  */
 const NODE_TIMEOUT_MS = parseInt(process.env.NODE_TIMEOUT_MS || '3000000', 10);
+const NODE_QUEUE_TIMEOUT_MS = parseInt(process.env.NODE_QUEUE_TIMEOUT_MS || '86400000', 10);
+
+function codedFailure(code: ExecutionErrorCode, message: string): string {
+  return `[${code}] ${message}`;
+}
+
+function executionErrorCode(value: unknown): ExecutionErrorCode {
+  const message = String(value || '');
+  const explicit = message.match(/\[(WORKSPACE_NOT_GIT|QUEUE_FULL|AGENT_NOT_DISPATCHABLE|CLIENT_UNREACHABLE|AGENT_START_FAILED|EXECUTION_TIMEOUT|MAS_ROUTING_FAILED|PATCH_EXPORT_FAILED|DISPATCH_FAILED)\]/)?.[1];
+  if (explicit) return explicit as ExecutionErrorCode;
+  if (/queue full|队列已满/i.test(message)) return 'QUEUE_FULL';
+  if (/offline|dead|不可调度/i.test(message)) return 'AGENT_NOT_DISPATCHABLE';
+  if (/ECONNREFUSED|ENETUNREACH|Client DEAD/i.test(message)) return 'CLIENT_UNREACHABLE';
+  if (/timeout|timed out|超时/i.test(message)) return 'EXECUTION_TIMEOUT';
+  return 'DISPATCH_FAILED';
+}
+
+export function isAgentDispatchable(agent: Pick<Agent, 'status' | 'client_endpoint'>): boolean {
+  if (agent.status === 'online' || agent.status === 'busy') return true;
+  // offline 表示 Agent runtime 当前未连接；只要 Daemon endpoint 仍有记录，
+  // /execute 就能进入 Client 侧 auto-launch 分支。dead 才表示 Client 不可达。
+  return agent.status === 'offline' && Boolean(agent.client_endpoint);
+}
 
 export interface WorkflowSummary {
   workflow_id: string;
@@ -58,7 +81,7 @@ export interface WorkflowSummary {
   failure_policy?: WorkflowFailurePolicy;
   origin?: Record<string, unknown>;
   notify?: Record<string, unknown>;
-  nodes: { id: string; agent_name: string; status: string; result?: string }[];
+  nodes: { id: string; agent_name: string; status: string; result?: string; error_code?: ExecutionErrorCode }[];
 }
 
 interface WorkflowStartOptions {
@@ -177,7 +200,7 @@ export class WorkflowEngine {
     }
 
     // 超时、已完成或已失败节点的迟到回报不得再次推进状态。
-    if (node.status !== 'running') {
+    if (node.status !== 'running' && node.status !== 'queued') {
       console.warn(`[Workflow] ⚠️ [${node.id}] 收到迟到回报 (当前状态: ${node.status})，忽略`);
       return { accepted: false, code: 'invalid_state', message: `Node is ${node.status}, expected running` };
     }
@@ -192,6 +215,7 @@ export class WorkflowEngine {
 
     node.status = result.status;
     node.result = result.result;
+    node.error_code = result.status === 'failed' ? executionErrorCode(result.result) : undefined;
     node.completed_at = new Date().toISOString();
 
     // 缓存 Client 侧的 agent session ID
@@ -229,6 +253,36 @@ export class WorkflowEngine {
     return { accepted: true, code: 'accepted' };
   }
 
+  /** Client 实际领取任务后，把排队超时切换为执行超时。 */
+  reportNodeStarted(input: Pick<ExecutionResult, 'workflow_id' | 'node_id' | 'execution_id' | 'agent_name'>): ResultReportOutcome {
+    const workflow = workflows.get(input.workflow_id);
+    if (!workflow) return { accepted: false, code: 'unknown_workflow', message: 'Workflow not found' };
+    const node = workflow.nodes.find(candidate => candidate.id === input.node_id);
+    if (!node) return { accepted: false, code: 'unknown_node', message: 'Workflow node not found' };
+    if (node.execution_id !== input.execution_id) return { accepted: false, code: 'execution_mismatch', message: 'execution_id does not match the active dispatch' };
+    if (node.agent_name !== input.agent_name) return { accepted: false, code: 'agent_mismatch', message: 'agent_name does not match the workflow node' };
+    if (node.status === 'running') return { accepted: true, code: 'accepted' };
+    if (node.status !== 'queued') return { accepted: false, code: 'invalid_state', message: `Node is ${node.status}, expected queued` };
+    const nodeKey = `${workflow.id}:${node.id}`;
+    const timer = nodeTimeouts.get(nodeKey);
+    if (timer) clearTimeout(timer);
+    node.status = 'running';
+    node.started_at = new Date().toISOString();
+    eventBus.emit({
+      type: 'workflow_node_running',
+      data: { workflow_id: workflow.id, node_id: node.id, agent_name: node.agent_name },
+      timestamp: new Date().toISOString(),
+    });
+    nodeTimeouts.set(nodeKey, this.createNodeTimeout(workflow, node, NODE_TIMEOUT_MS, 'running'));
+    return { accepted: true, code: 'accepted' };
+  }
+
+  authorizesExecutionNode(executionId: string, workflowId: string, nodeId: string, agentName: string): boolean {
+    const workflow = workflows.get(workflowId);
+    const node = workflow?.nodes.find(candidate => candidate.id === nodeId);
+    return Boolean(workflow && node && workflow.origin?.execution_id === executionId && node.agent_name === agentName);
+  }
+
   /** 获取工作流 */
   get(id: string): Workflow | undefined {
     return workflows.get(id);
@@ -243,7 +297,7 @@ export class WorkflowEngine {
         workflow_id: wf.id,
         status: wf.status as 'completed' | 'failed',
         failure_policy: wf.failure_policy,
-        nodes: wf.nodes.map(n => ({ id: n.id, agent_name: n.agent_name, status: n.status, result: n.result })),
+        nodes: wf.nodes.map(n => ({ id: n.id, agent_name: n.agent_name, status: n.status, result: n.result, error_code: n.error_code })),
       });
     }
 
@@ -456,15 +510,8 @@ export class WorkflowEngine {
    * 表里的信息足够确定「这个 agent 应该发给谁、在哪个目录执行」。
    */
   private async executeNode(workflow: Workflow, node: WorkflowNode): Promise<void> {
-    node.status = 'running';
+    node.status = 'queued';
     node.execution_id = uuidv4();
-    node.started_at = new Date().toISOString();
-
-    eventBus.emit({
-      type: 'workflow_node_running',
-      data: { workflow_id: workflow.id, node_id: node.id, agent_name: node.agent_name },
-      timestamp: new Date().toISOString(),
-    });
 
     // 精确查找：从注册表按 agent_name 查（包括所有状态）
     const allMatches = agentRegistry.listAll().filter(a => a.agent_name === node.agent_name);
@@ -472,26 +519,34 @@ export class WorkflowEngine {
       const msg = `agent "${node.agent_name}" 未在注册表中`;
       console.error(`[Workflow] ❌ [${node.id}] ${msg}`);
       node.status = 'failed';
-      node.result = msg;
+      node.error_code = 'AGENT_NOT_DISPATCHABLE';
+      node.result = codedFailure(node.error_code, msg);
       node.completed_at = new Date().toISOString();
       this.advanceAfterNodeTerminal(workflow, msg);
       return;
     }
 
-    // 注册表保证每个 agent_name 唯一归属一个用户+机器
-    // 如果出现多条同名记录，以 online 的为准，并打印警告
-    const online = allMatches.filter(a => a.status === 'online');
+    // 注册表保证每个 agent_name 唯一归属一个用户+机器。
+    // online/busy 优先；offline 且有 Daemon endpoint 时仍可按需拉起。
+    const dispatchable = allMatches.filter(isAgentDispatchable);
     if (allMatches.length > 1) {
       console.warn(`[Workflow] ⚠️  agent "${node.agent_name}" 有 ${allMatches.length} 条记录:`);
       for (const a of allMatches) {
         console.warn(`           ${a.status} ${a.user_id}@${a.host_user} → ${a.client_endpoint}`);
       }
     }
-    const agent = online.length > 0 ? online[0] : allMatches[0];
-
-    if (agent.status !== 'online') {
-      // 不论 runtime，都尝试推送到 Daemon，Daemon 自动通过 screen 拉起 agent
-      console.log(`[Workflow] ⚠ [${node.id}] ${node.agent_name} 状态为 ${agent.status} (${agent.runtime})，尝试推送（Daemon 自动拉起）`);
+    const agent = dispatchable.find(a => a.status === 'online')
+      || dispatchable.find(a => a.status === 'busy')
+      || dispatchable[0];
+    if (!agent) {
+      const states = [...new Set(allMatches.map(a => a.status))].join(', ');
+      const msg = `agent "${node.agent_name}" 当前不可调度（status: ${states || 'unknown'}）`;
+      node.status = 'failed';
+      node.error_code = 'AGENT_NOT_DISPATCHABLE';
+      node.result = codedFailure(node.error_code, msg);
+      node.completed_at = new Date().toISOString();
+      this.advanceAfterNodeTerminal(workflow, node.result);
+      return;
     }
 
     // 精确路由日志：谁、在哪台机器、哪个目录、什么运行时
@@ -500,11 +555,14 @@ export class WorkflowEngine {
     console.log(`           → cd ${agent.project_path || '(cwd)'}`);
     console.log(`           → runtime: ${agent.runtime || 'opencode'}`);
 
-    agentRegistry.updateStatus(agent.id, 'busy');
-
-    // 刷新 heartbeat，让 HealthMonitor 从此刻开始计时
-    // 避免 dead/offline agent 被设为 busy 后因旧心跳超时立即被杀
-    agentRegistry.touchHeartbeat(agent.id);
+    const previousAgentStatus = agent.status;
+    if (agent.status !== 'busy') {
+      if (agent.status === 'offline') {
+        console.log(`[Workflow] ⚠ [${node.id}] ${node.agent_name} runtime 离线，交给 Daemon 按需拉起`);
+      }
+      agentRegistry.updateStatus(agent.id, 'busy');
+      agentRegistry.touchHeartbeat(agent.id);
+    }
 
     // 拼接前置节点的结果作为上下文
     const context = this.buildNodeContext(workflow, node);
@@ -521,33 +579,16 @@ export class WorkflowEngine {
       const dispatched = await this.dispatchToEndpoint(agent, workflow, node, fullPrompt, agentSessionId);
       if (!dispatched) return; // dispatchToEndpoint 内部已处理失败
 
-      // 推送成功 → 设置 server-side 超时定时器
+      // 推送成功后先等待 Client 领取；领取时切换为 running 超时。
       const nodeKey = `${workflow.id}:${node.id}`;
-      const timer = setTimeout(() => {
-        if (node.status === 'running') {
-          console.error(`[Workflow] ⏰ [${node.id}] ${node.agent_name} 执行超时 (${NODE_TIMEOUT_MS / 1000}s)`);
-          node.status = 'failed';
-          node.result = `Server-side 超时: ${NODE_TIMEOUT_MS / 1000}s 内未收到 Client 回报`;
-          node.completed_at = new Date().toISOString();
-          agentRegistry.updateStatus(agent.id, 'online');
-          nodeTimeouts.delete(nodeKey);
-
-          eventBus.emit({
-            type: 'workflow_node_failed',
-            data: { workflow_id: workflow.id, node_id: node.id, agent_name: node.agent_name, status: 'failed', reason: 'timeout' },
-            timestamp: new Date().toISOString(),
-          });
-
-          this.advanceAfterNodeTerminal(workflow, `节点 [${node.id}] ${node.agent_name} 执行超时`);
-        }
-      }, NODE_TIMEOUT_MS);
-      nodeTimeouts.set(nodeKey, timer);
+      nodeTimeouts.set(nodeKey, this.createNodeTimeout(workflow, node, NODE_QUEUE_TIMEOUT_MS, 'queue'));
     } catch (err: any) {
       console.error(`[Workflow] ❌ [${node.id}] 推送失败 → ${agent.user_id}@${agent.host_user}: ${err.message}`);
       node.status = 'failed';
-      node.result = `推送失败: ${err.message}`;
+      node.error_code = executionErrorCode(err.message);
+      node.result = codedFailure(node.error_code, `推送失败: ${err.message}`);
       node.completed_at = new Date().toISOString();
-      agentRegistry.updateStatus(agent.id, 'online');
+      agentRegistry.updateStatus(agent.id, previousAgentStatus);
       this.advanceAfterNodeTerminal(workflow, node.result);
     }
   }
@@ -588,6 +629,8 @@ export class WorkflowEngine {
       execution_mode: node.execution_mode,
       detached: node.detached,
       session_id: sessionId,
+      workspace_id: node.workspace_id || node.agent_name,
+      run_context: this.executionRunContext(workflow),
     };
 
     const url = `${endpoint}/execute`;
@@ -598,10 +641,49 @@ export class WorkflowEngine {
       body,
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) throw new Error(`Client ${endpoint} responded ${res.status}`);
+    if (!res.ok) {
+      let detail = '';
+      try { detail = await res.text(); } catch {}
+      throw new Error(`Client ${endpoint} responded ${res.status}${detail ? `: ${detail.slice(0, 1000)}` : ''}`);
+    }
 
     console.log(`[Workflow]    ✅ 任务已推送到 Client`);
     return true;
+  }
+
+  private executionRunContext(workflow: Workflow): ExecutionRunContext | undefined {
+    const origin = workflow.origin || {};
+    if (!origin.execution_id) return undefined;
+    return {
+      execution_id: String(origin.execution_id),
+      request_id: String(origin.request_id || origin.execution_id),
+      external_id: String(origin.external_id || ''),
+      source_type: String(origin.source_type || 'custom'),
+      source_ref: String(origin.source_ref || ''),
+      workdir_policy: origin.workdir_policy === 'none' || origin.workdir_policy === 'configured_workspace'
+        ? origin.workdir_policy : 'managed_workspace',
+      artifact_base_url: origin.artifact_base_url ? String(origin.artifact_base_url) : undefined,
+      artifacts: Array.isArray(origin.artifacts) ? origin.artifacts.map(String) : [],
+      metadata: origin.metadata && typeof origin.metadata === 'object' ? origin.metadata as Record<string, unknown> : {},
+    };
+  }
+
+  private createNodeTimeout(workflow: Workflow, node: WorkflowNode, timeoutMs: number, phase: 'queue' | 'running'): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      if (node.status !== (phase === 'queue' ? 'queued' : 'running')) return;
+      const label = phase === 'queue' ? '排队' : '执行';
+      node.status = 'failed';
+      node.error_code = 'EXECUTION_TIMEOUT';
+      node.result = codedFailure(node.error_code, `Server-side ${label}超时: ${timeoutMs / 1000}s`);
+      node.completed_at = new Date().toISOString();
+      nodeTimeouts.delete(`${workflow.id}:${node.id}`);
+      eventBus.emit({
+        type: 'workflow_node_failed',
+        data: { workflow_id: workflow.id, node_id: node.id, agent_name: node.agent_name, status: 'failed', reason: `${phase}_timeout` },
+        timestamp: new Date().toISOString(),
+      });
+      this.advanceAfterNodeTerminal(workflow, node.result);
+    }, timeoutMs);
   }
 
   /** 把前置节点的结果拼成上下文 */
@@ -626,7 +708,7 @@ export class WorkflowEngine {
     for (const workflow of workflows.values()) {
       if (workflow.status !== 'running') continue;
       for (const node of workflow.nodes) {
-        if (node.agent_name === agentName && node.status === 'running') {
+        if (node.agent_name === agentName && (node.status === 'queued' || node.status === 'running')) {
           console.error(`[Workflow] 💀 [${node.id}] ${node.agent_name} — Client DEAD，强制标记失败`);
 
           // 清除超时 timer
@@ -635,7 +717,8 @@ export class WorkflowEngine {
           if (timer) { clearTimeout(timer); nodeTimeouts.delete(nodeKey); }
 
           node.status = 'failed';
-          node.result = 'Client DEAD: 心跳超时，执行器已离线';
+          node.error_code = 'CLIENT_UNREACHABLE';
+          node.result = codedFailure(node.error_code, 'Client DEAD: 心跳超时，执行器已离线');
           node.completed_at = new Date().toISOString();
 
           eventBus.emit({
@@ -668,7 +751,7 @@ export class WorkflowEngine {
       origin: workflow.origin,
       notify: workflow.notify,
       nodes: workflow.nodes.map(n => ({
-        id: n.id, agent_name: n.agent_name, status: n.status, result: n.result,
+        id: n.id, agent_name: n.agent_name, status: n.status, result: n.result, error_code: n.error_code,
       })),
     };
 
@@ -703,7 +786,7 @@ export class WorkflowEngine {
       origin: workflow.origin,
       notify: workflow.notify,
       nodes: workflow.nodes.map(n => ({
-        id: n.id, agent_name: n.agent_name, status: n.status, result: n.result,
+        id: n.id, agent_name: n.agent_name, status: n.status, result: n.result, error_code: n.error_code,
       })),
     };
 

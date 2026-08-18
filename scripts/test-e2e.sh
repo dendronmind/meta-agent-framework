@@ -39,12 +39,15 @@
 #   38 Codex wrapper auto-remote attached receiver
 #   39 Codex attached receiver thread/read fallback
 #   40 Workflow all_settled waits for parallel branches
-#   41 maf-init required input and incomplete config resume
+#   41 maf-init required input + Server listen default + Client install address
 #   42 Server 控制面身份不计入 Agent 看板
 #   43 管理鉴权 + Client 机器身份自动注册
 #   44 错 task_id / execution_id / status 回报拒绝
 #   45 OpenCode HTTP 失败、超时、空结果、旧结果不得误报成功
 #   46 MAS headless runtime 空输出不得误报成功
+#   47 Client local-only Agent 发布边界
+#   48 Headless Codex 首次终态回报不可被自动收尾覆盖
+#   49 通用 Execution 两阶段 Artifact + managed workspace + Patch
 #
 set -uo pipefail
 
@@ -54,7 +57,7 @@ cd "$SCRIPT_DIR"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 PASS=0; FAIL=0; TOTAL=0
-SERVER_PID=""; MOCK_PID=""; CC_KEEPALIVE_PID=""
+SERVER_PID=""; MOCK_PID=""; CC_KEEPALIVE_PID=""; PRIVACY_DAEMON_PID=""; RESULT_DAEMON_PID=""
 
 E2E_STATE_DIR="/tmp/maf-e2e-state"
 E2E_MAF_HOME="/tmp/maf-e2e-home"
@@ -62,6 +65,7 @@ E2E_USER_HOME="/tmp/maf-e2e-user"
 E2E_DB_PATH="/tmp/maf-e2e.db"
 E2E_BIN="/tmp/maf-e2e-bin"
 MAS_RUNTIME_MOCK="$E2E_BIN/mas-runtime-mock"
+MOCK_CODEX_PROMPT_LOG="/tmp/e2e-codex-mock-prompt.log"
 DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/logs/client-daemon.log"
 
 # 测试端口（与真实环境隔离）
@@ -83,7 +87,7 @@ export -f curl
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -110,7 +114,7 @@ NEED_DAEMON=false
 NEED_CC=false
 for c in "${RUN_CASES[@]}"; do
   NEED_SERVER=true
-  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]]; then NEED_DAEMON=true; fi
+  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]] || [[ $c -ge 48 && $c -le 49 ]]; then NEED_DAEMON=true; fi
   if [[ $c -eq 5 || $c -eq 7 || $c -eq 8 || $c -eq 9 || $c -eq 10 || $c -eq 11 || $c -eq 13 || $c -eq 18 ]]; then NEED_CC=true; fi
 done
 
@@ -310,6 +314,8 @@ cleanup() {
   echo -e "\n${YELLOW}清理...${NC}"
   [[ -n "$MOCK_PID" ]] && kill -9 "$MOCK_PID" 2>/dev/null
   [[ -n "$SERVER_PID" ]] && kill -9 "$SERVER_PID" 2>/dev/null
+  [[ -n "$PRIVACY_DAEMON_PID" ]] && kill -9 "$PRIVACY_DAEMON_PID" 2>/dev/null
+  [[ -n "$RESULT_DAEMON_PID" ]] && kill -9 "$RESULT_DAEMON_PID" 2>/dev/null
   stop_cc_wait_keepalive
   local DAEMON_PID
   DAEMON_PID=$(ss -tlnp 2>/dev/null | grep ":${NODE_PORT} " | grep -oP 'pid=\K\d+' | head -1)
@@ -317,13 +323,13 @@ cleanup() {
   pkill -9 -f "maf-agent.mjs.*${NODE_PORT}" 2>/dev/null || true
   pkill -f "opencode.*serve.*e2e" 2>/dev/null || true
   sleep 1
-  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14937 14938 14940; do
+  for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14147 14148 14937 14938 14940 14941; do
     PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
     [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project "$MOCK_CODEX_PROMPT_LOG"
 }
 trap cleanup EXIT
 
@@ -351,7 +357,7 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
-for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14937 14938 14940; do
+for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14147 14148 14937 14938 14940 14941; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
 done
@@ -406,12 +412,31 @@ cat > "$MAS_RUNTIME_MOCK" << 'MASRUNTIMEMOCK'
 set -euo pipefail
 mode_file="${MAF_HOME}/state/mas-runtime-mode"
 mode=$(cat "$mode_file" 2>/dev/null || echo normal)
+stdin_prompt=$(cat || true)
+args_prompt="$*"
+if [[ "$stdin_prompt $args_prompt" == *"不得自行 POST /api/workflows"* ]]; then
+  router_protocol=true
+else
+  router_protocol=false
+fi
+printf 'cwd=%s\nauth_token=%s\nlocal_token=%s\nserver_url=%s\nrouter_protocol=%s\nrouter_agent=%s\n' \
+  "$PWD" "${MAF_AUTH_TOKEN+present}" "${MAF_LOCAL_TOKEN+present}" "${META_AGENT_SERVER+present}" \
+  "$router_protocol" "${MAF_AGENT_NAME:-}" > "${MAF_HOME}/state/mas-runtime-observed"
 if [[ "$mode" == "empty" ]]; then
   printf '  \n'
   exit 0
 fi
 
-result="MAS ${MAF_RUNTIME:-unknown} mock result"
+if [[ "$mode" == "workflow" ]]; then
+  if [[ "$stdin_prompt $args_prompt" == *"# 历史交互"* ]]; then
+    result="remote workflow result summarized"
+  else
+    target_agent=$(cat "${MAF_HOME}/state/mas-runtime-agent")
+    result="{\"workflow\":{\"title\":\"generic managed execution\",\"nodes\":[{\"id\":\"managed-step\",\"agent_name\":\"$target_agent\",\"prompt\":\"MAF_E2E_MANAGED_EXECUTION\"}],\"failure_policy\":\"all_settled\"}}"
+  fi
+else
+  result="MAS ${MAF_RUNTIME:-unknown} mock result"
+fi
 if [[ "${MAF_RUNTIME:-}" == "codex" ]]; then
   output_file=""
   while [[ $# -gt 0 ]]; do
@@ -447,7 +472,7 @@ con.commit(); con.close()
 PYDB
 
 # Codex mock：需要在 Daemon 启动前放进环境，让 Daemon 读取 CODEX_BIN
-if should_run 33 || should_run 34 || should_run 35 || should_run 38; then
+if should_run 33 || should_run 34 || should_run 35 || should_run 38 || should_run 48 || should_run 49; then
   mkdir -p "$E2E_BIN"
   cat > "$E2E_BIN/codex" << 'CODEXMOCK'
 #!/usr/bin/env bash
@@ -501,6 +526,13 @@ done
 if [[ -z "$prompt" && ${#args[@]} -gt 0 ]]; then
   prompt="${args[*]}"
 fi
+if [[ -n "${MOCK_CODEX_PROMPT_LOG:-}" ]]; then
+  printf '%s\n' "$prompt" >> "$MOCK_CODEX_PROMPT_LOG"
+fi
+if [[ "$prompt" == *"MAF_E2E_MANAGED_EXECUTION"* ]]; then
+  printf 'changed by generic managed execution\n' > "${MAF_SOURCE_DIR}/source.txt"
+  printf 'artifact consumed\n' > "${MAF_OUTPUT_DIR}/agent-output.txt"
+fi
 summary="mock codex completed: $(echo "$prompt" | grep -m1 'Codex e2e task' || echo 'no prompt match')"
 if [[ -n "$out" ]]; then
   printf '%s\n' "$summary" > "$out"
@@ -517,6 +549,9 @@ else
     exit 3
   fi
 fi
+if [[ "$prompt" == *"MAF_E2E_WAIT_FOR_MANUAL_REPORT"* ]]; then
+  sleep 5
+fi
 if [[ -n "${MOCK_CODEX_SLEEP_SECONDS:-}" ]]; then
   sleep "$MOCK_CODEX_SLEEP_SECONDS"
 fi
@@ -524,6 +559,7 @@ echo "mock codex stdout"
 CODEXMOCK
   chmod +x "$E2E_BIN/codex"
   export CODEX_BIN="$E2E_BIN/codex"
+  export MOCK_CODEX_PROMPT_LOG
 fi
 
 # 启动 Server（所有 case 都需要）
@@ -1194,7 +1230,14 @@ curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application
 DEL_ID=$(curl -s "$E2E_SERVER/api/agents" 2>/dev/null | python3 -c "import json,sys;agents=json.load(sys.stdin);print(next((a['id'] for a in agents if a['agent_name']=='$DEL_AGENT'),''))" 2>/dev/null)
 assert "有 agent 可删" "true" "$([ -n "$DEL_ID" ] && echo true || echo false)"
 
-# 删除
+# 在线 Agent 受保护；下一次注册改为 offline 后 ID 仍必须稳定。
+assert "在线 agent 不可删除" "409" "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$E2E_SERVER/api/agents/$DEL_ID" 2>/dev/null)"
+curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"e2e\",\"host_user\":\"e2e\",\"client_endpoint\":\"http://127.0.0.1:$NODE_PORT\",\"agent_statuses\":{\"$DEL_AGENT\":\"offline\"},\"agents\":[{\"agent_name\":\"$DEL_AGENT\",\"runtime\":\"opencode\",\"project_path\":\"/tmp\",\"capabilities\":\"updated test\",\"mode\":\"subagent\"}]}" >/dev/null 2>&1
+DEL_ID_AFTER=$(curl -s "$E2E_SERVER/api/agents" 2>/dev/null | python3 -c "import json,sys;agents=json.load(sys.stdin);print(next((a['id'] for a in agents if a['agent_name']=='$DEL_AGENT'),''))" 2>/dev/null)
+assert "重复注册保留 agent ID" "$DEL_ID" "$DEL_ID_AFTER"
+
+# 历史记录允许删除
 DEL_RES=$(curl -s -X DELETE "$E2E_SERVER/api/agents/$DEL_ID" 2>/dev/null)
 assert "DELETE 200" "$DEL_ID" "$(echo "$DEL_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
 
@@ -2384,6 +2427,8 @@ if "配置未完成" not in out1 or "Runtime 为必选项" not in out1:
 cfg1 = json.load(open(os.path.join(home1, ".meta-agent-framework", "maf.config.json")))
 if cfg1.get("server", {}).get("runtime") != "codex":
     raise AssertionError(f"runtime not saved as codex: {cfg1}")
+if cfg1.get("server", {}).get("host") != "0.0.0.0":
+    raise AssertionError(f"server listen host should default to 0.0.0.0: {cfg1}")
 
 home2 = os.path.join(base, "feishu")
 steps2 = [
@@ -2423,12 +2468,66 @@ if cfg2.get("feishu", {}).get("bitable", {}).get("table_id") != "tbl-id":
 print("INCOMPLETE_NO_OVERWRITE=ok")
 print("RUNTIME_REQUIRED=ok")
 print("FEISHU_REQUIRED=ok")
+print("SERVER_LISTEN_DEFAULT=ok")
 PY
 )
 
 assert "未完成配置不再提示覆盖" "INCOMPLETE_NO_OVERWRITE=ok" "$INIT_OUTPUT"
 assert "Runtime 空输入提示必选" "RUNTIME_REQUIRED=ok" "$INIT_OUTPUT"
 assert "飞书必填项空输入提示" "FEISHU_REQUIRED=ok" "$INIT_OUTPUT"
+assert "Server 默认监听所有网卡" "SERVER_LISTEN_DEFAULT=ok" "$INIT_OUTPUT"
+
+CLIENT_INSTALL_HOME="$INIT_TEST_BASE/client-install"
+mkdir -p "$CLIENT_INSTALL_HOME"
+cat > "$CLIENT_INSTALL_HOME/.bashrc" <<'BASHRCEOF'
+export META_AGENT_SERVER=http://192.0.2.10:3000
+export META_AGENT_SERVER=http://192.0.2.11:3000
+BASHRCEOF
+
+CLIENT_INSTALL_OUTPUT=$(HOME="$CLIENT_INSTALL_HOME" XDG_CONFIG_HOME="$CLIENT_INSTALL_HOME/.config" \
+  META_AGENT_SERVER="http://192.0.2.12:3000" \
+  node "$ROOT_DIR/packages/client/bin/maf-install.mjs" install 192.168.1.100 2>&1)
+CLIENT_INSTALL_CONFIG=$(python3 -c "import json; print(json.load(open('$CLIENT_INSTALL_HOME/.meta-agent-framework/maf.config.json'))['server']['url'])")
+CLIENT_INSTALL_BASHRC=$(grep -c '^[[:space:]]*export[[:space:]]\+META_AGENT_SERVER=' "$CLIENT_INSTALL_HOME/.bashrc" || true)
+assert "Client 尾随 IP 自动补协议和端口" "http://192.168.1.100:3000" "$CLIENT_INSTALL_CONFIG"
+assert "Client 显式地址优先于旧环境变量" "Server: http://192.168.1.100:3000" "$CLIENT_INSTALL_OUTPUT"
+assert "Client 安装清理 bashrc 旧 Server 地址" "0" "$CLIENT_INSTALL_BASHRC"
+
+CLIENT_STATUS_OUTPUT=$(HOME="$CLIENT_INSTALL_HOME" XDG_CONFIG_HOME="$CLIENT_INSTALL_HOME/.config" \
+  META_AGENT_SERVER="http://192.0.2.19:3000" \
+  node "$ROOT_DIR/packages/client/bin/maf-install.mjs" status 2>&1)
+assert "Client status 以配置文件为准" "Server (effective): http://192.168.1.100:3000" "$CLIENT_STATUS_OUTPUT"
+assert "Client status 明示忽略冲突环境变量" "忽略与配置文件不一致的旧环境变量" "$CLIENT_STATUS_OUTPUT"
+
+CLIENT_RELOAD_PORT=14941
+HOME="$CLIENT_INSTALL_HOME" META_AGENT_SERVER="http://192.0.2.20:3000" MAF_NODE_PORT="$CLIENT_RELOAD_PORT" \
+  node "$CLIENT_INSTALL_HOME/.meta-agent-framework/daemon.mjs" >/dev/null 2>&1 &
+CLIENT_RELOAD_OLD_PID=$!
+wait_until 10 "command curl -s http://127.0.0.1:$CLIENT_RELOAD_PORT/health 2>/dev/null" '192.168.1.100' || true
+CLIENT_CONFIG_FIRST_HEALTH=$(command curl -s "http://127.0.0.1:$CLIENT_RELOAD_PORT/health" 2>/dev/null)
+assert "Daemon 配置文件优先于冲突环境变量" "http://192.168.1.100:3000" "$CLIENT_CONFIG_FIRST_HEALTH"
+CLIENT_RELOAD_OUTPUT=$(HOME="$CLIENT_INSTALL_HOME" XDG_CONFIG_HOME="$CLIENT_INSTALL_HOME/.config" \
+  META_AGENT_SERVER="http://192.0.2.21:3000" MAF_NODE_PORT="$CLIENT_RELOAD_PORT" \
+  node "$ROOT_DIR/packages/client/bin/maf-install.mjs" install 192.168.1.101 2>&1)
+CLIENT_RELOAD_HEALTH=$(command curl -s "http://127.0.0.1:$CLIENT_RELOAD_PORT/health" 2>/dev/null)
+CLIENT_RELOAD_NEW_PID=$(echo "$CLIENT_RELOAD_HEALTH" | python3 -c "import json,sys; print(json.load(sys.stdin).get('pid',''))" 2>/dev/null)
+assert "Client 重装自动重启运行中 Daemon" "true" "$([ -n "$CLIENT_RELOAD_NEW_PID" ] && [ "$CLIENT_RELOAD_NEW_PID" != "$CLIENT_RELOAD_OLD_PID" ] && echo true || echo false)"
+assert "Client 重装后 Daemon 立即使用新地址" "http://192.168.1.101:3000" "$CLIENT_RELOAD_HEALTH"
+assert "Client 重装输出 Daemon 配置生效" "Node Daemon 已重启并连接" "$CLIENT_RELOAD_OUTPUT"
+kill "$CLIENT_RELOAD_NEW_PID" 2>/dev/null || true
+wait "$CLIENT_RELOAD_OLD_PID" 2>/dev/null || true
+
+CLIENT_UNROUTABLE_CODE=0
+CLIENT_UNROUTABLE_OUTPUT=$(HOME="$CLIENT_INSTALL_HOME" XDG_CONFIG_HOME="$CLIENT_INSTALL_HOME/.config" \
+  node "$ROOT_DIR/packages/client/bin/maf-install.mjs" install 0.0.0.0 2>&1) || CLIENT_UNROUTABLE_CODE=$?
+assert "Client 拒绝 0.0.0.0 作为远端地址" "只能作为 Server 监听地址" "$CLIENT_UNROUTABLE_OUTPUT"
+assert "Client 非法远端地址返回失败" "true" "$([ "$CLIENT_UNROUTABLE_CODE" -ne 0 ] && echo true || echo false)"
+
+CLIENT_INVALID_CODE=0
+CLIENT_INVALID_OUTPUT=$(HOME="$CLIENT_INSTALL_HOME" XDG_CONFIG_HOME="$CLIENT_INSTALL_HOME/.config" \
+  node "$ROOT_DIR/packages/client/bin/maf-install.mjs" install http://192.168.1.100:3000/path 2>&1) || CLIENT_INVALID_CODE=$?
+assert "Client 地址校验提示完整 URL 格式" "请输入完整 URL，例如 http://192.168.1.100:3000" "$CLIENT_INVALID_OUTPUT"
+assert "Client 地址校验不暴露解析细节" "true" "$([ "$CLIENT_INVALID_CODE" -ne 0 ] && [[ "$CLIENT_INVALID_OUTPUT" != *"路径、查询参数或片段"* ]] && echo true || echo false)"
 
 rm -rf "$INIT_TEST_BASE"
 fi
@@ -2611,17 +2710,21 @@ wait_until 10 "command curl -s $LATE_DAEMON/health 2>/dev/null" '"enrollment_sta
 LATE_HEALTH=$(command curl -s "$LATE_DAEMON/health" 2>/dev/null)
 assert "晚启动 Client 无配对信息自动准入" '"enrollment_status":"active"' "$LATE_HEALTH"
 LATE_CLIENT_ID=$(echo "$LATE_HEALTH" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
+LATE_USER_ID=$(echo "$LATE_HEALTH" | python3 -c "import json,sys;print(json.load(sys.stdin).get('user_id',''))")
 assert "晚启动 Client 进入 Server 身份表" "$LATE_CLIENT_ID" "$(curl -s "$E2E_SERVER/api/auth/clients")"
+assert "Client 用户身份已持久化" "$LATE_USER_ID" "$(cat "$LATE_HOME/.meta-agent-framework/auth/user-id")"
+assert "Client 用户身份文件权限 0600" "600" "$(stat -c '%a' "$LATE_HOME/.meta-agent-framework/auth/user-id")"
 kill -9 "$LATE_PID" 2>/dev/null || true
 wait "$LATE_PID" 2>/dev/null || true
 rm -f "$LATE_HOME/.meta-agent-framework/auth/client-public.pem"
-env -u MAF_AUTH_TOKEN -u MAF_LOCAL_TOKEN HOME="$LATE_HOME" META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$LATE_PORT" \
+env -u MAF_AUTH_TOKEN -u MAF_LOCAL_TOKEN HOME="$LATE_HOME" MAF_USER_ID="must-not-replace-stable-id" META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$LATE_PORT" \
   node "$LATE_HOME/.meta-agent-framework/daemon.mjs" >/tmp/maf-e2e-late-client-repair.log 2>&1 &
 LATE_REPAIR_PID=$!
 disown $LATE_REPAIR_PID
 wait_until 10 "command curl -s $LATE_DAEMON/health 2>/dev/null" '"enrollment_status":"active"' || true
 LATE_REPAIRED_ID=$(command curl -s "$LATE_DAEMON/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
 assert "Client 公钥缺失后从私钥恢复" "$LATE_CLIENT_ID" "$LATE_REPAIRED_ID"
+assert "Client 重启后忽略变化的进程用户标识" "$LATE_USER_ID" "$(command curl -s "$LATE_DAEMON/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('user_id',''))")"
 kill -9 "$LATE_REPAIR_PID" 2>/dev/null || true
 fi
 
@@ -2730,7 +2833,230 @@ for RUNTIME in opencode claude codex; do
   SUCCESS_MAS_DETAIL=$(curl -s "$E2E_SERVER/api/workflows/mas/sessions/$SUCCESS_MAS_ID")
   assert "MAS $RUNTIME 正常输出保留结果" "mock result" \
     "$(echo "$SUCCESS_MAS_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['rounds'][0].get('mas_output',''))")"
+  MAS_OBSERVED=$(cat "$E2E_MAF_HOME/state/mas-runtime-observed")
+  assert "MAS $RUNTIME Router 不继承管理 Token" "" "$(echo "$MAS_OBSERVED" | sed -n 's/^auth_token=//p')"
+  assert "MAS $RUNTIME Router 不继承本机 Token" "" "$(echo "$MAS_OBSERVED" | sed -n 's/^local_token=//p')"
+  assert "MAS $RUNTIME Router 不继承 Server URL" "" "$(echo "$MAS_OBSERVED" | sed -n 's/^server_url=//p')"
+  assert "MAS $RUNTIME Router 使用隔离临时目录" "true" "$(echo "$MAS_OBSERVED" | rg -q '^cwd=/tmp/maf-mas-router-' && echo true || echo false)"
+  assert "MAS $RUNTIME Router 收到只读协议" "router_protocol=true" "$MAS_OBSERVED"
+  assert "MAS $RUNTIME Router 使用独立身份" "router_agent=Meta-Agent-Router" "$MAS_OBSERVED"
 done
+fi
+
+# ============================================================
+# Case 47: Client local-only Agent 发布边界
+# ============================================================
+if should_run 47; then
+echo -e "\n${YELLOW}Case 47: Client local-only Agent 发布边界${NC}"
+
+PRIVACY_HOME="/tmp/maf-e2e-agent-privacy"
+PRIVACY_PORT=14147
+PRIVACY_DAEMON="http://127.0.0.1:${PRIVACY_PORT}"
+PRIVACY_REMOTE_DAEMON="http://${E2E_REMOTE_HOST}:${PRIVACY_PORT}"
+PRIVATE_AGENT="private-agent-$$"
+UNLISTED_AGENT="unlisted-agent-$$"
+PUBLIC_AGENT="published-agent-$$"
+rm -rf "$PRIVACY_HOME"
+mkdir -p "$PRIVACY_HOME/.meta-agent-framework"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$PRIVACY_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$PRIVACY_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+cat > "$PRIVACY_HOME/.meta-agent-framework/maf.config.json" << PRIVACYJSON
+{
+  "server": { "url": "$E2E_SERVER" },
+  "daemon": { "port": $PRIVACY_PORT },
+  "client": {
+    "agent_publication": {
+      "mode": "explicit",
+      "include": ["$PUBLIC_AGENT"],
+      "local_only": ["$PRIVATE_AGENT"],
+      "client_network": "when-published"
+    }
+  }
+}
+PRIVACYJSON
+
+HOME="$PRIVACY_HOME" XDG_CONFIG_HOME="$PRIVACY_HOME/.config" \
+  MAF_LOCAL_TOKEN="$MAF_AUTH_TOKEN" MAF_USER_ID="privacy-e2e" MAF_NODE_PORT="$PRIVACY_PORT" \
+  node "$PRIVACY_HOME/.meta-agent-framework/daemon.mjs" >/tmp/maf-e2e-agent-privacy.log 2>&1 &
+PRIVACY_DAEMON_PID=$!
+disown "$PRIVACY_DAEMON_PID"
+
+wait_until 10 "command curl -s '$PRIVACY_DAEMON/health' 2>/dev/null" '"ok":true' || true
+PRIVACY_HEALTH=$(command curl -s "$PRIVACY_DAEMON/health")
+assert "隐私 Daemon 启动" '"ok":true' "$PRIVACY_HEALTH"
+PRIVACY_CLIENT_ID=$(echo "$PRIVACY_HEALTH" | python3 -c "import json,sys;print(json.load(sys.stdin).get('client_id',''))")
+assert "无公开 Agent 时不 enrollment" "False" \
+  "$(curl -s "$E2E_SERVER/api/auth/clients" | python3 -c "import json,sys;print(any(c.get('client_id')=='$PRIVACY_CLIENT_ID' for c in json.load(sys.stdin)))")"
+
+PRIVATE_CONNECT=$(curl -s -X POST "$PRIVACY_DAEMON/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$PRIVATE_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$$,\"directory\":\"/tmp/private\",\"user_id\":\"privacy-e2e\"}")
+assert "显式 local_only 连接成功" '"local_only":true' "$PRIVATE_CONNECT"
+
+UNLISTED_CONNECT=$(curl -s -X POST "$PRIVACY_DAEMON/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$UNLISTED_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$$,\"directory\":\"/tmp/unlisted\",\"user_id\":\"privacy-e2e\"}")
+assert "explicit 模式未列入 include 的 Agent 自动 local-only" '"local_only":true' "$UNLISTED_CONNECT"
+
+sleep 1
+assert "local-only 连接不触发 enrollment" "False" \
+  "$(curl -s "$E2E_SERVER/api/auth/clients" | python3 -c "import json,sys;print(any(c.get('client_id')=='$PRIVACY_CLIENT_ID' for c in json.load(sys.stdin)))")"
+assert "本机 health 保留 local-only Agent" "$PRIVATE_AGENT" "$(command curl -s "$PRIVACY_DAEMON/health")"
+assert "本机 agents 标记 local-only" '"visibility":"local-only"' "$(curl -s "$PRIVACY_DAEMON/agents")"
+
+REMOTE_PRIVATE_HEALTH=$(command curl --noproxy '*' -s "$PRIVACY_REMOTE_DAEMON/health")
+assert "远端 health 不暴露 local-only Agent" "not_found" \
+  "$(echo "$REMOTE_PRIVATE_HEALTH" | rg -o "$PRIVATE_AGENT" || echo not_found)"
+assert "远端 health 不暴露 Client ID" "not_found" \
+  "$(echo "$REMOTE_PRIVATE_HEALTH" | rg -o "$PRIVACY_CLIENT_ID" || echo not_found)"
+
+PUBLIC_CONNECT=$(curl -s -X POST "$PRIVACY_DAEMON/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$PUBLIC_AGENT\",\"runtime\":\"opencode\",\"plugin_pid\":$$,\"directory\":\"/tmp/public\",\"user_id\":\"privacy-e2e\"}")
+assert "include 中 Agent 正常发布" '"local_only":false' "$PUBLIC_CONNECT"
+wait_until 10 "get_agent_field status '$PUBLIC_AGENT'" "online" || true
+assert "Server 只看到公开 Agent" "$PUBLIC_AGENT" "$(get_agent_field agent_name "$PUBLIC_AGENT")"
+assert "Server 不存在显式 local-only Agent" "not_found" \
+  "$(get_agent_field agent_name "$PRIVATE_AGENT" | rg -o "$PRIVATE_AGENT" || echo not_found)"
+assert "Server 不存在 implicit local-only Agent" "not_found" \
+  "$(get_agent_field agent_name "$UNLISTED_AGENT" | rg -o "$UNLISTED_AGENT" || echo not_found)"
+assert "首个公开 Agent 触发 enrollment" "True" \
+  "$(curl -s "$E2E_SERVER/api/auth/clients" | python3 -c "import json,sys;print(any(c.get('client_id')=='$PRIVACY_CLIENT_ID' for c in json.load(sys.stdin)))")"
+
+REMOTE_PUBLISHED_HEALTH=$(command curl --noproxy '*' -s "$PRIVACY_REMOTE_DAEMON/health")
+assert "远端 health 只显示公开 Agent" "$PUBLIC_AGENT" "$REMOTE_PUBLISHED_HEALTH"
+assert "远端 health 仍不显示 private Agent" "not_found" \
+  "$(echo "$REMOTE_PUBLISHED_HEALTH" | rg -o "$PRIVATE_AGENT" || echo not_found)"
+assert "Server 不能向 local-only Agent 派发" "HTTP:404" \
+  "$(server_signed_fetch "$PRIVACY_DAEMON/execute" POST "{\"agent_name\":\"$PRIVATE_AGENT\",\"prompt\":\"must stay local\"}")"
+assert "local-only Agent 不能向 Server 提交 proposal" "404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PRIVACY_DAEMON/proposals/submit" -H 'Content-Type: application/json' -d "{\"from_agent\":\"$PRIVATE_AGENT\",\"type\":\"other\",\"title\":\"must stay local\"}")"
+
+kill -9 "$PRIVACY_DAEMON_PID" 2>/dev/null || true
+wait "$PRIVACY_DAEMON_PID" 2>/dev/null || true
+PRIVACY_DAEMON_PID=""
+fi
+
+# ============================================================
+# Case 48: Headless Codex 只接受首次成功终态回报
+# ============================================================
+if should_run 48; then
+echo -e "\n${YELLOW}Case 48: Headless Codex 终态回报幂等${NC}"
+
+RESULT_HOME="/tmp/maf-e2e-result-idempotency"
+RESULT_PORT=14148
+RESULT_DAEMON="http://127.0.0.1:${RESULT_PORT}"
+RESULT_AGENT="codex-result-idempotency-$$"
+mkdir -p "$RESULT_HOME/.meta-agent-framework"
+cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$RESULT_HOME/.meta-agent-framework/daemon.mjs"
+cat > "$RESULT_HOME/.meta-agent-framework/package.json" << PKGJSON
+{"name":"@maf/meta-agent-daemon","version":"$EXPECTED_VERSION","type":"module"}
+PKGJSON
+
+HOME="$RESULT_HOME" XDG_CONFIG_HOME="$RESULT_HOME/.config" \
+  META_AGENT_SERVER="$E2E_SERVER" MAF_LOCAL_TOKEN="$MAF_AUTH_TOKEN" MAF_USER_ID="result-e2e" \
+  MAF_NODE_PORT="$RESULT_PORT" MAF_CODEX_MODE="exec" CODEX_BIN="$CODEX_BIN" \
+  MOCK_CODEX_PROMPT_LOG="$MOCK_CODEX_PROMPT_LOG" \
+  node "$RESULT_HOME/.meta-agent-framework/daemon.mjs" >/tmp/maf-e2e-result-idempotency.log 2>&1 &
+RESULT_DAEMON_PID=$!
+disown "$RESULT_DAEMON_PID"
+
+wait_until 10 "command curl -s '$RESULT_DAEMON/health' 2>/dev/null" '"ok":true' || true
+curl -s -X POST "$RESULT_DAEMON/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$RESULT_AGENT\",\"runtime\":\"codex\",\"directory\":\"/tmp\"}" >/dev/null
+wait_until 10 "get_agent_field status '$RESULT_AGENT'" "online" || true
+
+RESULT_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' -d "{
+  \"title\":\"headless result idempotency\",
+  \"nodes\":[{\"id\":\"result-node\",\"agent_name\":\"$RESULT_AGENT\",\"prompt\":\"MAF_E2E_WAIT_FOR_MANUAL_REPORT\",\"scope\":\"project\",\"intent\":\"query\"}]
+}")
+RESULT_WF_ID=$(echo "$RESULT_WF" | python3 -c "import json,sys;print(json.load(sys.stdin).get('workflow_id',''))")
+wait_until 10 "curl -s '$E2E_SERVER/api/workflows/$RESULT_WF_ID'" '"status":"running"' || true
+RESULT_EXEC_ID=$(curl -s "$E2E_SERVER/api/workflows/$RESULT_WF_ID" | python3 -c "import json,sys;print(json.load(sys.stdin)['nodes'][0].get('execution_id',''))")
+RESULT_DONE=$(curl -s -X POST "$RESULT_DAEMON/tasks/done" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$RESULT_AGENT\",\"task_id\":\"$RESULT_EXEC_ID\",\"status\":\"completed\",\"result\":\"authoritative detailed report\",\"duration_ms\":1}")
+assert "首次 Headless 终态回报成功" '"ok":true' "$RESULT_DONE"
+wait_until 10 "curl -s '$E2E_SERVER/api/workflows/$RESULT_WF_ID'" '"status":"completed"' || true
+sleep 6
+RESULT_WF_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$RESULT_WF_ID" | python3 -c "import json,sys;print(json.load(sys.stdin)['nodes'][0].get('result',''))")
+assert "自动收尾未覆盖 Server 权威结果" "authoritative detailed report" "$RESULT_WF_RESULT"
+assert "重复终态回报被明确忽略" "忽略任务重复终态回报" "$(tail -n 80 "$RESULT_HOME/.meta-agent-framework/logs/client-daemon.log")"
+assert "Headless Prompt 禁止自行回报" "不要调用 /tasks/done" "$(cat "$MOCK_CODEX_PROMPT_LOG")"
+
+kill -9 "$RESULT_DAEMON_PID" 2>/dev/null || true
+wait "$RESULT_DAEMON_PID" 2>/dev/null || true
+RESULT_DAEMON_PID=""
+fi
+
+# ============================================================
+# Case 49: 通用 Execution 两阶段 Artifact + managed workspace + Patch
+# ============================================================
+if should_run 49; then
+echo -e "\n${YELLOW}Case 49: 通用 managed Execution 完整链路${NC}"
+
+EXEC_ORIGIN="/tmp/maf-e2e-execution-origin.git"
+EXEC_SEED="/tmp/maf-e2e-execution-seed"
+EXEC_BASE="/tmp/maf-e2e-execution-base"
+EXEC_AGENT="managed-execution-agent"
+rm -rf "$EXEC_ORIGIN" "$EXEC_SEED" "$EXEC_BASE"
+git init --bare "$EXEC_ORIGIN" >/dev/null
+git init -b main "$EXEC_SEED" >/dev/null
+git -C "$EXEC_SEED" config user.name "MAF E2E"
+git -C "$EXEC_SEED" config user.email "maf-e2e@local"
+printf 'original baseline\n' > "$EXEC_SEED/source.txt"
+git -C "$EXEC_SEED" add source.txt
+git -C "$EXEC_SEED" commit -m initial >/dev/null
+git -C "$EXEC_SEED" remote add origin "$EXEC_ORIGIN"
+git -C "$EXEC_SEED" push -u origin main >/dev/null
+git -C "$EXEC_ORIGIN" symbolic-ref HEAD refs/heads/main
+git clone "$EXEC_ORIGIN" "$EXEC_BASE" >/dev/null
+
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$EXEC_AGENT\",\"runtime\":\"codex\",\"directory\":\"$EXEC_BASE\"}" >/dev/null
+wait_until 10 "get_agent_field status '$EXEC_AGENT'" "online" || true
+printf '%s\n' "$EXEC_AGENT" > "$E2E_MAF_HOME/state/mas-runtime-agent"
+printf 'workflow\n' > "$E2E_MAF_HOME/state/mas-runtime-mode"
+
+EXEC_CREATE=$(curl -s -X POST "$E2E_SERVER/api/v1/executions" -H 'Content-Type: application/json' -d '{
+  "request_id":"generic-request-001",
+  "external_id":"external-object-001",
+  "source_type":"arbitrary-source",
+  "source_ref":"source://example/001",
+  "title":"generic managed execution e2e",
+  "prompt":"Use the supplied artifact and update the repository.",
+  "metadata":{"opaque_context":{"priority":7}},
+  "workdir_policy":"managed_workspace",
+  "auto_start":false
+}')
+EXEC_ID=$(echo "$EXEC_CREATE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
+assert "Execution 创建后保持 queued" "queued" "$(echo "$EXEC_CREATE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+assert "Execution 接受任意 source_type" "arbitrary-source" "$EXEC_CREATE"
+assert "Execution 透明保留 metadata" '"opaque_context"' "$EXEC_CREATE"
+
+ARTIFACT_STATUS=$(printf 'generic evidence\n' | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+  "$E2E_SERVER/api/v1/executions/$EXEC_ID/artifacts/evidence/input.txt" --data-binary @-)
+assert "Execution 启动前可上传 Artifact" "201" "$ARTIFACT_STATUS"
+EXEC_START=$(curl -s -X POST "$E2E_SERVER/api/v1/executions/$EXEC_ID/start")
+assert "显式启动 Execution" '"started":true' "$EXEC_START"
+wait_until 25 "curl -s '$E2E_SERVER/api/v1/executions/$EXEC_ID'" '"status":"completed"' || true
+
+EXEC_FINAL=$(curl -s "$E2E_SERVER/api/v1/executions/$EXEC_ID")
+assert "managed Execution 最终 completed" "completed" "$(echo "$EXEC_FINAL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+assert "Execution 枚举已上传 Artifact" "evidence/input.txt" "$EXEC_FINAL"
+assert "Execution 产生 Patch" '"available":true' "$EXEC_FINAL"
+assert "Patch 记录变更文件" "source.txt" "$EXEC_FINAL"
+assert "Patch 下载包含源码修改" "changed by generic managed execution" "$(curl -s "$E2E_SERVER/api/v1/executions/$EXEC_ID/patch")"
+
+EXEC_WORKSPACE=$(echo "$EXEC_FINAL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('patch',{}).get('workspace_path',''))")
+assert "基础仓库未被改写" "original baseline" "$(cat "$EXEC_BASE/source.txt")"
+assert "基础仓库保持 clean" "" "$(git -C "$EXEC_BASE" status --porcelain)"
+assert "复用 workspace 已恢复远端基线" "original baseline" "$(cat "$EXEC_WORKSPACE/source.txt")"
+assert "成功后释放 workspace 锁" "False" "$(python3 -c "from pathlib import Path; print((Path('$EXEC_WORKSPACE').parent / 'workspace.lock').exists())")"
+
+EXEC_DUPLICATE=$(curl -s -X POST "$E2E_SERVER/api/v1/executions" -H 'Content-Type: application/json' \
+  -d '{"request_id":"generic-request-001","title":"must not replace","prompt":"must not replace"}')
+assert "request_id 重试返回同一 Execution" "$EXEC_ID" "$(echo "$EXEC_DUPLICATE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")"
+assert "request_id 重试不覆盖原始标题" "generic managed execution e2e" "$EXEC_DUPLICATE"
+printf 'normal\n' > "$E2E_MAF_HOME/state/mas-runtime-mode"
 fi
 
 # ============================================================

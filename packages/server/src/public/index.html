@@ -98,7 +98,9 @@
     .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.55); background: rgba(51, 65, 85, 0.95); }
     body.light .btn:hover { background: rgba(241, 245, 249, 0.95); }
     .btn.primary { border-color: rgba(56, 189, 248, 0.6); background: linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(124, 58, 237, 0.9)); color: white; }
+    .btn.danger { border-color: rgba(251, 113, 133, 0.5); background: rgba(127, 29, 29, 0.32); color: #fecdd3; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+    .btn[hidden] { display: none; }
 
     .form-grid { display: grid; grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 1.2fr); gap: 12px; align-items: start; }
     .form-grid.two { grid-template-columns: 1fr 1fr; margin-top: 10px; }
@@ -262,11 +264,29 @@
     .step-name { margin-top: 8px; font-weight: 750; font-size: 12px; color: var(--text-strong); }
     .step-note { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.35; }
 
+    .agent-card { width: 100%; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+    .agent-card:hover, .agent-card:focus-visible { border-color: rgba(56, 189, 248, 0.52); outline: none; }
     .agent-card.busy { border-color: rgba(56, 189, 248, 0.34); }
     .agent-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
     .agent-name { font-weight: 800; color: var(--text-strong); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
     .agent-work { margin-top: 10px; padding: 9px; border-radius: 12px; background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(56, 189, 248, 0.16); color: #bfdbfe; font-size: 11px; line-height: 1.45; }
     body.light .agent-work { color: #075985; }
+
+    .agent-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; overflow: hidden; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: #0f172a; }
+    body.light .agent-dialog { background: #fff; }
+    .agent-dialog::backdrop { background: rgba(2, 6, 23, 0.76); }
+    .agent-dialog-header, .agent-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
+    .agent-dialog-header { border-bottom: 1px solid var(--line); }
+    .agent-dialog-footer { border-top: 1px solid var(--line); }
+    .agent-dialog-title { min-width: 0; color: var(--text-strong); font-size: 16px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-dialog-close { width: 34px; height: 34px; padding: 0; font-size: 18px; }
+    .agent-dialog-body { max-height: calc(100vh - 180px); padding: 16px; overflow: auto; }
+    .agent-detail-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .agent-detail-heading { margin-bottom: 9px; color: var(--text-strong); font-size: 12px; font-weight: 760; }
+    .agent-description { color: var(--text); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .agent-tags { display: flex; flex-wrap: wrap; gap: 7px; }
+    .agent-tag { max-width: 100%; padding: 5px 8px; border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 7px; font-size: 11px; overflow-wrap: anywhere; }
+    .agent-dialog-note { color: var(--muted); font-size: 11px; line-height: 1.45; }
 
     .coverage-list { display: flex; flex-direction: column; gap: 9px; }
     .coverage-item { padding: 9px; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.12); background: rgba(15, 23, 42, 0.28); }
@@ -486,6 +506,18 @@
     </section>
   </div>
 
+  <dialog class="agent-dialog" id="agent-detail-dialog">
+    <div class="agent-dialog-header">
+      <div class="agent-dialog-title" id="agent-detail-title">Agent</div>
+      <button class="btn agent-dialog-close" id="agent-detail-close" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <div class="agent-dialog-body" id="agent-detail-body"></div>
+    <div class="agent-dialog-footer">
+      <span class="agent-dialog-note" id="agent-delete-note"></span>
+      <button class="btn danger" id="agent-delete-btn" type="button" hidden>删除历史 Agent</button>
+    </div>
+  </dialog>
+
   <script>
     const API = location.origin;
     const params = new URLSearchParams(location.search);
@@ -496,7 +528,7 @@
         pageTitle: 'MAF 控制台', pageSubtitle: 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件', embeddedTitle: 'MAF 执行面板', embeddedSubtitle: '可内嵌的 Agent / Workflow 执行面板',
         server: 'Server', agentsOnline: '在线 Agent', busyAgents: '忙碌 Agent', skills: 'Skills', mcps: 'MCPs', runningWorkflows: '运行中 Workflow', activeMasSessions: '活跃 MAS 会话', openTasks: '未完成任务',
         workflowFocus: 'Workflow 焦点', workflowFocusHint: '选择一个 workflow 查看执行详情', workflowDetail: 'Workflow 详情', workflowDetailHint: 'DAG 节点、执行结果和上下文',
-        agentBoard: 'Agent 看板', agentBoardHint: '在线状态、runtime、版本和能力', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
+        agentBoard: 'Agent 看板', agentBoardHint: '点击 Agent 查看描述、源码路径和运行详情', agentDetail: 'Agent 详情', agentDescription: '职责描述', agentIdentity: '身份与运行位置', projectPath: '源码路径', clientEndpoint: 'Client 地址', clientId: 'Client ID', daemonPort: 'Daemon 端口', registeredAt: '注册时间', lastHeartbeat: '最后心跳', notConfigured: '未配置', deleteHistoricalAgent: '删除历史 Agent', deleteAgentConfirm: '确定删除这个历史 Agent 吗？此操作只删除注册记录。', deleteAgentFailed: '删除 Agent 失败', deleteAgentOnlyHistorical: '在线或忙碌 Agent 受保护，不能删除。', readonlyAgentDelete: '远程只读模式可查看详情；删除操作仅限 Server 本机管理视图。', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
         tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
         inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果', clientIdentities: 'Client 机器身份', clientIdentitiesHint: '机器身份准入、审批与单机吊销', approve: '批准', revoke: '吊销', noClientIdentities: '暂无 Client 机器身份。Client 首次上线后会自动出现在这里。', clientActionFailed: 'Client 身份操作失败', fingerprint: '指纹', sourceIp: '来源 IP', lastSeen: '最近在线',
         submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败',
@@ -509,7 +541,7 @@
         pageTitle: 'MAF Console', pageSubtitle: 'Agent network · Workflow execution · MAS triage · Runtime events', embeddedTitle: 'MAF Execution Panel', embeddedSubtitle: 'Embeddable Agent / Workflow execution panel',
         server: 'Server', agentsOnline: 'Agents Online', busyAgents: 'Busy Agents', skills: 'Skills', mcps: 'MCPs', runningWorkflows: 'Running Workflows', activeMasSessions: 'Active MAS Sessions', openTasks: 'Open Tasks',
         workflowFocus: 'Workflow Focus', workflowFocusHint: 'Select a workflow to inspect execution details', workflowDetail: 'Workflow Detail', workflowDetailHint: 'DAG nodes, execution results, and context',
-        agentBoard: 'Agent Board', agentBoardHint: 'Status, runtime, version, and capabilities', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
+        agentBoard: 'Agent Board', agentBoardHint: 'Select an Agent to inspect its description, source path, and runtime', agentDetail: 'Agent Details', agentDescription: 'Responsibilities', agentIdentity: 'Identity and location', projectPath: 'Source path', clientEndpoint: 'Client endpoint', clientId: 'Client ID', daemonPort: 'Daemon port', registeredAt: 'Registered at', lastHeartbeat: 'Last heartbeat', notConfigured: 'Not configured', deleteHistoricalAgent: 'Delete historical Agent', deleteAgentConfirm: 'Delete this historical Agent? This only removes its registry record.', deleteAgentFailed: 'Failed to delete Agent', deleteAgentOnlyHistorical: 'Online or busy Agents are protected and cannot be deleted.', readonlyAgentDelete: 'Remote readonly mode can inspect details; deletion is available only from the Server-local management view.', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
         tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
         inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results', clientIdentities: 'Client Identities', clientIdentitiesHint: 'Machine enrollment, approval, and per-client revocation', approve: 'Approve', revoke: 'Revoke', noClientIdentities: 'No Client identities yet. A Client appears here after its first connection.', clientActionFailed: 'Client identity action failed', fingerprint: 'Fingerprint', sourceIp: 'Source IP', lastSeen: 'Last seen',
         submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed',
@@ -555,6 +587,7 @@
       health: null,
       agents: [], tasks: [], workflows: [], sessions: [], inventory: null, otaStatus: null, evolveResults: [], clientIdentities: [], events: [],
       selectedWorkflowId: config.workflowId || null,
+      selectedAgentId: null,
       statusFilter: 'all',
       lastError: '',
       masSubmit: { busy: false, status: '', message: '' },
@@ -629,6 +662,17 @@
       if (!res.ok) {
         throw new Error(data.error || data.message || `HTTP ${res.status}`);
       }
+      return data;
+    }
+
+    async function apiDelete(path) {
+      const res = await fetch(`${API}${path}`, { method: 'DELETE' });
+      const text = await res.text();
+      let data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch { data = { message: text }; }
+      }
+      if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
       return data;
     }
 
@@ -708,6 +752,7 @@
       renderWorkflowList();
       renderWorkflowDetail();
       renderAgents();
+      renderAgentDetail();
       renderClientIdentities();
       renderSessions();
       renderTasks();
@@ -889,7 +934,7 @@
         const mcps = parseJson(a.mcps, []);
         const activeNode = visibleWorkflows().flatMap(w => nodeList(w).map(n => ({ ...n, workflow: w }))).find(n => n.agent_name === a.agent_name && n.status === 'running');
         return `
-          <div class="agent-card ${escapeHtml(a.status || '')}">
+          <button class="agent-card ${escapeHtml(a.status || '')}" type="button" data-agent-id="${escapeHtml(a.id)}" aria-label="${escapeHtml(`${t('agentDetail')}: ${a.agent_name}`)}">
             <div class="agent-top">
               <div>
                 <div class="agent-name">${escapeHtml(a.agent_name)}</div>
@@ -906,8 +951,90 @@
               <span>${time(a.last_heartbeat)}</span>
             </div>
             ${activeNode ? `<div class="agent-work">${t('currentNode')}：${escapeHtml(activeNode.workflow.title || activeNode.workflow.id)} / ${escapeHtml(activeNode.id)}</div>` : ''}
-          </div>`;
+          </button>`;
       }).join('') || `<div class="empty">${t('noAgents')}</div>`;
+    }
+
+    function selectedAgent() {
+      return state.agents.find(agent => agent.id === state.selectedAgentId) || null;
+    }
+
+    function renderAgentDetail() {
+      const dialog = $('agent-detail-dialog');
+      const agent = selectedAgent();
+      if (!agent) {
+        if (dialog.open) dialog.close();
+        return;
+      }
+
+      const skills = parseJson(agent.skills, []);
+      const mcps = parseJson(agent.mcps, []);
+      const historical = agent.status === 'offline' || agent.status === 'dead';
+      const canDelete = historical && !config.readonly;
+      $('agent-detail-title').textContent = agent.agent_name || t('agentDetail');
+      $('agent-detail-body').innerHTML = `
+        <div>${pill(agent.status)} ${pill(agent.runtime || 'opencode')}</div>
+        <div class="detail-title">${escapeHtml(agent.agent_name || '-')}</div>
+        <div class="agent-detail-heading">${escapeHtml(t('agentDescription'))}</div>
+        <div class="agent-description">${escapeHtml(agent.capabilities || t('notConfigured'))}</div>
+        <section class="agent-detail-section">
+          <div class="agent-detail-heading">${escapeHtml(t('agentIdentity'))}</div>
+          <div class="detail-grid">
+            <div class="kv"><div class="k">${escapeHtml(t('projectPath'))}</div><div class="v mono">${escapeHtml(agent.project_path || t('notConfigured'))}</div></div>
+            <div class="kv"><div class="k">${escapeHtml(t('clientEndpoint'))}</div><div class="v mono">${escapeHtml(agent.client_endpoint || '-')}</div></div>
+            <div class="kv"><div class="k">${escapeHtml(t('clientId'))}</div><div class="v mono">${escapeHtml(agent.client_id || '-')}</div></div>
+            <div class="kv"><div class="k">User / Host</div><div class="v">${escapeHtml(agent.user_id || '-')}@${escapeHtml(agent.host_user || '-')}</div></div>
+            <div class="kv"><div class="k">Runtime / Mode</div><div class="v">${escapeHtml(agent.runtime || '-')} / ${escapeHtml(agent.mode || '-')}</div></div>
+            <div class="kv"><div class="k">${escapeHtml(t('daemonPort'))}</div><div class="v">${escapeHtml(agent.daemon_port || '-')}</div></div>
+            <div class="kv"><div class="k">${escapeHtml(t('lastHeartbeat'))}</div><div class="v">${escapeHtml(time(agent.last_heartbeat))}</div></div>
+            <div class="kv"><div class="k">${escapeHtml(t('registeredAt'))}</div><div class="v">${escapeHtml(time(agent.registered_at))}</div></div>
+          </div>
+        </section>
+        <section class="agent-detail-section">
+          <div class="agent-detail-heading">Skills · ${Array.isArray(skills) ? skills.length : 0}</div>
+          <div class="agent-tags">${Array.isArray(skills) && skills.length ? skills.map(skill => `<span class="agent-tag" title="${escapeHtml(skill?.description || '')}">${escapeHtml(skill?.name || String(skill))}</span>`).join('') : `<span class="agent-dialog-note">${escapeHtml(t('notConfigured'))}</span>`}</div>
+        </section>
+        <section class="agent-detail-section">
+          <div class="agent-detail-heading">MCP · ${Array.isArray(mcps) ? mcps.length : 0}</div>
+          <div class="agent-tags">${Array.isArray(mcps) && mcps.length ? mcps.map(mcp => `<span class="agent-tag">${escapeHtml(mcp?.name || String(mcp))}</span>`).join('') : `<span class="agent-dialog-note">${escapeHtml(t('notConfigured'))}</span>`}</div>
+        </section>`;
+
+      const deleteButton = $('agent-delete-btn');
+      deleteButton.hidden = !canDelete;
+      deleteButton.textContent = t('deleteHistoricalAgent');
+      $('agent-delete-note').textContent = historical
+        ? (config.readonly ? t('readonlyAgentDelete') : '')
+        : t('deleteAgentOnlyHistorical');
+    }
+
+    function showAgentDetail(agentId) {
+      state.selectedAgentId = agentId;
+      renderAgentDetail();
+      const dialog = $('agent-detail-dialog');
+      if (!dialog.open) dialog.showModal();
+    }
+
+    function closeAgentDetail() {
+      const dialog = $('agent-detail-dialog');
+      if (dialog.open) dialog.close();
+      state.selectedAgentId = null;
+    }
+
+    async function deleteSelectedAgent() {
+      const agent = selectedAgent();
+      if (!agent || config.readonly || !['offline', 'dead'].includes(agent.status)) return;
+      if (!window.confirm(`${t('deleteAgentConfirm')}\n\n${agent.agent_name}`)) return;
+      const button = $('agent-delete-btn');
+      button.disabled = true;
+      try {
+        await apiDelete(`/api/agents/${encodeURIComponent(agent.id)}`);
+        closeAgentDetail();
+        await refreshAll();
+      } catch (err) {
+        window.alert(`${t('deleteAgentFailed')}: ${err.message}`);
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function renderClientIdentities() {
@@ -1188,6 +1315,11 @@
     }
 
     document.addEventListener('click', (event) => {
+      const agentCard = event.target.closest('[data-agent-id]');
+      if (agentCard) {
+        showAgentDetail(agentCard.dataset.agentId);
+        return;
+      }
       const workflowCard = event.target.closest('[data-workflow-id]');
       if (workflowCard) {
         state.selectedWorkflowId = workflowCard.dataset.workflowId;
@@ -1208,6 +1340,12 @@
     });
 
     $('refresh-btn').addEventListener('click', refreshAll);
+    $('agent-detail-close').addEventListener('click', closeAgentDetail);
+    $('agent-delete-btn').addEventListener('click', deleteSelectedAgent);
+    $('agent-detail-dialog').addEventListener('click', event => {
+      if (event.target === $('agent-detail-dialog')) closeAgentDetail();
+    });
+    $('agent-detail-dialog').addEventListener('close', () => { state.selectedAgentId = null; });
     $('clear-events-btn').addEventListener('click', () => { state.events = []; renderEvents(); notifyResize(); });
     $('mas-submit-form').addEventListener('submit', submitMasTask);
     $('mas-clear-btn').addEventListener('click', () => {

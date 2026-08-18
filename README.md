@@ -88,8 +88,71 @@ maf-server start
 ### 3. 配置 Client（远端机器）
 
 ```bash
-maf-client init    # 交互式配置 Server 地址 + 安装 Plugin
+maf-client install http://<Server-IP>:3000  # 推荐；例如 http://192.168.1.100:3000
+maf-client init                            # 未传地址时交互式配置
 ```
+
+请填写完整的 HTTP(S) URL；为兼容已有用法，裸 IP 仍会自动规范化为 `http://<IP>:3000`。Server 默认监听 `0.0.0.0`，但 Client 必须填写 Server 的实际 LAN/VPN IP 或域名。显式安装参数会同步覆盖 `maf.config.json` 和 `.bashrc` 中的旧地址，并自动重启正在运行的 Node Daemon 使新配置立即生效。
+
+#### 配置 local-only Agent
+
+Client 可以在本机 `~/.meta-agent-framework/maf.config.json` 中决定哪些 Agent 只由本机 Daemon 管理、永不向 Server 发布。隐藏少数 Agent 时使用：
+
+```json
+{
+  "client": {
+    "agent_publication": {
+      "mode": "all",
+      "local_only": ["private-agent", "temporary-agent"],
+      "client_network": "when-published"
+    }
+  }
+}
+```
+
+`local_only` 中的 Agent 仍会出现在本机 localhost 的 Daemon `/health` 和 `/agents` 中，插件也可以正常连接，但不会进入注册、心跳、inventory、任务轮询或远端 health 响应，Server 向该名称派发任务时只会得到 `404`。
+
+如果希望默认所有 Agent 都是 local-only，只显式发布少数 Agent，使用白名单模式：
+
+```json
+{
+  "client": {
+    "agent_publication": {
+      "mode": "explicit",
+      "include": ["MAF-developer", "shared-reviewer"],
+      "local_only": [],
+      "client_network": "when-published"
+    }
+  }
+}
+```
+
+- `local_only` 优先级高于 `include`。
+- `client_network: "when-published"` 表示没有公开 Agent 时不进行 Client enrollment；`"always"` 保留旧版常驻 enrollment 行为。
+- 隐私策略只读取用户级配置，项目目录中的 `maf.config.json` 不能覆盖它。
+- 修改后需要重启 Node Daemon。该配置只阻止后续发布，不能删除 Server、飞书或日志中已经存在的历史记录。
+
+#### 通用 Execution API
+
+Server 本机集成可使用 `POST /api/v1/executions` 提交需要 MAS 语义路由、远端 Agent 执行和 Patch 回传的通用任务。框架字段是 `request_id`、`external_id`、`source_type`、`source_ref` 和透明 `metadata`；MAF 不校验或解释 Jira、Case、Run 等业务模型。
+
+```json
+{
+  "request_id": "caller-idempotency-key",
+  "external_id": "external-object-id",
+  "source_type": "caller-defined-source",
+  "source_ref": "source://reference",
+  "title": "分析并修复问题",
+  "prompt": "任务正文",
+  "metadata": { "opaque_caller_context": {} },
+  "workdir_policy": "managed_workspace",
+  "auto_start": false
+}
+```
+
+`request_id` 是幂等键。默认 `auto_start` 为 `true`；需要先上传证据时设为 `false`，依次调用 `PUT /api/v1/executions/:id/artifacts/<path>` 和 `POST /api/v1/executions/:id/start`。结果通过 `GET /api/v1/executions/:id` 查询，Patch 通过 `GET /api/v1/executions/:id/patch` 下载。
+
+`managed_workspace` 会按 Git remote 和分支复用 `$MAF_HOME/workspaces/<repository-id>/source`，执行前同步远端基线并持有串行锁。源码 Git 元数据位于 workspace 外，成功回传二进制 Patch 后清理工作区；失败时保留现场和锁供排查。每次 Execution 的输入输出位于 `$MAF_HOME/executions/<execution-id>/input|output`。
 
 安装完成后支持手动启动和自动拉起两种运行模式：
 
@@ -109,7 +172,7 @@ codex -C <project-dir>     # Codex Agent（从 .codex/agents 或项目目录名�
 
 **自动拉起（推荐）：**
 
-无需手动启动。只要 Client 机器的 Daemon 在运行（`maf-client init` 后自动常驻），Server 派发任务时会自动通过 `screen` 远程拉起对应 Agent。前提是在 Server 的 Agent 注册表中已配置该 Agent。
+无需手动启动。只要 Client 机器的 Daemon 在运行（`maf-client install http://<Server-IP>:3000` 后自动常驻），Server 派发任务时会自动通过 `screen` 远程拉起对应 Agent。前提是在 Server 的 Agent 注册表中已配置该 Agent。
 
 ### 4. 使用
 
@@ -136,7 +199,8 @@ maf-server uninstall  # 卸载（停止 + 清数据 + 删 npm 包）
 maf-server help       # 查看所有命令
 
 # Client
-maf-client init       # 配置 Server 地址 + 安装 Plugin
+maf-client install http://<Server-IP>:3000  # 配置 Server 地址 + 安装 Plugin
+maf-client init       # 交互式配置 Server 地址 + 安装 Plugin
 maf-client resume [agent]  # 恢复指定 Agent 的上次对话
 maf-client sessions   # 列出最近的 sessions
 maf-client status     # 查看状态
@@ -154,7 +218,7 @@ Meta-Agent-Framework 设计为**内网/局域网部署**，不建议暴露到公
 
 **典型安全部署方式：**
 - 所有机器在同一个 VPN / 局域网内
-- Server 监听内网 IP（如 `10.x.x.x` 或 `192.168.x.x`），不绑定 `0.0.0.0` 到公网端口
+- Server 默认监听 `0.0.0.0`；必须用主机防火墙/VPN 将端口限制在可信 LAN/VPN，不能直接暴露到公网
 - 防火墙规则限制 Server 端口（默认 3000）和 Daemon 端口（默认 4100）只允许内网访问
 
 ## 开发

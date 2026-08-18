@@ -127,7 +127,8 @@ function clientPathAllowed(req: Request): boolean {
   if (method === 'GET' && pathName === '/events') return true;
   if (method === 'GET' && pathName === '/tasks/poll') return true;
   if (method === 'POST' && /^\/tasks\/[^/]+\/(result|claim)$/.test(pathName)) return true;
-  if (method === 'POST' && /^\/workflows\/[^/]+\/nodes\/[^/]+\/result$/.test(pathName)) return true;
+  if (method === 'POST' && /^\/workflows\/[^/]+\/nodes\/[^/]+\/(started|result)$/.test(pathName)) return true;
+  if (method === 'POST' && /^\/v1\/executions\/[^/]+\/patch$/.test(pathName)) return true;
   if (method === 'POST' && /^\/evolve\/[^/]+\/result$/.test(pathName)) return true;
   if (method === 'POST' && pathName === '/proposals') return true;
   if (method === 'GET' && pathName === '/proposals') return true;

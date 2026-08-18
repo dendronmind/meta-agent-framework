@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { agentRegistry } from '../services/agent-registry';
+import { agentRegistry, isHistoricalAgentStatus } from '../services/agent-registry';
 import { healthMonitor } from '../services/health-monitor';
 import { getRegistry } from '../services/registry';
 import { getConfig } from '../config';
@@ -197,7 +197,14 @@ router.delete('/agents/:id', (req: Request, res: Response) => {
     res.status(404).json({ error: 'Agent not found' });
     return;
   }
-  agentRegistry.deleteById(id);
+  if (!isHistoricalAgentStatus(agent.status)) {
+    res.status(409).json({ error: `Only offline/dead historical agents can be deleted; "${agent.agent_name}" is ${agent.status}` });
+    return;
+  }
+  if (!agentRegistry.deleteById(id)) {
+    res.status(500).json({ error: 'Agent deletion failed' });
+    return;
+  }
   res.json(agent);
 });
 

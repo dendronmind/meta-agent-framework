@@ -27,6 +27,7 @@ export interface MafConfig {
   };
   server: {
     url: string;
+    host: string;
     port: number;
     runtime?: ServerRuntime;
   };
@@ -60,6 +61,7 @@ const DEFAULTS: MafConfig = {
   },
   server: {
     url: '',       // 必须配置
+    host: '0.0.0.0',
     port: 3000,
   },
   daemon: {
@@ -134,6 +136,7 @@ export function getConfig(projectRoot?: string): MafConfig {
 
   // 4. 环境变量覆盖（最高优先级）
   if (process.env.META_AGENT_SERVER) config.server.url = process.env.META_AGENT_SERVER;
+  if (process.env.MAF_SERVER_HOST || process.env.HOST) config.server.host = process.env.MAF_SERVER_HOST || process.env.HOST || '0.0.0.0';
   if (process.env.MAF_AUTH_TOKEN) config.auth.token = process.env.MAF_AUTH_TOKEN;
   if (process.env.META_AGENT_PORT || process.env.PORT) config.server.port = parseInt(process.env.META_AGENT_PORT || process.env.PORT || '3000');
   if (process.env.MAF_SERVER_RUNTIME) config.server.runtime = process.env.MAF_SERVER_RUNTIME as ServerRuntime;

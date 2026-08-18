@@ -70,6 +70,10 @@ export async function initDb(): Promise<void> {
   }
 
   initTables();
+  sqlJsDb.run(`UPDATE executions SET status = 'failed', result = CASE WHEN result = '' THEN 'MAF Server restarted before execution completed' ELSE result END,
+    error = 'MAF Server restarted before execution completed', error_code = 'DISPATCH_FAILED',
+    completed_at = datetime('now'), updated_at = datetime('now')
+    WHERE status IN ('routing', 'running')`);
   persistDb();
 }
 
@@ -249,6 +253,80 @@ function initTables(): void {
     )
   `);
 
+  sqlJsDb.run(`
+    CREATE TABLE IF NOT EXISTS executions (
+      id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      external_id TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'custom',
+      source_ref TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'queued',
+      preferred_agent TEXT NOT NULL DEFAULT '',
+      selected_agent TEXT NOT NULL DEFAULT '',
+      workspace_id TEXT NOT NULL DEFAULT '',
+      mas_session_id TEXT NOT NULL DEFAULT '',
+      workflow_id TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '',
+      error TEXT NOT NULL DEFAULT '',
+      error_code TEXT NOT NULL DEFAULT '',
+      workdir_policy TEXT NOT NULL DEFAULT 'managed_workspace',
+      artifact_base_url TEXT NOT NULL DEFAULT '',
+      patch_path TEXT NOT NULL DEFAULT '',
+      patch_filename TEXT NOT NULL DEFAULT '',
+      patch_size INTEGER NOT NULL DEFAULT 0,
+      patch_sha256 TEXT NOT NULL DEFAULT '',
+      base_commit TEXT NOT NULL DEFAULT '',
+      base_branch TEXT NOT NULL DEFAULT '',
+      changed_files TEXT NOT NULL DEFAULT '[]',
+      remote_workspace_path TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // 早期试验版 Execution 表使用 case_id/run_id/case_type。启动时一次性迁移为
+  // 通用协议字段，避免框架数据库继续固化某个业务平台的数据模型。
+  const executionInfo = sqlJsDb.exec("PRAGMA table_info('executions')")?.[0];
+  const executionColumns = new Set<string>((executionInfo?.values || []).map((row: any[]) => String(row[1])));
+  if (executionColumns.has('case_id') && !executionColumns.has('request_id')) {
+    const value = (column: string, fallback: string) => executionColumns.has(column) ? column : fallback;
+    sqlJsDb.run('ALTER TABLE executions RENAME TO executions_business_v0');
+    sqlJsDb.run(`
+      CREATE TABLE executions (
+        id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, external_id TEXT NOT NULL DEFAULT '',
+        source_type TEXT NOT NULL DEFAULT 'custom', source_ref TEXT NOT NULL DEFAULT '', title TEXT NOT NULL,
+        prompt TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued',
+        preferred_agent TEXT NOT NULL DEFAULT '', selected_agent TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '',
+        mas_session_id TEXT NOT NULL DEFAULT '', workflow_id TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '', workdir_policy TEXT NOT NULL DEFAULT 'managed_workspace',
+        artifact_base_url TEXT NOT NULL DEFAULT '', patch_path TEXT NOT NULL DEFAULT '', patch_filename TEXT NOT NULL DEFAULT '',
+        patch_size INTEGER NOT NULL DEFAULT 0, patch_sha256 TEXT NOT NULL DEFAULT '', base_commit TEXT NOT NULL DEFAULT '',
+        base_branch TEXT NOT NULL DEFAULT '', changed_files TEXT NOT NULL DEFAULT '[]', remote_workspace_path TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL
+      )
+    `);
+    sqlJsDb.run(`INSERT INTO executions (
+      id, request_id, external_id, source_type, source_ref, title, prompt, status, preferred_agent,
+      selected_agent, workspace_id, mas_session_id, workflow_id, result, error, error_code, workdir_policy,
+      artifact_base_url, patch_path, patch_filename, patch_size, patch_sha256, base_commit, base_branch,
+      changed_files, remote_workspace_path, created_at, started_at, completed_at, updated_at
+    ) SELECT id, ${value('run_id', 'id')}, ${value('case_id', "''")}, ${value('case_type', "'custom'")},
+      ${value('source_ref', "''")}, title, prompt, status, ${value('preferred_agent', "''")},
+      ${value('selected_agent', "''")}, ${value('workspace_id', "''")}, ${value('mas_session_id', "''")},
+      ${value('workflow_id', "''")}, ${value('result', "''")}, ${value('error', "''")},
+      ${value('error_code', "''")}, ${value('workdir_policy', "'managed_workspace'")},
+      ${value('artifact_base_url', "''")}, ${value('patch_path', "''")}, ${value('patch_filename', "''")},
+      ${value('patch_size', '0')}, ${value('patch_sha256', "''")}, ${value('base_commit', "''")},
+      ${value('base_branch', "''")}, ${value('changed_files', "'[]'")}, ${value('remote_workspace_path', "''")},
+      created_at, started_at, completed_at, updated_at FROM executions_business_v0`);
+    sqlJsDb.run('DROP TABLE executions_business_v0');
+  }
+
   // 索引
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id)");
@@ -261,6 +339,8 @@ function initTables(): void {
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_proposals_agent ON proposals(from_agent)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(type)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_client_identities_status ON client_identities(status)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_executions_external_id ON executions(external_id)");
 }
 
 // ============================================================

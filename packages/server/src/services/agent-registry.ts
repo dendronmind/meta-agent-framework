@@ -7,6 +7,10 @@ import { getConfig } from '../config';
 import { buildClientOtaBundle, getClientOtaBundleHash, pushClientOta } from './client-ota';
 import type { Agent, AgentStatus, ClientRegisterPayload, AgentInfo, HeartbeatPayload } from '../types';
 
+export function isHistoricalAgentStatus(status: AgentStatus | string): boolean {
+  return status === 'offline' || status === 'dead';
+}
+
 export interface RegistryReconcileResult {
   pulled: number;
   added: number;
@@ -138,7 +142,7 @@ export class AgentRegistry {
 
     // 策略：外部注册表管理的 agent 不能随意删除
     //   - 受管理的 agent：UPDATE（更新 endpoint/status/skills/mcps）
-    //   - 动态 agent：先删旧的再 INSERT（全量同步）
+    //   - 动态 agent：按稳定身份原地 UPDATE，首次注册才 INSERT
     // 不再删除旧 agent——多个 Client（opencode + Claude Code）可能各自注册不同 agent
     // 每个 agent 通过下面的 upsert/insert 更新，不在列表里的保持原样（靠心跳超时自然下线）
 
@@ -157,8 +161,14 @@ export class AgentRegistry {
         client_version = ?, plugin_hash = ?, daemon_port = ?
       WHERE user_id = ? AND host_user = ? AND agent_name = ?
     `);
+    const updateDynamic = db.prepare(`
+      UPDATE agents SET client_id = ?, client_endpoint = ?, status = ?, last_heartbeat = ?,
+        project_path = ?, capabilities = ?, mode = ?, runtime = ?, skills = ?, mcps = ?,
+        client_version = ?, plugin_hash = ?, daemon_port = ?
+      WHERE id = ?
+    `);
     const insertNew = db.prepare(`
-      INSERT OR REPLACE INTO agents (id, client_id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, client_version, plugin_hash, daemon_port, registered_at)
+      INSERT INTO agents (id, client_id, user_id, host_user, client_endpoint, status, last_heartbeat, agent_name, project_path, capabilities, mode, runtime, skills, mcps, client_version, plugin_hash, daemon_port, registered_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
@@ -195,18 +205,33 @@ export class AgentRegistry {
         }
         if (existing) agents.push(existing);
       } else {
-        // 动态 agent → INSERT
-        const id = uuidv4();
-        insertNew.run(
-          id, payload.client_id, payload.user_id, payload.host_user, payload.client_endpoint,
-          agentStatus, now, info.agent_name, info.project_path || '',
-          info.capabilities || '', info.mode || 'subagent',
-          info.runtime || 'opencode',
-          JSON.stringify(info.skills || []), JSON.stringify(info.mcps || []),
-          clientVersion, clientPluginHash, clientDaemonPort,
-          now
-        );
-        agents.push(this.getById(id)!);
+        let existing = db.prepare(
+          'SELECT * FROM agents WHERE user_id = ? AND host_user = ? AND agent_name = ?'
+        ).get(payload.user_id, payload.host_user, info.agent_name) as Agent | undefined;
+        if (existing) {
+          updateDynamic.run(
+            payload.client_id, payload.client_endpoint, agentStatus, now,
+            info.project_path || '', info.capabilities || '', info.mode || 'subagent',
+            info.runtime || 'opencode',
+            JSON.stringify(info.skills || []), JSON.stringify(info.mcps || []),
+            clientVersion, clientPluginHash, clientDaemonPort,
+            existing.id,
+          );
+          existing = this.getById(existing.id);
+        } else {
+          const id = uuidv4();
+          insertNew.run(
+            id, payload.client_id, payload.user_id, payload.host_user, payload.client_endpoint,
+            agentStatus, now, info.agent_name, info.project_path || '',
+            info.capabilities || '', info.mode || 'subagent',
+            info.runtime || 'opencode',
+            JSON.stringify(info.skills || []), JSON.stringify(info.mcps || []),
+            clientVersion, clientPluginHash, clientDaemonPort,
+            now,
+          );
+          existing = this.getById(id);
+        }
+        if (existing) agents.push(existing);
       }
       // 只在状态变化时打日志
       const lastStatus = this.lastLoggedStatus.get(info.agent_name);

@@ -16,15 +16,14 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
-import { workflowEngine, WorkflowSummary } from './workflow-engine';
+import { isAgentDispatchable, workflowEngine, WorkflowSummary } from './workflow-engine';
 import { getConfig } from '../config';
-import { getAuthToken } from '../auth';
-import type { Agent, MASSession, SessionRound } from '../types';
+import type { Agent, MASRoutingDecision, MASSession, RoutingDecisionCode, SessionRound } from '../types';
 
 // ============================================================
 // 配置
@@ -35,6 +34,8 @@ const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const MAX_ROUNDS = parseInt(process.env.MAS_MAX_ROUNDS || '5');
 const MAS_RUN_TIMEOUT_MS = parseInt(process.env.MAS_RUN_TIMEOUT_MS || '600000');
+const configuredConcurrency = parseInt(process.env.MAS_MAX_CONCURRENCY || '2');
+const MAS_MAX_CONCURRENCY = Number.isFinite(configuredConcurrency) ? Math.max(1, configuredConcurrency) : 2;
 
 type MasRuntime = 'opencode' | 'codex' | 'claude';
 
@@ -47,6 +48,67 @@ const sessions = new Map<string, MASSession>();
 interface MASSubmitOptions {
   origin?: Record<string, unknown>;
   notify?: Record<string, unknown>;
+  onWorkflowCreated?: (workflowId: string, sessionId: string) => void;
+}
+
+interface WorkflowDirective {
+  title: string;
+  nodes: any[];
+  failure_policy?: 'fail_fast' | 'all_settled';
+  origin?: Record<string, unknown>;
+  notify?: Record<string, unknown>;
+}
+
+export type MASDirective =
+  | { kind: 'workflow'; workflow: WorkflowDirective }
+  | { kind: 'routing_decision'; routing_decision: MASRoutingDecision };
+
+const ROUTING_DECISIONS: RoutingDecisionCode[] = ['NO_MATCHING_AGENT', 'NO_DISPATCHABLE_AGENT', 'AMBIGUOUS_AGENT'];
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+function parseDirectiveObject(parsed: any): MASDirective | null {
+  const workflow = parsed?.workflow;
+  const rawDecision = parsed?.routing_decision;
+  if (workflow && rawDecision) return null;
+  if (workflow && typeof workflow.title === 'string' && Array.isArray(workflow.nodes) && workflow.nodes.length > 0) {
+    return { kind: 'workflow', workflow };
+  }
+  const decision = String(rawDecision?.decision || '') as RoutingDecisionCode;
+  const reason = String(rawDecision?.reason || '').trim();
+  if (!ROUTING_DECISIONS.includes(decision) || !reason) return null;
+  const candidateAgents = stringList(rawDecision?.candidate_agents);
+  if (decision === 'NO_DISPATCHABLE_AGENT' && candidateAgents.length === 0) return null;
+  if (decision === 'AMBIGUOUS_AGENT' && candidateAgents.length < 2) return null;
+  const confidence = Number(rawDecision?.confidence);
+  return {
+    kind: 'routing_decision',
+    routing_decision: {
+      decision,
+      reason: reason.slice(0, 4000),
+      required_capabilities: stringList(rawDecision?.required_capabilities),
+      candidate_agents: candidateAgents,
+      confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : undefined,
+    },
+  };
+}
+
+/** 解析 MAS 的唯一结构化指令，支持 fenced JSON 和纯 JSON。 */
+export function extractMASDirective(output: string): MASDirective | null {
+  const candidates: string[] = [];
+  const fenced = output.match(/```json\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1]);
+  candidates.push(output);
+  for (const candidate of candidates) {
+    try {
+      const directive = parseDirectiveObject(JSON.parse(candidate));
+      if (directive) return directive;
+    } catch {}
+  }
+  return null;
 }
 
 // ============================================================
@@ -55,7 +117,10 @@ interface MASSubmitOptions {
 
 export class MASRunner {
   private activeChildren = new Set<ChildProcessWithoutNullStreams>();
+  private activeRuns = 0;
+  private runWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
   private shuttingDown = false;
+  private workflowCreatedCallbacks = new Map<string, (workflowId: string, sessionId: string) => void>();
 
   /**
    * 提交任务 → 创建会话 → 开始第一轮
@@ -74,10 +139,15 @@ export class MASRunner {
     };
 
     sessions.set(session.id, session);
+    if (options.onWorkflowCreated) this.workflowCreatedCallbacks.set(session.id, options.onWorkflowCreated);
     console.log(`[MAS] 📋 新会话 ${session.id}: "${taskTitle}"`);
 
     // 启动第一轮
-    await this.executeRound(session);
+    try {
+      await this.executeRound(session);
+    } finally {
+      this.workflowCreatedCallbacks.delete(session.id);
+    }
 
     return session;
   }
@@ -131,10 +201,32 @@ export class MASRunner {
     session.rounds.push(round);
 
     // 解析输出：有工作流 JSON 么？
-    const workflowJson = this.extractWorkflowJson(output);
+    const directive = extractMASDirective(output);
+    const workflowJson = directive?.kind === 'workflow' ? directive.workflow : null;
+
+    if (directive?.kind === 'routing_decision') {
+      const alreadyDispatched = session.rounds.some(candidate => Boolean(candidate.workflow_id));
+      if (alreadyDispatched) {
+        round.mas_output = `ERROR: routing_decision is invalid after a workflow was dispatched\n\n${output}`;
+        session.status = 'failed';
+      } else {
+        round.routing_decision = directive.routing_decision;
+        session.routing_decision = directive.routing_decision;
+        session.status = 'completed';
+      }
+      session.completed_at = new Date().toISOString();
+      return;
+    }
 
     if (!workflowJson) {
-      // 没有工作流 → Meta-Agent-Server 认为任务完成（直接回答或 DONE）
+      if (session.origin?.require_remote_dispatch === true
+          && !session.rounds.some(candidate => Boolean(candidate.workflow_id))) {
+        round.mas_output = `ERROR: MAS did not return a workflow or valid routing_decision\n\n${output}`;
+        session.status = 'failed';
+        session.completed_at = new Date().toISOString();
+        return;
+      }
+      // 普通 MAS 问答允许直接回答。
       console.log(`[MAS] ✅ Round ${roundNum} — 无工作流输出，会话结束`);
       session.status = 'completed';
       session.completed_at = new Date().toISOString();
@@ -146,12 +238,14 @@ export class MASRunner {
     session.status = 'waiting';  // 等待工作流执行
 
     try {
-      const summary = await workflowEngine.run(workflowJson.title, workflowJson.nodes, {
+      const { workflow_id } = workflowEngine.startAsync(workflowJson.title, workflowJson.nodes, {
         failure_policy: workflowJson.failure_policy,
         origin: session.origin || workflowJson.origin,
         notify: session.notify || workflowJson.notify,
       });
-      round.workflow_id = summary.workflow_id;
+      round.workflow_id = workflow_id;
+      this.workflowCreatedCallbacks.get(session.id)?.(workflow_id, session.id);
+      const summary = await workflowEngine.waitForCompletion(workflow_id);
       round.workflow_result = this.formatWorkflowResult(summary);
 
       console.log(`[MAS] 📊 Round ${roundNum} 工作流 ${summary.status}`);
@@ -175,13 +269,27 @@ export class MASRunner {
     const agentList = agents.length > 0
       ? agents.map(a => {
           const icon = a.status === 'online' ? '🟢' : a.status === 'busy' ? '🟡' : '🔴';
-          return `  ${icon} ${a.agent_name} (${a.mode}, ${a.runtime || 'opencode'}) — ${a.capabilities || '无描述'}`;
+          let skills = '[]';
+          let mcps = '[]';
+          try { skills = JSON.stringify(JSON.parse(a.skills || '[]')); } catch {}
+          try { mcps = JSON.stringify(JSON.parse(a.mcps || '[]')); } catch {}
+          const dispatchable = isAgentDispatchable(a);
+          return `  ${icon} ${a.agent_name} (${a.mode}, ${a.runtime || 'opencode'})\n    Agent description: ${a.capabilities || 'not configured'}\n    Skills: ${skills}\n    MCPs: ${mcps}\n    Workspace: ${a.project_path || 'not configured'}\n    Status: ${a.status}; dispatchable: ${dispatchable ? 'yes' : 'no'}`;
         }).join('\n')
       : '  （当前无可用 agent）';
 
     const roundNum = session.rounds.length + 1;
 
-    let prompt = `# 任务
+    let prompt = `# MAF Server 内部 Headless 分诊协议
+
+你是由 MAF Server 内部调用的一次性只读 Router，不是交互式 Meta-Agent-Server。
+
+- 只根据本 Prompt 已提供的 Agent 网络做分诊，不得调用 curl、Server API、MCP、Shell 或任何其他工具。
+- 不得自行 POST /api/workflows，也不得探测 localhost、META_AGENT_SERVER 或其他网络地址。
+- 需要派发时，只输出下文规定的工作流 JSON；MAF Server 进程会解析 JSON 并创建工作流。
+- 不要用 Markdown JSON 之外的工具调用代替工作流 JSON。
+
+# 任务
 
 **${session.title}**
 
@@ -215,6 +323,32 @@ ${agentList}
 `;
     } else {
       // 第一轮
+      if (session.origin?.require_remote_dispatch === true) {
+        prompt += `\n# Routing protocol
+
+This request must be handled by a remote Agent. Do not solve it in MAS.
+Match semantically using Agent description first, then Skills, MCPs, runtime, workspace, and live status.
+agent_name is an identifier, not a capability. preferred_agent is only a hint.
+online and busy Agents are immediately available. An offline Agent with a registered Client endpoint is dispatchable because its Daemon can auto-launch the runtime. dead Agents and records without a Client endpoint are topology references only.
+An Agent without a description is not a reliable capability match by itself.
+
+Output exactly one JSON object and no explanation.
+
+For a reliable live match:
+\`\`\`json
+{"workflow":{"title":"...","nodes":[{"id":"step-1","agent_name":"...","prompt":"..."}],"failure_policy":"all_settled"}}
+\`\`\`
+
+When dispatch is not reliable:
+\`\`\`json
+{"routing_decision":{"decision":"NO_MATCHING_AGENT","reason":"...","required_capabilities":[],"candidate_agents":[],"confidence":0.9}}
+\`\`\`
+
+decision must be NO_MATCHING_AGENT, NO_DISPATCHABLE_AGENT, or AMBIGUOUS_AGENT.
+NO_DISPATCHABLE_AGENT requires candidate_agents. AMBIGUOUS_AGENT requires at least two candidates.
+`;
+        return prompt;
+      }
       prompt += `\n# 你的职责
 
 这是 Round 1。分析任务，决定调用哪些 agent 来完成。
@@ -307,13 +441,18 @@ failure_policy 可选：
    * - claude runtime → `claude --print` 且只加载 user settings（避免项目 hooks 常驻等待）
    */
   private async runMetaAgentServer(prompt: string): Promise<string> {
-    const runtime = this.getServerRuntime();
-    const mafHome = this.getMafHome();
-    console.log(`[MAS] 🧠 使用 ${runtime} runtime 执行 Meta-Agent-Server headless`);
+    await this.acquireRunSlot();
+    try {
+      const runtime = this.getServerRuntime();
+      const mafHome = this.getMafHome();
+      console.log(`[MAS] 🧠 使用 ${runtime} runtime 执行 Meta-Agent-Server headless（并发 ${this.activeRuns}/${MAS_MAX_CONCURRENCY}）`);
 
-    if (runtime === 'codex') return await this.runCodex(prompt, mafHome);
-    if (runtime === 'claude') return await this.runClaude(prompt, mafHome);
-    return await this.runOpencode(prompt, mafHome);
+      if (runtime === 'codex') return await this.runCodex(prompt, mafHome);
+      if (runtime === 'claude') return await this.runClaude(prompt, mafHome);
+      return await this.runOpencode(prompt, mafHome);
+    } finally {
+      this.releaseRunSlot();
+    }
   }
 
   private getMafHome(): string {
@@ -337,21 +476,38 @@ failure_policy 可选：
     return runtime;
   }
 
-  private getServerUrl(): string {
-    const cfg = getConfig();
-    return process.env.META_AGENT_SERVER || cfg.server.url || `http://127.0.0.1:${cfg.server.port || 3000}`;
+  private routerRuntimeEnv(mafHome: string, runtime: MasRuntime): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    delete env.MAF_AUTH_TOKEN;
+    delete env.MAF_LOCAL_TOKEN;
+    delete env.META_AGENT_SERVER;
+    return {
+      ...env,
+      MAF_HOME: mafHome,
+      MAF_AGENT_NAME: 'Meta-Agent-Router',
+      MAF_HEADLESS_ROUTER: '1',
+      MAF_RUNTIME: runtime === 'claude' ? 'claude-code' : runtime,
+    };
   }
 
-  private baseRuntimeEnv(mafHome: string, runtime: MasRuntime): NodeJS.ProcessEnv {
-    return {
-      ...process.env,
-      MAF_HOME: mafHome,
-      MAF_AGENT_NAME: 'Meta-Agent-Server',
-      MAF_RUNTIME: runtime === 'claude' ? 'claude-code' : runtime,
-      MAF_DIRECTORY: mafHome,
-      META_AGENT_SERVER: this.getServerUrl(),
-      MAF_AUTH_TOKEN: getAuthToken(),
-    };
+  private acquireRunSlot(): Promise<void> {
+    if (this.shuttingDown) return Promise.reject(new Error('MAS runner is shutting down'));
+    if (this.activeRuns < MAS_MAX_CONCURRENCY) {
+      this.activeRuns += 1;
+      return Promise.resolve();
+    }
+    console.log(`[MAS] ⏳ Headless 分诊达到并发上限 ${MAS_MAX_CONCURRENCY}，进入等待队列`);
+    return new Promise((resolve, reject) => this.runWaiters.push({ resolve, reject }));
+  }
+
+  private releaseRunSlot(): void {
+    this.activeRuns = Math.max(0, this.activeRuns - 1);
+    if (this.shuttingDown) return;
+    const next = this.runWaiters.shift();
+    if (next) {
+      this.activeRuns += 1;
+      next.resolve();
+    }
   }
 
   private runCommand(
@@ -442,6 +598,8 @@ failure_policy 可选：
   shutdown(reason = 'Server shutdown'): void {
     this.shuttingDown = true;
     const now = new Date().toISOString();
+    const shutdownError = new Error(reason);
+    for (const waiter of this.runWaiters.splice(0)) waiter.reject(shutdownError);
     for (const session of sessions.values()) {
       if (session.status === 'active' || session.status === 'waiting') {
         session.status = 'failed';
@@ -461,9 +619,8 @@ failure_policy 可选：
   }
 
   private async runCodex(prompt: string, mafHome: string): Promise<string> {
-    const outDir = path.join(mafHome, 'state', 'mas-runner');
-    mkdirSync(outDir, { recursive: true });
-    const outputFile = path.join(outDir, `codex-${Date.now()}-${uuidv4()}.txt`);
+    const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
+    const outputFile = path.join(routerDir, 'result.txt');
     try {
       const stdout = await this.runCommand('codex exec', CODEX_BIN, [
         'exec',
@@ -474,12 +631,12 @@ failure_policy 可选：
         '--output-last-message', outputFile,
         '-',
       ], {
-        cwd: mafHome,
+        cwd: routerDir,
         input: prompt,
         allowEmptyOutput: true,
         env: {
-          ...this.baseRuntimeEnv(mafHome, 'codex'),
-          CODEX_CWD: mafHome,
+          ...this.routerRuntimeEnv(mafHome, 'codex'),
+          CODEX_CWD: routerDir,
           // headless MAS 不需要 attached receiver；避免把一次性编排误注册成前台接收器
           MAF_CODEX_AUTO_ATTACHED_RECEIVER: '0',
           MAF_CODEX_ATTACHED_RECEIVER_DISABLE: '1',
@@ -490,37 +647,43 @@ failure_policy 可选：
       if (!result) throw new Error('codex exec completed without output');
       return result;
     } finally {
-      try { rmSync(outputFile, { force: true }); } catch {}
+      try { rmSync(routerDir, { recursive: true, force: true }); } catch {}
     }
   }
 
   private async runClaude(prompt: string, mafHome: string): Promise<string> {
-    return await this.runCommand('claude --print', CLAUDE_BIN, [
-      '--print',
-      '--output-format', 'text',
-      '--permission-mode', 'dontAsk',
-      '--no-session-persistence',
-      '--setting-sources', 'user',
-      prompt,
-    ], {
-      cwd: mafHome,
-      env: this.baseRuntimeEnv(mafHome, 'claude'),
-    });
+    const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
+    try {
+      return await this.runCommand('claude --print', CLAUDE_BIN, [
+        '--print',
+        '--output-format', 'text',
+        '--permission-mode', 'dontAsk',
+        '--no-session-persistence',
+        '--setting-sources', 'user',
+        prompt,
+      ], {
+        cwd: routerDir,
+        env: this.routerRuntimeEnv(mafHome, 'claude'),
+      });
+    } finally {
+      try { rmSync(routerDir, { recursive: true, force: true }); } catch {}
+    }
   }
 
   private async runOpencode(prompt: string, mafHome: string): Promise<string> {
-    return await this.runCommand('opencode run', OPENCODE_BIN, [
-      'run',
-      '--pure',
-      '--agent', 'Meta-Agent-Server',
-      prompt,
-    ], {
-      cwd: mafHome,
-      env: {
-        ...this.baseRuntimeEnv(mafHome, 'opencode'),
-        OPENCODE_AGENTS_DIR: path.join(mafHome, '.opencode/agents'),
-      },
-    });
+    const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
+    try {
+      return await this.runCommand('opencode run', OPENCODE_BIN, [
+        'run',
+        '--pure',
+        prompt,
+      ], {
+        cwd: routerDir,
+        env: this.routerRuntimeEnv(mafHome, 'opencode'),
+      });
+    } finally {
+      try { rmSync(routerDir, { recursive: true, force: true }); } catch {}
+    }
   }
 
   // ============================================================

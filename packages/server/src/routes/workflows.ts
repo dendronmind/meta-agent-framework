@@ -87,6 +87,39 @@ router.get('/:id', async (req: Request, res: Response) => {
   res.json(latest || wf);
 });
 
+function sendNodeReportOutcome(res: Response, outcome: ReturnType<typeof workflowEngine.reportNodeResult>): void {
+  if (outcome.accepted) { res.json({ received: true }); return; }
+  if (outcome.code === 'unknown_workflow' || outcome.code === 'unknown_node') {
+    res.status(404).json({ error: outcome.message, code: outcome.code });
+    return;
+  }
+  if (outcome.code === 'invalid_state') {
+    res.status(422).json({ error: outcome.message, code: outcome.code });
+    return;
+  }
+  res.status(409).json({ error: outcome.message, code: outcome.code });
+}
+
+/** POST /api/workflows/:wid/nodes/:nid/started — Client 实际领取节点。 */
+router.post('/:wid/nodes/:nid/started', (req: Request, res: Response) => {
+  const { execution_id, agent_name } = req.body;
+  if (!execution_id || !agent_name) {
+    res.status(400).json({ error: 'execution_id and agent_name required' });
+    return;
+  }
+  const principal = res.locals.mafPrincipal;
+  if (principal?.role === 'client' && !agentRegistry.clientOwnsAgent(principal.id, agent_name)) {
+    res.status(403).json({ error: 'Agent does not belong to this client' });
+    return;
+  }
+  sendNodeReportOutcome(res, workflowEngine.reportNodeStarted({
+    execution_id,
+    agent_name,
+    workflow_id: req.params.wid as string,
+    node_id: req.params.nid as string,
+  }));
+});
+
 /** POST /api/workflows/:wid/nodes/:nid/result — Client 回报节点结果 */
 router.post('/:wid/nodes/:nid/result', (req: Request, res: Response) => {
   const { execution_id, status, agent_name } = req.body;
@@ -112,20 +145,7 @@ router.post('/:wid/nodes/:nid/result', (req: Request, res: Response) => {
     workflow_id: req.params.wid as string,
     node_id: req.params.nid as string,
   };
-  const outcome = workflowEngine.reportNodeResult(result);
-  if (outcome.accepted) {
-    res.json({ received: true });
-    return;
-  }
-  if (outcome.code === 'unknown_workflow' || outcome.code === 'unknown_node') {
-    res.status(404).json({ error: outcome.message, code: outcome.code });
-    return;
-  }
-  if (outcome.code === 'invalid_state') {
-    res.status(422).json({ error: outcome.message, code: outcome.code });
-    return;
-  }
-  res.status(409).json({ error: outcome.message, code: outcome.code });
+  sendNodeReportOutcome(res, workflowEngine.reportNodeResult(result));
 });
 
 // ============================================================

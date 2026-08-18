@@ -23,9 +23,9 @@
  */
 
 import { createServer } from "node:http";
-import { spawn, execSync } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync } from "node:fs";
-import { join, dirname, resolve, sep } from "node:path";
+import { spawn, execSync, execFileSync } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync, rmSync, createWriteStream } from "node:fs";
+import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { homedir, hostname, userInfo, networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -38,12 +38,14 @@ import {
   timingSafeEqual,
   verify,
 } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 // ============================================================
-// 配置（从 maf.config.json / 环境变量读取）
+// 配置（maf.config.json 为权威源，环境变量仅作兼容兜底）
 // ============================================================
 
-/** 读取 maf.config.json（全局 > 项目级），环境变量优先 */
+/** 读取 maf.config.json（全局配置基础上允许项目级覆盖） */
 function loadMafConfig() {
   const paths = [
     join(homedir(), ".meta-agent-framework", "maf.config.json"),
@@ -56,6 +58,57 @@ function loadMafConfig() {
   return cfg;
 }
 const _mafCfg = loadMafConfig();
+
+/**
+ * Agent 发布策略是本机隐私边界，只允许用户级配置定义。
+ * 项目目录中的 maf.config.json 不能放宽该策略。
+ */
+function loadAgentPublicationPolicy() {
+  const configPath = join(homedir(), ".meta-agent-framework", "maf.config.json");
+  if (!existsSync(configPath)) {
+    return { mode: "all", include: new Set(), localOnly: new Set(), clientNetwork: "always" };
+  }
+
+  let config;
+  try {
+    config = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch {
+    // 配置存在但不可解析时 fail closed，避免误发布 Agent。
+    return { mode: "explicit", include: new Set(), localOnly: new Set(), clientNetwork: "when-published" };
+  }
+
+  const raw = config?.client?.agent_publication;
+  if (raw == null) {
+    return { mode: "all", include: new Set(), localOnly: new Set(), clientNetwork: "always" };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { mode: "explicit", include: new Set(), localOnly: new Set(), clientNetwork: "when-published" };
+  }
+
+  const names = values => new Set(
+    (Array.isArray(values) ? values : [])
+      .filter(value => typeof value === "string")
+      .map(value => value.trim())
+      .filter(Boolean),
+  );
+  const mode = raw.mode === "all" ? "all" : "explicit";
+  const clientNetwork = raw.client_network === "always" ? "always" : "when-published";
+  return {
+    mode,
+    include: names(raw.include),
+    localOnly: names(raw.local_only),
+    clientNetwork,
+  };
+}
+
+const AGENT_PUBLICATION = loadAgentPublicationPolicy();
+
+function resolveAgentVisibility(agentName) {
+  const name = String(agentName || "").trim();
+  if (AGENT_PUBLICATION.localOnly.has(name)) return "local-only";
+  if (AGENT_PUBLICATION.mode === "explicit" && !AGENT_PUBLICATION.include.has(name)) return "local-only";
+  return "published";
+}
 const STATE_DIR = join(homedir(), ".meta-agent-framework");
 const AUTH_DIR = join(STATE_DIR, "auth");
 const CLIENT_ID_FILE = join(AUTH_DIR, "client-id");
@@ -63,6 +116,7 @@ const CLIENT_PRIVATE_KEY_FILE = join(AUTH_DIR, "client-private.pem");
 const CLIENT_PUBLIC_KEY_FILE = join(AUTH_DIR, "client-public.pem");
 const LOCAL_TOKEN_FILE = join(AUTH_DIR, "local-token");
 const SERVER_PUBLIC_KEY_FILE = join(AUTH_DIR, "server-public.pem");
+const USER_ID_FILE = join(AUTH_DIR, "user-id");
 
 function readText(path) {
   try { return readFileSync(path, "utf-8").trim(); } catch { return ""; }
@@ -72,6 +126,28 @@ function writeSecret(path, value, mode = 0o600) {
   mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(path, value, { mode });
   try { chmodSync(path, mode); } catch {}
+}
+
+function detectInitialUserId() {
+  const explicit = String(process.env.MAF_USER_ID || "").trim();
+  if (explicit) return explicit;
+  try {
+    const email = execFileSync(
+      "git",
+      ["config", "--global", "user.email"],
+      { encoding: "utf-8", timeout: 3000 },
+    ).trim();
+    if (email) return email.includes("@") ? email.split("@", 1)[0] : email;
+  } catch {}
+  return userInfo().username;
+}
+
+function ensureStableUserId() {
+  const existing = readText(USER_ID_FILE);
+  if (existing) return existing;
+  const detected = detectInitialUserId();
+  writeSecret(USER_ID_FILE, `${detected}\n`);
+  return detected;
 }
 
 function ensureMachineIdentity() {
@@ -109,7 +185,7 @@ function ensureMachineIdentity() {
     localToken = process.env.MAF_LOCAL_TOKEN || randomBytes(32).toString("base64url");
     writeSecret(LOCAL_TOKEN_FILE, `${localToken}\n`);
   }
-  return { clientId, privateKey, publicKey, localToken };
+  return { clientId, privateKey, publicKey, localToken, userId: ensureStableUserId() };
 }
 
 const MACHINE_IDENTITY = ensureMachineIdentity();
@@ -119,14 +195,14 @@ const DIRECTORY = process.env.MAF_DIRECTORY || process.cwd();
 const DAEMON_FILE = fileURLToPath(import.meta.url);
 const DAEMON_DIR = dirname(DAEMON_FILE);
 const PLUGIN_DIR = process.env.MAF_PLUGIN_DIR || DAEMON_DIR;
-const META_AGENT_SERVER = process.env.META_AGENT_SERVER || _mafCfg.server?.url || "";
+const META_AGENT_SERVER = _mafCfg.server?.url || process.env.META_AGENT_SERVER || "";
 const LOCAL_AUTH_TOKEN = String(
   process.env.MAF_LOCAL_TOKEN
   || readText(LOCAL_TOKEN_FILE)
   || "",
 ).trim();
 if (!META_AGENT_SERVER) {
-  console.error("[node-daemon] ❌ META_AGENT_SERVER 未配置！运行 npm run init 或设置环境变量 META_AGENT_SERVER");
+  console.error("[node-daemon] ❌ Server URL 未配置！运行 maf-client install http://<Server-IP>:3000");
 }
 if (!/^[A-Za-z0-9._~+/=-]{32,512}$/.test(LOCAL_AUTH_TOKEN)) {
   console.error("[node-daemon] ❌ 本机 Daemon 凭证初始化失败");
@@ -313,21 +389,45 @@ function currentClientBundleHash() {
     || fileHash(join(PLUGIN_DIR, "index.js"));
 }
 
-function detectUserId() {
-  if (process.env.MAF_USER_ID) return process.env.MAF_USER_ID;
-  try {
-    return execSync("git config user.email", { encoding: "utf-8" }).trim().split("@")[0];
-  } catch { return userInfo().username; }
-}
-
 const DAEMON_SELF_HASH = fileHash(DAEMON_FILE);
 let CLIENT_BUNDLE_HASH = currentClientBundleHash();
 
 // ============================================================
 // Agent Manager — 管理本机所有 agent
 // ============================================================
-// agents Map: agent_name → { runtime, pluginPid, directory, registered, sessionId, lastSeen }
+// agents Map: agent_name → { runtime, pluginPid, directory, registered, sessionId, lastSeen, visibility }
 const agents = new Map();
+
+function publishedAgentEntries() {
+  return [...agents.entries()].filter(([, info]) => info.visibility === "published");
+}
+
+function publishedAgentNames() {
+  return publishedAgentEntries().map(([name]) => name);
+}
+
+function localOnlyAgentNames() {
+  return [...agents.entries()]
+    .filter(([, info]) => info.visibility === "local-only")
+    .map(([name]) => name);
+}
+
+function isPublishedAgent(agentName) {
+  return agents.get(agentName)?.visibility === "published";
+}
+
+function shouldContactServer() {
+  return AGENT_PUBLICATION.clientNetwork === "always" || publishedAgentEntries().length > 0;
+}
+
+function isLoopbackRequest(req) {
+  const address = String(req.socket?.remoteAddress || "").toLowerCase();
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function agentNamesForRequest(req) {
+  return isLoopbackRequest(req) ? [...agents.keys()] : publishedAgentNames();
+}
 
 // 每个 agent 独立的任务队列
 // taskQueues Map: agent_name → { pending, lastExecuted, waitingResponse, executingTaskId }
@@ -337,7 +437,7 @@ const taskQueues = new Map();
 // workflowTracker Map: workflow_id → { title, agent_name, node_id, status, dispatched_at, completed_at, result }
 const workflowTracker = new Map();
 
-let userId = "";
+let userId = MACHINE_IDENTITY.userId;
 let hostUser = userInfo().username;
 let daemonUrl = "";
 let lastInventoryFP = "";
@@ -347,6 +447,10 @@ let lastInventoryFP = "";
 const AGENT_ALIVE_TIMEOUT = 5_000;  // 5s（long-poll 2s 周期 × 2 + 裕量）
 
 const MAX_QUEUE_SIZE = 10;
+const RESULT_MAX_CHARS = parseInt(process.env.MAF_RESULT_MAX_CHARS || "0") || 200_000;
+const EXECUTION_TASK_TIMEOUT_MS = parseInt(process.env.MAF_EXECUTION_TIMEOUT_MS || "0") || 60 * 60_000;
+const PATCH_MAX_BYTES = parseInt(process.env.MAF_PATCH_MAX_BYTES || "0") || 8 * 1024 * 1024;
+const WORKSPACE_WAIT_TIMEOUT_MS = parseInt(process.env.MAF_WORKSPACE_WAIT_TIMEOUT_MS || "0") || 23 * 60 * 60_000;
 const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 45 * 60_000;
 const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
@@ -354,6 +458,7 @@ const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
 const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "detached");
 const codexQueueRunners = new Set();
+const managedExecutionQueueRunners = new Set();
 const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
 
 function normalizeCodexDelivery(value) {
@@ -411,6 +516,226 @@ function getAgentQueue(agentName) {
   return taskQueues.get(agentName);
 }
 
+function safeExecutionPart(value, fallback = "execution") {
+  const result = String(value || "").trim().replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^\.+/, "").slice(0, 120);
+  return result || fallback;
+}
+
+function safeArtifactPath(value) {
+  const normalized = String(value || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const parts = normalized.split("/").filter(Boolean);
+  if (!parts.length || parts.some(part => part === "." || part === "..")) throw new Error(`非法 Artifact 路径: ${value}`);
+  return parts.join("/");
+}
+
+function childPath(root, relativePath) {
+  const target = resolve(root, relativePath);
+  const absoluteRoot = resolve(root);
+  if (!target.startsWith(absoluteRoot + sep)) throw new Error(`Artifact 路径越界: ${relativePath}`);
+  return target;
+}
+
+function executionPaths(context) {
+  const executionDir = join(STATE_DIR, "executions", safeExecutionPart(context.execution_id));
+  return {
+    executionDir,
+    inputDir: join(executionDir, "input"),
+    outputDir: join(executionDir, "output"),
+    manifestPath: join(executionDir, "workspace.json"),
+  };
+}
+
+function gitOutput(cwd, args) {
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+    }).trim();
+  } catch (err) {
+    const detail = String(err?.stderr || err?.message || err).trim();
+    throw new Error(`git ${args.join(" ")} 失败: ${detail.slice(0, 2000)}`);
+  }
+}
+
+function selectRemoteBranch(base) {
+  try {
+    const upstream = gitOutput(base, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    if (upstream.startsWith("origin/")) return upstream;
+  } catch {}
+  try {
+    const head = gitOutput(base, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    if (head.startsWith("origin/")) return head;
+  } catch {}
+  for (const candidate of ["origin/main", "origin/master"]) {
+    try { gitOutput(base, ["rev-parse", "--verify", `${candidate}^{commit}`]); return candidate; } catch {}
+  }
+  throw new Error("Agent 源码仓库没有可用的 origin 跟踪分支");
+}
+
+function normalizedRemoteUrl(base, remoteUrl) {
+  const value = String(remoteUrl || "").trim();
+  if (!value) throw new Error("Agent 源码仓库缺少 origin 地址");
+  if (isAbsolute(value) || /^\w+:\/\//.test(value) || /^[^/]+@[^:]+:/.test(value)) return value;
+  return resolve(base, value.replace(/^~(?=\/)/, homedir()));
+}
+
+function readJsonFile(file) {
+  try { return JSON.parse(readFileSync(file, "utf-8")); } catch { return null; }
+}
+
+function managedWorkspacePaths(base, remoteUrl, remoteBranch) {
+  const repoName = safeExecutionPart(remoteUrl.split(/[/:]/).pop()?.replace(/\.git$/, "") || base.split(sep).pop(), "repository");
+  const identity = createHash("sha256").update(`${remoteUrl}\n${remoteBranch}`).digest("hex").slice(0, 12);
+  const workspaceDir = join(STATE_DIR, "workspaces", `${repoName}-${identity}`);
+  return {
+    workspaceDir,
+    sourceDir: join(workspaceDir, "source"),
+    gitMetaDir: join(workspaceDir, "git-meta"),
+    lockPath: join(workspaceDir, "workspace.lock"),
+    manifestPath: join(workspaceDir, "workspace.json"),
+  };
+}
+
+function acquireWorkspaceLock(paths, context) {
+  mkdirSync(paths.workspaceDir, { recursive: true, mode: 0o700 });
+  const lock = { pid: process.pid, execution_id: String(context.execution_id), acquired_at: new Date().toISOString() };
+  try {
+    writeFileSync(paths.lockPath, `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    return;
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+  }
+  const existing = readJsonFile(paths.lockPath) || {};
+  if (existing.pid && isProcessAlive(Number(existing.pid))) {
+    throw new Error(`MAF managed workspace locked by execution ${existing.execution_id || "unknown"}`);
+  }
+  if (existsSync(paths.sourceDir)) {
+    const dirty = gitOutput(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]);
+    if (dirty) throw new Error(`MAF managed workspace has preserved changes from an interrupted execution: ${paths.sourceDir}`);
+  }
+  try { unlinkSync(paths.lockPath); } catch {}
+  writeFileSync(paths.lockPath, `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+}
+
+function releaseWorkspaceLock(paths, context) {
+  const lock = readJsonFile(paths?.lockPath);
+  if (!lock || String(lock.execution_id || "") === String(context?.execution_id || "")) {
+    try { unlinkSync(paths.lockPath); } catch {}
+  }
+}
+
+async function downloadExecutionArtifact(context, inputDir, relativePath) {
+  const relativeName = safeArtifactPath(relativePath);
+  const target = childPath(inputDir, relativeName);
+  const temporary = `${target}.download-${process.pid}-${Date.now()}`;
+  const encoded = relativeName.split("/").map(encodeURIComponent).join("/");
+  const url = `${String(context.artifact_base_url || "").replace(/\/$/, "")}/artifacts/${encoded}`;
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(30 * 60_000) });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+    renameSync(temporary, target);
+  } catch (err) {
+    try { rmSync(temporary, { force: true }); } catch {}
+    throw new Error(`下载 Artifact ${relativeName} 失败: ${err.message}`);
+  }
+}
+
+async function prepareExecutionWorkspace(context, baseRepo) {
+  if (!context) return null;
+  const local = executionPaths(context);
+  mkdirSync(local.inputDir, { recursive: true, mode: 0o700 });
+  mkdirSync(local.outputDir, { recursive: true, mode: 0o700 });
+  const artifacts = [...new Set(Array.isArray(context.artifacts) ? context.artifacts.map(String) : [])];
+  if (context.artifact_base_url) {
+    for (const artifact of artifacts) await downloadExecutionArtifact(context, local.inputDir, artifact);
+  }
+
+  let base = resolve(String(baseRepo || ""));
+  if (!existsSync(base)) throw new Error(`Agent 源码目录不存在: ${base}`);
+  if (context.workdir_policy === "none") return { ...local, sourceDir: base, managed: false };
+  base = resolve(gitOutput(base, ["rev-parse", "--show-toplevel"]));
+  if (context.workdir_policy === "configured_workspace") return { ...local, sourceDir: base, managed: false };
+
+  try {
+    execFileSync("git", ["-C", base, "fetch", "--prune", "origin"], { stdio: ["ignore", "pipe", "pipe"], timeout: 120000 });
+  } catch (err) {
+    throw new Error(`更新远端源码失败（基础工作区未修改）: ${String(err?.stderr || err?.message || err).slice(0, 2000)}`);
+  }
+  const remoteRef = selectRemoteBranch(base);
+  const branch = remoteRef.replace(/^origin\//, "");
+  const remoteUrl = normalizedRemoteUrl(base, gitOutput(base, ["remote", "get-url", "origin"]));
+  const workspace = managedWorkspacePaths(base, remoteUrl, branch);
+  acquireWorkspaceLock(workspace, context);
+  try {
+    const manifest = readJsonFile(workspace.manifestPath);
+    if (!existsSync(workspace.sourceDir)) {
+      rmSync(workspace.gitMetaDir, { recursive: true, force: true });
+      execFileSync("git", ["clone", "--no-local", "--single-branch", "--branch", branch,
+        `--separate-git-dir=${workspace.gitMetaDir}`, remoteUrl, workspace.sourceDir], {
+        stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024,
+      });
+    } else if (!manifest || manifest.remote_url !== remoteUrl || manifest.branch !== branch) {
+      throw new Error(`MAF managed workspace identity mismatch: ${workspace.sourceDir}`);
+    }
+    gitOutput(workspace.sourceDir, ["remote", "set-url", "origin", remoteUrl]);
+    gitOutput(workspace.sourceDir, ["fetch", "--prune", "origin"]);
+    gitOutput(workspace.sourceDir, ["reset", "--hard", remoteRef]);
+    gitOutput(workspace.sourceDir, ["clean", "-fdx"]);
+    gitOutput(workspace.sourceDir, ["checkout", "-B", "maf-managed-execution", remoteRef]);
+    gitOutput(workspace.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
+    const baseCommit = gitOutput(workspace.sourceDir, ["rev-parse", "HEAD"]);
+    writeFileSync(workspace.manifestPath, `${JSON.stringify({ remote_url: remoteUrl, branch }, null, 2)}\n`, { mode: 0o600 });
+    const paths = { ...local, ...workspace, managed: true, sourceBranch: branch, sourceCommit: baseCommit, remoteUrl };
+    writeFileSync(local.manifestPath, `${JSON.stringify({ execution_id: context.execution_id, workspace: workspace.sourceDir,
+      source_branch: branch, source_commit: baseCommit, created_at: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+    return paths;
+  } catch (err) {
+    releaseWorkspaceLock(workspace, context);
+    throw err;
+  }
+}
+
+function withExecutionRuntimeContext(prompt, projectPath, paths) {
+  if (!paths) return String(prompt || "");
+  return [String(prompt || ""), "", "---", "", "## MAF Execution directories", "",
+    `- Source workspace: \`${projectPath}\``,
+    `- Input artifacts: \`${paths.inputDir}\``,
+    `- Output artifacts: \`${paths.outputDir}\``,
+    paths.managed ? `- Source baseline: \`${paths.sourceBranch}\` @ \`${paths.sourceCommit}\`` : "",
+    "- Use $MAF_SOURCE_DIR, $MAF_INPUT_DIR, and $MAF_OUTPUT_DIR for these locations.",
+    paths.managed ? "- Do not pull, switch, checkout, reset, clean, commit, rebase, or push. Leave source changes uncommitted; MAF exports them as a patch." : "",
+    "- Keep downloaded evidence, logs, attachments, and temporary files outside the source workspace.",
+    "- Return the complete final result as Markdown.",
+  ].filter(Boolean).join("\n");
+}
+
+function workspaceErrorCode(error) {
+  const message = String(error?.message || error || "");
+  if (/not a git repository|不是 git 仓库|源码目录不存在|rev-parse --show-toplevel/i.test(message)) return "WORKSPACE_NOT_GIT";
+  if (/locked by execution|workspace.+locked/i.test(message)) return "QUEUE_FULL";
+  return "DISPATCH_FAILED";
+}
+
+function waitMs(ms) { return new Promise(resolveWait => setTimeout(resolveWait, ms)); }
+
+async function prepareTaskWorkspace(task) {
+  if (!task?.run_context || task._workspacePrepared) return task;
+  const deadline = Date.now() + WORKSPACE_WAIT_TIMEOUT_MS;
+  for (;;) {
+    try {
+      task.run_paths = await prepareExecutionWorkspace(task.run_context, task._base_project_path);
+      task.project_path = task.run_paths?.sourceDir || task._base_project_path;
+      task.description = withExecutionRuntimeContext(task._raw_description || task.description, task.project_path, task.run_paths);
+      task._workspacePrepared = true;
+      return task;
+    } catch (err) {
+      if (!/locked by execution/.test(String(err?.message || err)) || Date.now() >= deadline) throw err;
+      await waitMs(1000);
+    }
+  }
+}
+
 /** 更新 agent 最后活跃时间 */
 function touchAgent(agentName) {
   const info = agents.get(agentName);
@@ -460,10 +785,10 @@ function pruneDeadAgents() {
   }
 }
 
-function getAgentStatuses() {
+function getAgentStatuses(agentEntries = agents) {
   const now = Date.now();
   const statuses = {};
-  for (const [name, info] of agents) {
+  for (const [name, info] of agentEntries) {
     const q = taskQueues.get(name);
 
     // Codex：默认 detached，由 Daemon 通过 screen/exec 后台执行；只有显式 attached 才注入当前 TUI。
@@ -963,7 +1288,7 @@ let enrollmentPromise = null;
 let lastEnrollmentAttempt = 0;
 
 async function ensureEnrollment(force = false) {
-  if (!META_AGENT_SERVER || !daemonUrl) return false;
+  if (!META_AGENT_SERVER || !daemonUrl || !shouldContactServer()) return false;
   if (!force && enrollmentStatus === "active" && readText(SERVER_PUBLIC_KEY_FILE)) return true;
   if (!force && Date.now() - lastEnrollmentAttempt < 5_000) return false;
   if (enrollmentPromise) return enrollmentPromise;
@@ -976,7 +1301,7 @@ async function ensureEnrollment(force = false) {
       public_key: MACHINE_IDENTITY.publicKey,
       client_endpoint: daemonUrl,
       hostname: hostname(),
-      user_id: userId || detectUserId(),
+      user_id: userId,
       host_user: hostUser,
     });
     try {
@@ -1016,10 +1341,11 @@ async function registerToServer() {
   // 先清理已死的 agent（Plugin 死了 + lastSeen 超时 + 无 screen）
   pruneDeadAgents();
 
-  if (agents.size === 0) return;
+  const published = publishedAgentEntries();
+  if (published.length === 0) return;
   if (!await ensureEnrollment()) return;
   const agentDefs = [];
-  for (const [name, info] of agents) {
+  for (const [name, info] of published) {
     agentDefs.push(findAgentDef(name, info.runtime, info.directory));
   }
 
@@ -1031,7 +1357,7 @@ async function registerToServer() {
       host_user: hostUser,
       client_endpoint: daemonUrl,
       agents: agentDefs,
-      agent_statuses: getAgentStatuses(),
+      agent_statuses: getAgentStatuses(published),
       client_version: CLIENT_VERSION,
       plugin_hash: CLIENT_BUNDLE_HASH,
       daemon_port: parseInt(daemonUrl.split(":").pop()),
@@ -1043,9 +1369,9 @@ async function registerToServer() {
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
-      const names = [...agents.keys()];
+      const names = published.map(([name]) => name);
       log(`✅ 注册成功: [${names.join(", ")}] (${agentDefs[0]?.skills?.length || 0} skills, ${agentDefs[0]?.mcps?.length || 0} mcps)`);
-      for (const [, info] of agents) info.registered = true;
+      for (const [, info] of published) info.registered = true;
       lastInventoryFP = inventoryFP(agentDefs[0]?.skills || [], agentDefs[0]?.mcps || []);
     } else {
       log(`❌ 注册失败: HTTP ${res.status}`);
@@ -1063,14 +1389,15 @@ let lastFullRegister = 0;
 const FULL_REGISTER_INTERVAL = 3_000; // 每 3s 强制重新注册（防 Server 重启后状态丢失）
 
 async function heartbeat() {
-  if (agents.size === 0) return;
+  const published = publishedAgentEntries();
+  if (published.length === 0) return;
 
   // 检查是否有 agent 还没注册成功，或者距离上次完整注册超过 60s
-  const anyUnregistered = [...agents.values()].some(a => !a.registered);
+  const anyUnregistered = published.some(([, info]) => !info.registered);
   const needFullRegister = Date.now() - lastFullRegister > FULL_REGISTER_INTERVAL;
   if (anyUnregistered || needFullRegister) {
     await registerToServer();
-    if ([...agents.values()].every(a => a.registered)) lastFullRegister = Date.now();
+    if (publishedAgentEntries().every(([, info]) => info.registered)) lastFullRegister = Date.now();
     return;
   }
 
@@ -1078,7 +1405,7 @@ async function heartbeat() {
     const body = {
       user_id: userId,
       host_user: hostUser,
-      agent_statuses: getAgentStatuses(),
+      agent_statuses: getAgentStatuses(published),
       client_version: CLIENT_VERSION,
       plugin_hash: CLIENT_BUNDLE_HASH,
       daemon_port: parseInt(daemonUrl.split(":").pop()),
@@ -1091,7 +1418,7 @@ async function heartbeat() {
     if (fp !== lastInventoryFP) {
       log(`📦 inventory 变化 (${skills.length} skills, ${mcps.length} mcps)`);
       const inv = {};
-      for (const [name] of agents) inv[name] = { skills, mcps };
+      for (const [name] of published) inv[name] = { skills, mcps };
       body.agent_inventory = inv;
       lastInventoryFP = fp;
     }
@@ -1106,15 +1433,15 @@ async function heartbeat() {
       signal: AbortSignal.timeout(3000),
     });
     if (!res.ok) {
-      for (const [, info] of agents) info.registered = false;
+      for (const [, info] of published) info.registered = false;
     }
   } catch {
-    for (const [, info] of agents) info.registered = false;
+    for (const [, info] of published) info.registered = false;
   }
 }
 
 async function reportAgentStatusToServer(agentName, status) {
-  if (!META_AGENT_SERVER || !agentName || !userId) return false;
+  if (!META_AGENT_SERVER || !agentName || !userId || !isPublishedAgent(agentName)) return false;
   try {
     const url = `${META_AGENT_SERVER}/api/clients/heartbeat`;
     const body = JSON.stringify({
@@ -1172,6 +1499,7 @@ function enqueueTask(agentName, task) {
         // attached/auto：当前 long-poll 请求就是附着接收器，直接交给它。
         q.lastExecuted = nextTask;
         q.executingTaskId = nextTask.id;
+        void reportTaskStarted(nextTask);
         try {
           waiter.writeHead(200, { "Content-Type": "application/json" });
           waiter.end(JSON.stringify({ task: nextTask, delivery_mode: "attached" }));
@@ -1189,6 +1517,7 @@ function enqueueTask(agentName, task) {
       // opencode 模式：直接取走任务给 Plugin 执行
       q.lastExecuted = nextTask;
       q.executingTaskId = nextTask.id;  // 分发时立即标记（防竞态）
+      void reportTaskStarted(nextTask);
       try {
         waiter.writeHead(200, { "Content-Type": "application/json" });
         waiter.end(JSON.stringify({ task: nextTask }));
@@ -1198,10 +1527,136 @@ function enqueueTask(agentName, task) {
   return true;
 }
 
+async function reportTaskStarted(task) {
+  if (!task?.workflow_id || !task?.node_id || task._mafStartedReported || !isPublishedAgent(task.target_agent)) return true;
+  try {
+    const url = `${META_AGENT_SERVER}/api/workflows/${task.workflow_id}/nodes/${task.node_id}/started`;
+    const body = JSON.stringify({ execution_id: task.execution_id || task.id, agent_name: task.target_agent || "" });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+      body,
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return false;
+    task._mafStartedReported = true;
+    if (task.workflow_id && workflowTracker.has(task.workflow_id)) workflowTracker.get(task.workflow_id).status = "running";
+    return true;
+  } catch (err) {
+    log(`⚠ workflow started 回报失败: ${err.message}`);
+    return false;
+  }
+}
+
+function captureManagedWorkspacePatch(task) {
+  const paths = task?.run_paths;
+  if (!task?.run_context || !paths?.managed) return null;
+  gitOutput(paths.sourceDir, ["rev-parse", "--verify", `${paths.sourceCommit}^{commit}`]);
+  execFileSync("git", ["-C", paths.sourceDir, "add", "-A"], { stdio: ["ignore", "pipe", "pipe"], timeout: 30000 });
+  const content = execFileSync("git", ["-C", paths.sourceDir, "diff", "--cached", "--binary", "--full-index", paths.sourceCommit], {
+    stdio: ["ignore", "pipe", "pipe"], timeout: 60000, maxBuffer: PATCH_MAX_BYTES + 1024,
+  });
+  if (content.length > PATCH_MAX_BYTES) throw new Error(`Patch 超过 ${PATCH_MAX_BYTES} 字节限制`);
+  const changedFiles = execFileSync("git", ["-C", paths.sourceDir, "diff", "--cached", "--name-only", "-z", paths.sourceCommit], {
+    encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+  }).split("\0").filter(Boolean);
+  const patchPath = join(paths.outputDir, "changes.patch");
+  if (content.length) writeFileSync(patchPath, content, { mode: 0o600 });
+  else try { unlinkSync(patchPath); } catch {}
+  return { content, changedFiles };
+}
+
+async function uploadManagedWorkspacePatch(task, patch) {
+  if (!patch || !task?.run_context?.execution_id) return;
+  const url = `${META_AGENT_SERVER}/api/v1/executions/${encodeURIComponent(task.run_context.execution_id)}/patch`;
+  const body = JSON.stringify({
+    content_base64: patch.content.toString("base64"),
+    base_commit: task.run_paths.sourceCommit || "",
+    base_branch: task.run_paths.sourceBranch || "",
+    changed_files: patch.changedFiles,
+    workspace_path: task.run_paths.sourceDir || "",
+    workflow_id: task.workflow_id || "",
+    node_id: task.node_id || "",
+    agent_name: task.target_agent || "",
+  });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
+    body,
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = await res.text(); } catch {}
+    throw new Error(`Patch 回传失败: HTTP ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
+  }
+}
+
+function cleanManagedWorkspace(task) {
+  const paths = task?.run_paths;
+  if (!task?.run_context || !paths?.managed) return;
+  try {
+    gitOutput(paths.sourceDir, ["reset", "--hard", paths.sourceCommit]);
+    gitOutput(paths.sourceDir, ["clean", "-fdx"]);
+    gitOutput(paths.sourceDir, ["remote", "set-url", "origin", paths.remoteUrl]);
+    gitOutput(paths.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
+    releaseWorkspaceLock(paths, task.run_context);
+    log(`🧹 managed workspace 已清理并释放: ${paths.sourceDir}`);
+  } catch (err) {
+    log(`❌ managed workspace 清理失败，保留锁与现场: ${err.message}`);
+  }
+}
+
 async function reportTaskResult(task, status, result, durationMs) {
+  if (!isPublishedAgent(task?.target_agent)) {
+    return { ok: false, workflow_reported: false, error: "agent is local-only" };
+  }
+
+  if (task?._mafResultReported) {
+    log(`ℹ️ 忽略任务重复终态回报: task=${task.id} status=${status}`);
+    return { ok: true, workflow_reported: true, duplicate: true };
+  }
+
+  if (task?._mafResultReporting) {
+    const previous = await task._mafResultReporting;
+    if (previous?.ok) {
+      log(`ℹ️ 忽略任务并发重复终态回报: task=${task.id} status=${status}`);
+      return { ok: true, workflow_reported: true, duplicate: true };
+    }
+  }
+
+  const operation = performTaskResultReport(task, status, result, durationMs);
+  task._mafResultReporting = operation;
+  try {
+    const outcome = await operation;
+    if (outcome?.ok) task._mafResultReported = true;
+    return outcome;
+  } finally {
+    if (task._mafResultReporting === operation) task._mafResultReporting = null;
+  }
+}
+
+async function performTaskResultReport(task, status, result, durationMs) {
+
   // 更新 workflow 跟踪表
   // Strip ANSI escape codes from result（远端 agent 输出可能带终端颜色码）
-  const cleanResult = (result || "").replace(/\x1b\[[0-9;]*m/g, "");
+  let cleanResult = (result || "").replace(/\x1b\[[0-9;]*m/g, "");
+  let patchReady = true;
+
+  if (task.run_context && task.run_paths) {
+    try {
+      mkdirSync(task.run_paths.outputDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(task.run_paths.outputDir, "result.md"), `${cleanResult.trim()}\n`, { mode: 0o600 });
+      if (task.run_paths.managed && !task._patchUploaded) {
+        await uploadManagedWorkspacePatch(task, captureManagedWorkspacePatch(task));
+        task._patchUploaded = true;
+      }
+    } catch (err) {
+      patchReady = false;
+      status = "failed";
+      cleanResult = `${cleanResult}\n\n[PATCH_EXPORT_FAILED] ${err.message}`.trim();
+    }
+  }
 
   if (task.workflow_id && workflowTracker.has(task.workflow_id)) {
     const entry = workflowTracker.get(task.workflow_id);
@@ -1218,7 +1673,7 @@ async function reportTaskResult(task, status, result, durationMs) {
         execution_id: task.execution_id || task.id,
         agent_name: task.target_agent || "",
         status,
-        result: cleanResult.substring(0, 5000),
+        result: cleanResult.substring(0, RESULT_MAX_CHARS),
         duration_ms: durationMs,
         session_id: task.session_id || "",
       });
@@ -1235,6 +1690,7 @@ async function reportTaskResult(task, status, result, durationMs) {
         return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
       }
       log(`✅ workflow 回报成功: workflow=${task.workflow_id} node=${task.node_id}`);
+      if (patchReady) cleanManagedWorkspace(task);
       return { ok: true, workflow_reported: true };
     } catch (err) {
       log(`⚠ workflow 回报失败: ${err.message}`);
@@ -1243,7 +1699,7 @@ async function reportTaskResult(task, status, result, durationMs) {
   }
   try {
     const url = `${META_AGENT_SERVER}/api/tasks/${task.id}/result`;
-    const body = JSON.stringify({ status, result: result.substring(0, 5000), duration_ms: durationMs });
+    const body = JSON.stringify({ status, result: cleanResult.substring(0, RESULT_MAX_CHARS), duration_ms: durationMs });
     const res = await fetch(url, {
       method: "POST",
       headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
@@ -1251,6 +1707,7 @@ async function reportTaskResult(task, status, result, durationMs) {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
+    if (patchReady) cleanManagedWorkspace(task);
     return { ok: true, workflow_reported: true };
   } catch (err) {
     log(`⚠ 回报失败: ${err.message}`);
@@ -1281,7 +1738,9 @@ function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
     ``,
     `## 执行要求`,
     `- 直接完成任务并在最终回答中给出结果摘要、关键改动/发现、验证情况。`,
-    `- 不要直接调用 MAF Server workflow API；完成或失败后必须按下方 MAF 回报要求执行本机回报脚本。`,
+    reportScript
+      ? `- 不要直接调用 MAF Server workflow API；完成或失败后必须按下方 MAF 回报要求执行本机回报脚本。`
+      : `- 本任务由 Daemon 以 Headless 模式托管，最终回答会自动回传；不要调用 /tasks/done 或任何 MAF API，也不要创建额外回报脚本。`,
     `- 如果需要修改文件，遵守仓库内 AGENTS.md 和相关规则。`,
     `- 如果任务无法完成，说明阻塞原因和建议下一步。`,
   ];
@@ -1320,7 +1779,7 @@ function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
   return parts.join("\n");
 }
 
-function buildCodexArgs(cwd, outputFile) {
+function buildCodexArgs(cwd, outputFile, runPaths = null) {
   const args = [];
   if (!CODEX_BYPASS_SANDBOX) {
     args.push("-c", `approval_policy="${process.env.MAF_CODEX_APPROVAL || "never"}"`);
@@ -1333,7 +1792,9 @@ function buildCodexArgs(cwd, outputFile) {
     args.push("--sandbox", CODEX_SANDBOX);
   }
   if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
-  args.push("-C", cwd, "--skip-git-repo-check", "--color", "never", "-o", outputFile, "-");
+  args.push("-C", cwd);
+  for (const dir of [runPaths?.gitMetaDir, runPaths?.inputDir, runPaths?.outputDir].filter(Boolean)) args.push("--add-dir", dir);
+  args.push("--skip-git-repo-check", "--color", "never", "-o", outputFile, "-");
   return args;
 }
 
@@ -1499,6 +1960,7 @@ child.on("error", (err) => {
 
 async function executeCodexExecTask(agentName, task, projectPath) {
   const started = Date.now();
+  await reportTaskStarted(task);
   const cwd = (projectPath || agents.get(agentName)?.directory || DIRECTORY).replace(/^~/, homedir());
   const outFile = join(STATE_DIR, `codex-${safeFilePart(agentName)}-${safeFilePart(task.id)}-${Date.now()}.txt`);
 
@@ -1510,7 +1972,7 @@ async function executeCodexExecTask(agentName, task, projectPath) {
   }
 
   const prompt = buildCodexPrompt(agentName, task, cwd);
-  const args = buildCodexArgs(cwd, outFile);
+  const args = buildCodexArgs(cwd, outFile, task.run_paths);
   log(`🤖 Codex exec 开始: agent=${agentName} task=${task.id} cwd=${cwd} sandbox=${CODEX_BYPASS_SANDBOX ? "bypass" : CODEX_SANDBOX}`);
 
   const result = await new Promise((resolve) => {
@@ -1543,7 +2005,12 @@ async function executeCodexExecTask(agentName, task, projectPath) {
     const child = spawn(CODEX_BIN, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        MAF_SOURCE_DIR: cwd,
+        MAF_INPUT_DIR: task.run_paths?.inputDir || "",
+        MAF_OUTPUT_DIR: task.run_paths?.outputDir || "",
+      },
     });
 
     const timer = setTimeout(() => {
@@ -1573,6 +2040,110 @@ async function executeCodexExecTask(agentName, task, projectPath) {
   await reportTaskResult(task, result.status, result.result, duration);
 }
 
+async function executeManagedExecutionTask(agentName, task, runtime, projectPath) {
+  if (runtime === "codex") {
+    await executeCodexExecTask(agentName, task, projectPath);
+    return;
+  }
+  const started = Date.now();
+  await reportTaskStarted(task);
+  const cwd = resolve(projectPath || DIRECTORY);
+  const prompt = String(task.description || task.title || "");
+  let executable;
+  let args;
+  if (runtime === "claude-code") {
+    executable = process.env.CLAUDE_BIN || "claude";
+    args = ["--print", "--output-format", "text", "--permission-mode", "dontAsk", "--no-session-persistence", "--setting-sources", "user"];
+    const extraDirs = [task.run_paths?.gitMetaDir, task.run_paths?.inputDir, task.run_paths?.outputDir].filter(Boolean);
+    if (extraDirs.length) args.push("--add-dir", ...extraDirs);
+    if (agentName) args.push("--agent", agentName);
+    args.push(prompt);
+  } else {
+    executable = process.env.OPENCODE_BIN || "opencode";
+    args = ["run"];
+    if (agentName) args.push("--agent", agentName);
+    args.push(prompt);
+  }
+  const result = await new Promise(resolveResult => {
+    let stdout = "";
+    let stderr = "";
+    let done = false;
+    let timedOut = false;
+    const finish = (status, message) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolveResult({ status, result: status === "completed" ? (stdout.trim() || stderr.trim() || "Execution completed with no output") : message });
+    };
+    const child = spawn(executable, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        MAF_SOURCE_DIR: cwd,
+        MAF_INPUT_DIR: task.run_paths?.inputDir || "",
+        MAF_OUTPUT_DIR: task.run_paths?.outputDir || "",
+      },
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch {}
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000).unref?.();
+    }, EXECUTION_TASK_TIMEOUT_MS);
+    child.stdout.on("data", data => { stdout += data.toString(); });
+    child.stderr.on("data", data => { stderr += data.toString(); });
+    child.on("error", err => finish("failed", `${runtime} 启动失败: ${err.message}`));
+    child.on("close", (code, signal) => {
+      if (timedOut) finish("failed", `${runtime} 执行超时 (${EXECUTION_TASK_TIMEOUT_MS}ms)`);
+      else if (code === 0) finish("completed", "");
+      else finish("failed", `${runtime} 执行失败: exit=${code ?? ""}${signal ? ` signal=${signal}` : ""}\n${stderr.trim() || stdout.trim()}`);
+    });
+  });
+  await reportTaskResult(task, result.status, result.result, Date.now() - started);
+}
+
+function enqueueManagedExecutionTask(agentName, task) {
+  const q = getAgentQueue(agentName);
+  if (q.pending.length >= MAX_QUEUE_SIZE) return false;
+  q.pending.push(task);
+  return true;
+}
+
+async function runManagedExecutionQueue(agentName, runtime) {
+  const q = getAgentQueue(agentName);
+  try {
+    while (q.pending.some(task => task?.run_context)) {
+      if (q.executingTaskId) { await waitMs(1000); continue; }
+      const index = q.pending.findIndex(task => task?.run_context);
+      if (index < 0) break;
+      const [task] = q.pending.splice(index, 1);
+      q.lastExecuted = task;
+      q.executingTaskId = task.id;
+      try {
+        await prepareTaskWorkspace(task);
+        await executeManagedExecutionTask(agentName, task, runtime, task.project_path || task._base_project_path || DIRECTORY);
+      } catch (err) {
+        await reportTaskResult(task, "failed", `[${workspaceErrorCode(err)}] 准备或执行 managed Execution 失败: ${err.message}`, 0);
+      } finally {
+        q.executingTaskId = null;
+        q.lastExecuted = null;
+      }
+    }
+  } finally {
+    managedExecutionQueueRunners.delete(agentName);
+    if (q.pending.some(task => task?.run_context)) scheduleManagedExecutionQueue(agentName, runtime);
+  }
+}
+
+function scheduleManagedExecutionQueue(agentName, runtime) {
+  if (managedExecutionQueueRunners.has(agentName)) return;
+  managedExecutionQueueRunners.add(agentName);
+  setImmediate(() => runManagedExecutionQueue(agentName, runtime).catch(err => {
+    managedExecutionQueueRunners.delete(agentName);
+    log(`❌ managed Execution queue 失败: ${agentName} ${err.message}`);
+  }));
+}
+
 async function runCodexQueue(agentName) {
   const q = getAgentQueue(agentName);
   try {
@@ -1596,6 +2167,7 @@ async function runCodexQueue(agentName) {
         if (agentInfo) agentInfo.lastSeen = Date.now();
         q.lastExecuted = task;
         q.executingTaskId = task.id;
+        await reportTaskStarted(task);
         await executeCodexExecTask(agentName, task, task.project_path || agentInfo?.directory || DIRECTORY);
         q.executingTaskId = null;
         q.lastExecuted = null;
@@ -1653,8 +2225,9 @@ function scheduleCodexQueue(agentName) {
 
 // 任务轮询（降级）
 async function pollTasks() {
-  if (agents.size === 0) return;
-  for (const [name] of agents) {
+  const published = publishedAgentEntries();
+  if (published.length === 0) return;
+  for (const [name] of published) {
     const q = getAgentQueue(name);
     if (q.pending.length > 0) continue;
     try {
@@ -2032,17 +2605,28 @@ const httpServer = createServer(async (req, res) => {
 
   // GET /health
   if (req.method === "GET" && pathname === "/health") {
-    json(200, {
+    const localRequest = isLoopbackRequest(req);
+    const health = {
       ok: true,
       pid: process.pid,
-      agents: [...agents.keys()],
+      agents: agentNamesForRequest(req),
       daemon_hash: DAEMON_SELF_HASH,
       uptime: process.uptime(),
       version: CLIENT_VERSION,
-      server: META_AGENT_SERVER,
-      enrollment_status: enrollmentStatus,
-      client_id: MACHINE_IDENTITY.clientId,
-    });
+    };
+    if (localRequest) {
+      health.server = META_AGENT_SERVER;
+      health.enrollment_status = enrollmentStatus;
+      health.client_id = MACHINE_IDENTITY.clientId;
+      health.user_id = userId;
+      health.host_user = hostUser;
+      health.local_only_agents = localOnlyAgentNames();
+      health.agent_publication = {
+        mode: AGENT_PUBLICATION.mode,
+        client_network: AGENT_PUBLICATION.clientNetwork,
+      };
+    }
+    json(200, health);
     return;
   }
 
@@ -2065,13 +2649,14 @@ const httpServer = createServer(async (req, res) => {
     const kind = String(body.kind || body.role || "").trim().toLowerCase();
     if (kind === "server" || isServerAgentName(name)) {
       log(`ℹ️ 忽略 Server 控制面连接，不注册为 Agent: ${name}`);
-      json(200, { ok: true, ignored: true, kind: "server", agents: [...agents.keys()] });
+      json(200, { ok: true, ignored: true, kind: "server", agents: agentNamesForRequest(req) });
       return;
     }
 
     const existing = agents.get(name);
     const incomingPid = body.plugin_pid || 0;
     retireIdleSameAgentInstance(name, existing, incomingPid);
+    const visibility = resolveAgentVisibility(name);
     const info = {
       runtime: body.runtime || existing?.runtime || "opencode",
       pluginPid: incomingPid || existing?.pluginPid || 0,
@@ -2079,17 +2664,24 @@ const httpServer = createServer(async (req, res) => {
       registered: false,
       sessionId: body.session_id || existing?.sessionId || "",
       lastSeen: Date.now(),
+      visibility,
     };
     agents.set(name, info);
 
-    if (body.user_id) userId = body.user_id;
-    if (body.host_user) hostUser = body.host_user;
+    if (visibility === "published") {
+      if (body.user_id && body.user_id !== userId) {
+        log(`ℹ️ 忽略 Agent 提交的 user_id=${body.user_id}，使用稳定机器身份 ${userId}`);
+      }
+      if (body.host_user && body.host_user !== hostUser) {
+        log(`ℹ️ 忽略 Agent 提交的 host_user=${body.host_user}，使用 Daemon 宿主用户 ${hostUser}`);
+      }
+    }
 
-    log(`🔗 agent 连接: ${name} (runtime=${info.runtime}, agents=[${[...agents.keys()].join(", ")}])`);
+    log(`🔗 agent 连接: ${name} (runtime=${info.runtime}, visibility=${visibility}, agents=[${[...agents.keys()].join(", ")}])`);
 
-    // 触发注册
-    await registerToServer();
-    json(200, { ok: true, agents: [...agents.keys()] });
+    // local-only 连接不得引发任何 Server 通信。
+    if (visibility === "published") await registerToServer();
+    json(200, { ok: true, local_only: visibility === "local-only", agents: agentNamesForRequest(req) });
     return;
   }
 
@@ -2099,7 +2691,7 @@ const httpServer = createServer(async (req, res) => {
     const name = body.agent_name;
     if (isServerAgentName(name)) {
       log(`ℹ️ 忽略 Server 控制面断开，不按 Agent 注销: ${name}`);
-      json(200, { ok: true, ignored: true, kind: "server", agents: [...agents.keys()] });
+      json(200, { ok: true, ignored: true, kind: "server", agents: agentNamesForRequest(req) });
       return;
     }
     if (name && agents.has(name)) {
@@ -2108,7 +2700,7 @@ const httpServer = createServer(async (req, res) => {
       const reqPid = body.plugin_pid || 0;
       if (reqPid > 0 && info.pluginPid > 0 && reqPid !== info.pluginPid) {
         log(`⚠ disconnect ${name} 被忽略（pid ${reqPid} ≠ 当前 ${info.pluginPid}）`);
-        json(200, { ok: true, ignored: true, agents: [...agents.keys()] });
+        json(200, { ok: true, ignored: true, agents: agentNamesForRequest(req) });
         return;
       }
       const q = taskQueues.get(name);
@@ -2123,10 +2715,10 @@ const httpServer = createServer(async (req, res) => {
         });
         log(`🔌 agent 接收端断开但任务仍在，保留队列上下文: ${name} (executing=${q?.executingTaskId || "none"}, pending=${q?.pending.length || 0})`);
         if (info.runtime === "codex" && q?.pending.length > 0) scheduleCodexQueue(name);
-        json(200, { ok: true, deferred: true, active_task: q?.executingTaskId || "", pending: q?.pending.length || 0, agents: [...agents.keys()] });
+        json(200, { ok: true, deferred: true, active_task: q?.executingTaskId || "", pending: q?.pending.length || 0, agents: agentNamesForRequest(req) });
         return;
       }
-      await reportAgentStatusToServer(name, "offline");
+      if (info.visibility === "published") await reportAgentStatusToServer(name, "offline");
       agents.delete(name);
       // 清理任务队列
       if (q?.waitingResponse) {
@@ -2135,14 +2727,15 @@ const httpServer = createServer(async (req, res) => {
       taskQueues.delete(name);
       log(`🔌 agent 断开: ${name} (剩余=[${[...agents.keys()].join(", ")}])`);
     }
-    json(200, { ok: true, agents: [...agents.keys()] });
+    json(200, { ok: true, agents: agentNamesForRequest(req) });
     return;
   }
 
   // GET /agents — 列出当前管理的所有 agent
   if (req.method === "GET" && pathname === "/agents") {
     const list = [];
-    for (const [name, info] of agents) {
+    const entries = String(req.headers["x-maf-role"] || "") === "server" ? publishedAgentEntries() : agents;
+    for (const [name, info] of entries) {
       list.push({ agent_name: name, ...info });
     }
     json(200, { agents: list });
@@ -2187,6 +2780,7 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/agent") {
     const body = await readBody();
     if (body.agent_name) {
+      const visibility = resolveAgentVisibility(body.agent_name);
       const info = {
         runtime: body.runtime || "opencode",
         pluginPid: 0,
@@ -2194,14 +2788,21 @@ const httpServer = createServer(async (req, res) => {
         registered: false,
         sessionId: "",
         lastSeen: Date.now(),
+        visibility,
       };
       agents.set(body.agent_name, info);
-      if (body.user_id) userId = body.user_id;
-      if (body.host_user) hostUser = body.host_user;
-      log(`🔗 agent 连接(兼容): ${body.agent_name}`);
-      await registerToServer();
+      if (visibility === "published") {
+        if (body.user_id && body.user_id !== userId) {
+          log(`ℹ️ 忽略兼容接口提交的 user_id=${body.user_id}，使用稳定机器身份 ${userId}`);
+        }
+        if (body.host_user && body.host_user !== hostUser) {
+          log(`ℹ️ 忽略兼容接口提交的 host_user=${body.host_user}，使用 Daemon 宿主用户 ${hostUser}`);
+        }
+        await registerToServer();
+      }
+      log(`🔗 agent 连接(兼容): ${body.agent_name} (visibility=${visibility})`);
     }
-    json(200, { ok: true });
+    json(200, { ok: true, local_only: body.agent_name ? resolveAgentVisibility(body.agent_name) === "local-only" : false });
     return;
   }
 
@@ -2221,18 +2822,25 @@ const httpServer = createServer(async (req, res) => {
     const targetAgent = body.target_agent || body.agent_name;
     const projectPath = body.project_path || "";
     const runtime = body.runtime || "opencode";
-    log(`📥 收到任务: "${body.title || body.prompt}" → ${targetAgent}${body.workflow_id ? ` (workflow=${body.workflow_id})` : ""}`);
 
     if (!targetAgent) {
       json(400, { error: "agent_name required" });
       return;
     }
+    if (resolveAgentVisibility(targetAgent) !== "published") {
+      json(404, { error: "not found" });
+      return;
+    }
 
+    log(`📥 收到任务: "${body.title || body.prompt}" → ${targetAgent}${body.workflow_id ? ` (workflow=${body.workflow_id})` : ""}`);
+
+    const baseProjectPath = projectPath || agents.get(targetAgent)?.directory || DIRECTORY;
+    const rawDescription = body.description || body.prompt || "";
     const task = {
       id: body.task_id || body.execution_id || `push-${Date.now()}`,
       type: body.type || body.intent || "custom",
       title: body.title || body.prompt?.substring(0, 80) || "任务",
-      description: body.description || body.prompt || "",
+      description: rawDescription,
       target_agent: targetAgent,
       workflow_id: body.workflow_id || "",
       node_id: body.node_id || "",
@@ -2240,6 +2848,11 @@ const httpServer = createServer(async (req, res) => {
       detached: body.detached,
       delivery_mode: body.delivery_mode || body.deliveryMode || body.execution_mode || body.executionMode || "",
       metadata: body.metadata || {},
+      workspace_id: body.workspace_id || targetAgent,
+      run_context: body.run_context || null,
+      run_paths: null,
+      _base_project_path: baseProjectPath,
+      _raw_description: rawDescription,
     };
 
     // 记录到 workflow 跟踪表
@@ -2255,6 +2868,18 @@ const httpServer = createServer(async (req, res) => {
       });
     }
 
+    // Framework Execution 固定走 Daemon 托管的串行 headless 队列；轮到任务时
+    // 再准备 managed workspace，避免与前台会话或同仓库其它 Execution 混用。
+    if (task.run_context) {
+      if (!enqueueManagedExecutionTask(targetAgent, task)) {
+        json(409, { accepted: false, agent: targetAgent, error_code: "QUEUE_FULL", error: "queue full" });
+        return;
+      }
+      json(202, { accepted: true, agent: targetAgent, mode: `${runtime}-managed-execution`, delivery_mode: "detached" });
+      scheduleManagedExecutionQueue(targetAgent, runtime);
+      return;
+    }
+
     // Codex runtime：默认 detached，由 Daemon screen/exec 托管执行；attached/auto 需要任务或环境显式选择。
     if (runtime === "codex") {
       const existing = agents.get(targetAgent);
@@ -2267,6 +2892,7 @@ const httpServer = createServer(async (req, res) => {
         registered: existing?.registered || false,
         sessionId: existing?.sessionId || "",
         lastSeen: Date.now(),
+        visibility: "published",
       });
       if (!existing?.registered) registerToServer();
 
@@ -2275,7 +2901,7 @@ const httpServer = createServer(async (req, res) => {
         const msg = codexAttachedUnavailableMessage(targetAgent, task);
         log(`⚠ ${msg}`);
         await reportTaskResult(task, "failed", msg, 0);
-        json(409, { accepted: false, agent: targetAgent, error: msg, delivery_mode: codexDeliveryForTask(task) });
+        json(409, { accepted: false, agent: targetAgent, error_code: "AGENT_START_FAILED", error: msg, delivery_mode: codexDeliveryForTask(task) });
         return;
       }
 
@@ -2285,7 +2911,7 @@ const httpServer = createServer(async (req, res) => {
         json(202, { accepted: true, agent: targetAgent, mode, delivery_mode: delivery });
         if (delivery === "detached") scheduleCodexQueue(targetAgent);
       } else {
-        json(409, { error: "queue full" });
+        json(409, { error_code: "QUEUE_FULL", error: "queue full" });
       }
       return;
     }
@@ -2303,7 +2929,7 @@ const httpServer = createServer(async (req, res) => {
       if (ok) {
         json(202, { accepted: true, agent: targetAgent, mode: "plugin-bridge" });
       } else {
-        json(409, { error: "queue full" });
+        json(409, { error_code: "QUEUE_FULL", error: "queue full" });
       }
     } else {
         // 无 Plugin 在线 → 按需拉起（opencode: screen TUI, claude-code: screen TUI + hooks）
@@ -2374,6 +3000,7 @@ const httpServer = createServer(async (req, res) => {
         const task = q.pending.shift();
         q.lastExecuted = task;
         q.executingTaskId = task.id;
+        await reportTaskStarted(task);
         json(200, { task });
       } else {
         json(200, { task: null });
@@ -2386,6 +3013,7 @@ const httpServer = createServer(async (req, res) => {
           found = q.pending.shift();
           q.lastExecuted = found;
           q.executingTaskId = found.id;
+          await reportTaskStarted(found);
           break;
         }
       }
@@ -2453,6 +3081,7 @@ const httpServer = createServer(async (req, res) => {
           q.pending.shift();
           q.lastExecuted = task;
           q.executingTaskId = task.id;
+          await reportTaskStarted(task);
           json(200, { task, delivery_mode: "attached" });
         } else {
           json(200, { task: null, delivery_mode: "detached" });
@@ -2463,6 +3092,7 @@ const httpServer = createServer(async (req, res) => {
         q.lastExecuted = task;
         // 分发时立即标记 executing（不等 Plugin 的 /tasks/executing 通知，防止竞态重复分发）
         q.executingTaskId = task.id;
+        await reportTaskStarted(task);
         json(200, { task });
       }
     } else {
@@ -2557,6 +3187,7 @@ const httpServer = createServer(async (req, res) => {
         nextTask = q.pending.shift();
         q.lastExecuted = nextTask;
         q.executingTaskId = nextTask.id;
+        await reportTaskStarted(nextTask);
         log(`📋 ${agentName} 续传下一个任务: "${nextTask.title}"`);
       }
     }
@@ -2569,6 +3200,10 @@ const httpServer = createServer(async (req, res) => {
     const body = await readBody();
     if (!body.from_agent || !body.title || !body.type) {
       json(400, { error: "from_agent, type, and title required" });
+      return;
+    }
+    if (!isPublishedAgent(body.from_agent)) {
+      json(404, { error: "not found" });
       return;
     }
     // 附上 user_id
@@ -2612,16 +3247,17 @@ const httpServer = createServer(async (req, res) => {
   // POST /ping — Server 广播重连
   if (req.method === "POST" && pathname === "/ping") {
     log("📡 收到 ping，重新注册");
-    for (const [, info] of agents) info.registered = false;
+    for (const [, info] of publishedAgentEntries()) info.registered = false;
     registerToServer();
-    json(200, { ok: true, agents: [...agents.keys()] });
+    json(200, { ok: true, agents: publishedAgentNames() });
     return;
   }
 
   // GET /status
   if (req.method === "GET" && pathname === "/status") {
     json(200, {
-      agents: [...agents.keys()],
+      agents: String(req.headers["x-maf-role"] || "") === "server" ? publishedAgentNames() : [...agents.keys()],
+      local_only_agents: String(req.headers["x-maf-role"] || "") === "server" ? [] : localOnlyAgentNames(),
       user_id: userId,
       directory: DIRECTORY,
       pid: process.pid,
@@ -2725,7 +3361,10 @@ const httpServer = createServer(async (req, res) => {
       log(`📴 shutdown: 清理 agent ${agent} (剩余=[${[...agents.keys()].join(", ")}])`);
     }
     // Node Daemon 常驻——即使没有 agent 也不退出，等待新连接或 Server 推任务
-    json(200, { ok: true, agents: [...agents.keys()] });
+    json(200, {
+      ok: true,
+      agents: String(req.headers["x-maf-role"] || "") === "server" ? publishedAgentNames() : [...agents.keys()],
+    });
     return;
   }
 
@@ -2752,14 +3391,11 @@ httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
   log(`  对外地址: ${daemonUrl}`);
   log(`  Plugin 目录: ${PLUGIN_DIR}`);
 
-  // 初始化用户标识
-  if (!userId) userId = detectUserId();
-  await ensureEnrollment();
-
   // 如果有初始 agent（Claude Code --daemon 模式传入），立即注册
   const initAgent = process.env.MAF_AGENT_NAME;
   const initRuntime = process.env.MAF_RUNTIME || "opencode";
   if (initAgent) {
+    const visibility = resolveAgentVisibility(initAgent);
     agents.set(initAgent, {
       runtime: initRuntime,
       pluginPid: 0,
@@ -2767,15 +3403,18 @@ httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
       registered: false,
       sessionId: "",
       lastSeen: Date.now(),
+      visibility,
     });
-    log(`  初始 agent: ${initAgent} (runtime=${initRuntime})`);
-    registerToServer();
+    log(`  初始 agent: ${initAgent} (runtime=${initRuntime}, visibility=${visibility})`);
+    if (visibility === "published") registerToServer();
+  } else if (shouldContactServer()) {
+    await ensureEnrollment();
   }
 
   // 启动心跳 + 任务轮询 + agent 存活清理 + serve 空闲清理
   setInterval(heartbeat, HEARTBEAT_INTERVAL);
   setInterval(pollTasks, POLL_INTERVAL);
-  setInterval(() => { if (enrollmentStatus !== "active") ensureEnrollment(); }, 10_000);
+  setInterval(() => { if (enrollmentStatus !== "active" && shouldContactServer()) ensureEnrollment(); }, 10_000);
   setInterval(cleanDeadAgents, 60_000);
   setInterval(cleanIdleServes, 60_000);
 });

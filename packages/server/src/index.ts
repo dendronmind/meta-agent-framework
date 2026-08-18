@@ -17,6 +17,7 @@ import eventsRouter from './routes/events';
 import workflowsRouter from './routes/workflows';
 import evolveRouter from './routes/evolve';
 import proposalsRouter from './routes/proposals';
+import executionsRouter from './routes/executions';
 import {
   acceptSignedNonce,
   ensureServerIdentity,
@@ -30,9 +31,11 @@ import {
 } from './auth';
 import { verifySignedRequest } from './request-signing';
 import { clientIdentityService } from './services/client-identity-service';
+import { getConfig } from './config';
 
-const PORT = parseInt(process.env.PORT || '3000');
-const HOST = process.env.HOST || '0.0.0.0';
+const CONFIG = getConfig();
+const PORT = parseInt(process.env.PORT || String(CONFIG.server.port || 3000));
+const HOST = process.env.MAF_SERVER_HOST || process.env.HOST || CONFIG.server.host || '0.0.0.0';
 
 // ============================================================
 // 日志：同时输出到 console 和文件（不依赖 shell 重定向）
@@ -219,6 +222,7 @@ app.use('/api/workflows', workflowsRouter);
 app.use('/api/evolve', evolveRouter);
 app.use('/api/proposals', proposalsRouter);
 app.use('/api/events', eventsRouter);
+app.use('/api/v1/executions', executionsRouter);
 
 // --- Client 安装 ---
 // GET /install.sh — 动态注入 Server 地址，远端直接 curl 执行即可
@@ -366,6 +370,7 @@ async function start(): Promise<void> {
     console.log('  ╔══════════════════════════════════════════════════════╗');
     console.log('  ║            Meta-Agent Framework Server              ║');
     console.log('  ╠══════════════════════════════════════════════════════╣');
+    console.log(`  ║  Listen:    ${`${HOST}:${PORT}`.padEnd(40)}║`);
     console.log(`  ║  Server:    ${SERVER_URL.padEnd(40)}║`);
     console.log(`  ║  Registry:  ${registryLabel.padEnd(40)}║`);
     console.log('  ╠══════════════════════════════════════════════════════╣');
@@ -408,7 +413,7 @@ async function broadcastPing(): Promise<void> {
     endpoints.map(async ({ client_endpoint }) => {
       try {
         const url = `${client_endpoint}/ping`;
-        const body = JSON.stringify({ server: `http://${HOST}:${PORT}`, timestamp: new Date().toISOString() });
+        const body = JSON.stringify({ server: SERVER_URL, timestamp: new Date().toISOString() });
         const res = await fetch(url, {
           method: 'POST',
           headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),

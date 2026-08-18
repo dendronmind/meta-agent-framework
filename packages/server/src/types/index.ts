@@ -173,6 +173,19 @@ export interface Feedback {
 
 export type SessionStatus = 'active' | 'waiting' | 'completed' | 'failed';
 
+export type RoutingDecisionCode =
+  | 'NO_MATCHING_AGENT'
+  | 'NO_DISPATCHABLE_AGENT'
+  | 'AMBIGUOUS_AGENT';
+
+export interface MASRoutingDecision {
+  decision: RoutingDecisionCode;
+  reason: string;
+  required_capabilities: string[];
+  candidate_agents: string[];
+  confidence?: number;
+}
+
 /** 会话中的一轮交互 */
 export interface SessionRound {
   round: number;                     // 第几轮（从 1 开始）
@@ -180,6 +193,7 @@ export interface SessionRound {
   mas_output: string;                // Meta-Agent-Server 的输出
   workflow_id?: string;              // 本轮创建的工作流（如有）
   workflow_result?: string;          // 工作流执行结果摘要
+  routing_decision?: MASRoutingDecision; // 无法可靠派发时的结构化结果
   timestamp: string;
 }
 
@@ -193,6 +207,7 @@ export interface MASSession {
   max_rounds: number;                // 最大轮次（防无限循环，默认 5）
   origin?: Record<string, unknown>;  // 发起方上下文（透传给 MAS 创建的 workflow）
   notify?: Record<string, unknown>;  // 通知偏好（透传给 MAS 创建的 workflow）
+  routing_decision?: MASRoutingDecision;
   created_at: string;
   completed_at?: string;
 }
@@ -200,7 +215,18 @@ export interface MASSession {
 // --- Workflow ---
 
 /** 工作流节点状态 */
-export type WorkflowNodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export type ExecutionErrorCode =
+  | 'WORKSPACE_NOT_GIT'
+  | 'QUEUE_FULL'
+  | 'AGENT_NOT_DISPATCHABLE'
+  | 'CLIENT_UNREACHABLE'
+  | 'AGENT_START_FAILED'
+  | 'EXECUTION_TIMEOUT'
+  | 'MAS_ROUTING_FAILED'
+  | 'PATCH_EXPORT_FAILED'
+  | 'DISPATCH_FAILED';
 
 /** 工作流失败策略 */
 export type WorkflowFailurePolicy = 'fail_fast' | 'all_settled';
@@ -215,10 +241,12 @@ export interface WorkflowNode {
   delivery_mode?: 'attached' | 'detached' | 'auto'; // Codex 可选投递语义
   execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
   detached?: boolean;              // Codex detached screen/TUI 兜底开关
+  workspace_id?: string;           // Client 侧可复用工作区的逻辑标识
   depends_on?: string[];           // 依赖的前置节点 ID
   status: WorkflowNodeStatus;
   execution_id?: string;           // Server 派发时生成；结果回报必须精确匹配
   result?: string;                 // 执行结果
+  error_code?: ExecutionErrorCode;
   started_at?: string;
   completed_at?: string;
 }
@@ -282,6 +310,73 @@ export interface ExecuteCommand {
   execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
   detached?: boolean;              // Codex detached screen/TUI 兜底开关
   session_id?: string;             // Client 侧 agent session ID（续接用，首次为空）
+  workspace_id?: string;           // Client 侧可复用工作区的逻辑标识
+  run_context?: ExecutionRunContext;
+}
+
+// --- Framework Execution Protocol ---
+
+export type WorkdirPolicy = 'managed_workspace' | 'configured_workspace' | 'none';
+
+export interface ExecutionRunContext {
+  execution_id: string;
+  request_id: string;
+  external_id: string;
+  source_type: string;
+  source_ref: string;
+  workdir_policy: WorkdirPolicy;
+  artifact_base_url?: string;
+  artifacts?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export type FrameworkExecutionStatus =
+  | 'queued'
+  | 'routing'
+  | 'running'
+  | 'awaiting_agent'
+  | 'waiting_agent_online'
+  | 'needs_routing_review'
+  | 'completed'
+  | 'failed';
+
+export interface ExecutionPatch {
+  available: boolean;
+  filename?: string;
+  size: number;
+  sha256?: string;
+  base_commit?: string;
+  base_branch?: string;
+  changed_files: string[];
+  workspace_path?: string;
+}
+
+export interface FrameworkExecution {
+  id: string;
+  request_id: string;
+  external_id: string;
+  source_type: string;
+  source_ref: string;
+  title: string;
+  prompt: string;
+  metadata: Record<string, unknown>;
+  status: FrameworkExecutionStatus;
+  preferred_agent?: string;
+  selected_agent?: string;
+  workspace_id?: string;
+  mas_session_id?: string;
+  workflow_id?: string;
+  workdir_policy: WorkdirPolicy;
+  artifact_base_url?: string;
+  artifacts: { path: string; size: number }[];
+  patch: ExecutionPatch;
+  result?: string;
+  error?: string;
+  error_code?: ExecutionErrorCode;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+  updated_at: string;
 }
 
 /** Client 回报执行结果 */
