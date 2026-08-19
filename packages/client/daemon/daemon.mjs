@@ -109,7 +109,7 @@ function resolveAgentVisibility(agentName) {
   if (AGENT_PUBLICATION.mode === "explicit" && !AGENT_PUBLICATION.include.has(name)) return "local-only";
   return "published";
 }
-const STATE_DIR = join(homedir(), ".meta-agent-framework");
+const STATE_DIR = process.env.MAF_HOME || join(homedir(), ".meta-agent-framework");
 const AUTH_DIR = join(STATE_DIR, "auth");
 const CLIENT_ID_FILE = join(AUTH_DIR, "client-id");
 const CLIENT_PRIVATE_KEY_FILE = join(AUTH_DIR, "client-private.pem");
@@ -117,6 +117,7 @@ const CLIENT_PUBLIC_KEY_FILE = join(AUTH_DIR, "client-public.pem");
 const LOCAL_TOKEN_FILE = join(AUTH_DIR, "local-token");
 const SERVER_PUBLIC_KEY_FILE = join(AUTH_DIR, "server-public.pem");
 const USER_ID_FILE = join(AUTH_DIR, "user-id");
+const AGENT_INVENTORY_FILE = join(STATE_DIR, "state", "agent-inventory.json");
 
 function readText(path) {
   try { return readFileSync(path, "utf-8").trim(); } catch { return ""; }
@@ -397,6 +398,55 @@ let CLIENT_BUNDLE_HASH = currentClientBundleHash();
 // ============================================================
 // agents Map: agent_name → { runtime, pluginPid, directory, registered, sessionId, lastSeen, visibility }
 const agents = new Map();
+
+function persistCodexAgentInventory() {
+  const entries = [...agents.entries()]
+    .filter(([agentName, info]) => info.runtime === "codex" && !isServerAgentName(agentName))
+    .map(([agentName, info]) => ({
+      agent_name: agentName,
+      runtime: "codex",
+      directory: String(info.directory || ""),
+    }));
+  const directory = dirname(AGENT_INVENTORY_FILE);
+  const temporary = `${AGENT_INVENTORY_FILE}.${process.pid}.tmp`;
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(temporary, `${JSON.stringify({ version: 1, agents: entries }, null, 2)}\n`, "utf-8");
+    renameSync(temporary, AGENT_INVENTORY_FILE);
+  } catch (err) {
+    try { unlinkSync(temporary); } catch {}
+    log(`⚠ Codex Agent 清单保存失败: ${err.message}`);
+  }
+}
+
+function restoreCodexAgentInventory() {
+  if (!existsSync(AGENT_INVENTORY_FILE)) return;
+  try {
+    const parsed = JSON.parse(readFileSync(AGENT_INVENTORY_FILE, "utf-8"));
+    const entries = Array.isArray(parsed?.agents) ? parsed.agents : [];
+    let restored = 0;
+    for (const entry of entries) {
+      const name = String(entry?.agent_name || "").trim();
+      const directory = String(entry?.directory || "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(name) || isServerAgentName(name) || !directory) continue;
+      agents.set(name, {
+        runtime: "codex",
+        pluginPid: 0,
+        directory,
+        registered: false,
+        sessionId: "",
+        lastSeen: 0,
+        visibility: resolveAgentVisibility(name),
+      });
+      restored++;
+    }
+    if (restored > 0) log(`📦 恢复 ${restored} 个可按需启动的 Codex Agent`);
+  } catch (err) {
+    log(`⚠ Codex Agent 清单读取失败: ${err.message}`);
+  }
+}
+
+restoreCodexAgentInventory();
 
 function publishedAgentEntries() {
   return [...agents.entries()].filter(([, info]) => info.visibility === "published");
@@ -791,13 +841,16 @@ function getAgentStatuses(agentEntries = agents) {
   for (const [name, info] of agentEntries) {
     const q = taskQueues.get(name);
 
-    // Codex：默认 detached，由 Daemon 通过 screen/exec 后台执行；只有显式 attached 才注入当前 TUI。
-    // 只有显式 attached 时，才要求当前 TUI 接收器在线。
+    // Codex 会话退出后保留为 standby，正式任务到达时由 Daemon 按需启动。
+    // 显式 attached 模式仍要求当前 TUI 接收器在线。
     if (info.runtime === "codex") {
-      if (q?.executingTaskId) {
+      if (q?.executingTaskId || q?.pending.length > 0) {
         statuses[name] = "busy";
       } else {
-        statuses[name] = (CODEX_DELIVERY !== "attached" || hasCodexAttachedReceiver(name)) ? "online" : "offline";
+        const directory = expandHomePath(info.directory);
+        if (!info.directory || !existsSync(directory)) statuses[name] = "offline";
+        else if (hasCodexAttachedReceiver(name)) statuses[name] = "online";
+        else statuses[name] = CODEX_DELIVERY !== "attached" ? "standby" : "offline";
       }
       continue;
     }
@@ -2667,6 +2720,7 @@ const httpServer = createServer(async (req, res) => {
       visibility,
     };
     agents.set(name, info);
+    if (info.runtime === "codex") persistCodexAgentInventory();
 
     if (visibility === "published") {
       if (body.user_id && body.user_id !== userId) {
@@ -2685,7 +2739,7 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // POST /agents/disconnect — Plugin/Hook 断开：注销一个 agent
+  // POST /agents/disconnect — Codex 保留为可按需启动，其他 runtime 注销
   if (req.method === "POST" && pathname === "/agents/disconnect") {
     const body = await readBody();
     const name = body.agent_name;
@@ -2718,6 +2772,22 @@ const httpServer = createServer(async (req, res) => {
         json(200, { ok: true, deferred: true, active_task: q?.executingTaskId || "", pending: q?.pending.length || 0, agents: agentNamesForRequest(req) });
         return;
       }
+      if (info.runtime === "codex") {
+        closeWaitingResponse(q);
+        agents.set(name, {
+          ...info,
+          pluginPid: 0,
+          registered: true,
+          sessionId: "",
+          lastSeen: Date.now(),
+        });
+        persistCodexAgentInventory();
+        const status = getAgentStatuses()[name] || "offline";
+        if (info.visibility === "published") await reportAgentStatusToServer(name, status);
+        log(`🔌 Codex 会话断开，Agent 定义已保留: ${name} (status=${status})`);
+        json(200, { ok: true, retained: true, status, agents: agentNamesForRequest(req) });
+        return;
+      }
       if (info.visibility === "published") await reportAgentStatusToServer(name, "offline");
       agents.delete(name);
       // 清理任务队列
@@ -2735,8 +2805,9 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "GET" && pathname === "/agents") {
     const list = [];
     const entries = String(req.headers["x-maf-role"] || "") === "server" ? publishedAgentEntries() : agents;
+    const statuses = getAgentStatuses(entries);
     for (const [name, info] of entries) {
-      list.push({ agent_name: name, ...info });
+      list.push({ agent_name: name, ...info, status: statuses[name] || "offline" });
     }
     json(200, { agents: list });
     return;
@@ -3394,7 +3465,7 @@ httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
   // 如果有初始 agent（Claude Code --daemon 模式传入），立即注册
   const initAgent = process.env.MAF_AGENT_NAME;
   const initRuntime = process.env.MAF_RUNTIME || "opencode";
-  if (initAgent) {
+  if (initAgent && !isServerAgentName(initAgent)) {
     const visibility = resolveAgentVisibility(initAgent);
     agents.set(initAgent, {
       runtime: initRuntime,
@@ -3406,7 +3477,10 @@ httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
       visibility,
     });
     log(`  初始 agent: ${initAgent} (runtime=${initRuntime}, visibility=${visibility})`);
+    if (initRuntime === "codex") persistCodexAgentInventory();
     if (visibility === "published") registerToServer();
+  } else if (initAgent) {
+    log(`  忽略 Server 控制面初始身份: ${initAgent}`);
   } else if (shouldContactServer()) {
     await ensureEnrollment();
   }
