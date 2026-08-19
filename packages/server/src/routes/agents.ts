@@ -155,7 +155,7 @@ const pluginInstances = new Map<string, any[]>();
 /**
  * GET /api/agents
  * 支持 ?fields=agent_name,status,runtime 过滤返回字段（逗号分隔）
- * 默认去重：同名 agent 只保留状态最优的（online > offline > dead）
+ * 默认去重：同名 agent 只保留最近心跳的一条；状态包含 online/standby/busy/offline/dead
  * ?all=true 返回全部（含重复）
  * ?include_server=true 诊断时返回控制面 Server 身份；默认不把 Server 当 Agent 展示/统计
  */

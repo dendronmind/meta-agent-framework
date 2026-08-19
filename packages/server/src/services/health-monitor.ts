@@ -40,7 +40,7 @@ export class HealthMonitor {
           console.warn(`[HealthMonitor] ${agent.agent_name} — busy opencode agent 超过 ${LAUNCHING_GRACE_MS / 1000}s 仍无心跳，标记 dead`);
         }
         this.markAgentDead(agent);
-      } else if (elapsed > HEARTBEAT_TIMEOUT_MS && agent.status === 'online') {
+      } else if (elapsed > HEARTBEAT_TIMEOUT_MS && !['offline', 'dead'].includes(agent.status as string)) {
         this.markAgentOffline(agent);
       }
     }

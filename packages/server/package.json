@@ -13,6 +13,7 @@
     "server": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "postinstall": "node bin/maf-server.mjs sync-plugins 2>/dev/null || true"
   },
   "keywords": [

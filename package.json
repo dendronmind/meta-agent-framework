@@ -3,6 +3,7 @@
   "private": true,
   "description": "Meta-Agent-Framework monorepo — 分布式 AI Agent 编排调度框架",
   "scripts": {
+    "test": "npm --prefix packages/client test && npm --prefix packages/server test",
     "install:local": "bash local_pack_and_install.sh",
     "uninstall:local": "maf-server stop 2>/dev/null; maf-client uninstall 2>/dev/null; npm uninstall -g @maf/meta-agent-server @maf/meta-agent-client 2>/dev/null; rm -rf ~/.meta-agent-framework; echo '✅ 卸载完成'",
     "test:e2e": "bash scripts/test-e2e.sh",

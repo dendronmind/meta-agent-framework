@@ -351,7 +351,7 @@ async function start(): Promise<void> {
   console.log('[DB] SQLite initialized (sql.js)');
 
   // 启动时全部重置为 offline，等 Client 注册/心跳再恢复
-  const reset = db.prepare("UPDATE agents SET status = 'offline' WHERE status IN ('online', 'busy')").run();
+  const reset = db.prepare("UPDATE agents SET status = 'offline' WHERE status IN ('online', 'standby', 'busy')").run();
   if (reset.changes > 0) {
     console.log(`[DB] 启动重置: ${reset.changes} agents → offline（等待心跳恢复）`);
   }

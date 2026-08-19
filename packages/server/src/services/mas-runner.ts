@@ -268,7 +268,7 @@ export class MASRunner {
   private buildRoundPrompt(session: MASSession, agents: Agent[]): string {
     const agentList = agents.length > 0
       ? agents.map(a => {
-          const icon = a.status === 'online' ? '🟢' : a.status === 'busy' ? '🟡' : '🔴';
+          const icon = a.status === 'online' ? '🟢' : a.status === 'busy' ? '🟡' : a.status === 'standby' ? '🟠' : '🔴';
           let skills = '[]';
           let mcps = '[]';
           try { skills = JSON.stringify(JSON.parse(a.skills || '[]')); } catch {}
@@ -329,7 +329,7 @@ ${agentList}
 This request must be handled by a remote Agent. Do not solve it in MAS.
 Match semantically using Agent description first, then Skills, MCPs, runtime, workspace, and live status.
 agent_name is an identifier, not a capability. preferred_agent is only a hint.
-online and busy Agents are immediately available. An offline Agent with a registered Client endpoint is dispatchable because its Daemon can auto-launch the runtime. dead Agents and records without a Client endpoint are topology references only.
+online, standby, and busy Agents are dispatchable. standby means the Client Daemon is online and can auto-launch the runtime. offline and dead Agents are topology references only and must not receive new work.
 An Agent without a description is not a reliable capability match by itself.
 
 Output exactly one JSON object and no explanation.

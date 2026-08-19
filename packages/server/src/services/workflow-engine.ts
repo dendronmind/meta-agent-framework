@@ -68,10 +68,14 @@ function executionErrorCode(value: unknown): ExecutionErrorCode {
 }
 
 export function isAgentDispatchable(agent: Pick<Agent, 'status' | 'client_endpoint'>): boolean {
-  if (agent.status === 'online' || agent.status === 'busy') return true;
-  // offline 表示 Agent runtime 当前未连接；只要 Daemon endpoint 仍有记录，
-  // /execute 就能进入 Client 侧 auto-launch 分支。dead 才表示 Client 不可达。
-  return agent.status === 'offline' && Boolean(agent.client_endpoint);
+  return agent.status === 'online' || agent.status === 'standby' || agent.status === 'busy';
+}
+
+function dispatchPriority(status: Agent['status']): number {
+  if (status === 'online') return 3;
+  if (status === 'standby') return 2;
+  if (status === 'busy') return 1;
+  return 0;
 }
 
 export interface WorkflowSummary {
@@ -527,7 +531,7 @@ export class WorkflowEngine {
     }
 
     // 注册表保证每个 agent_name 唯一归属一个用户+机器。
-    // online/busy 优先；offline 且有 Daemon endpoint 时仍可按需拉起。
+    // 优先 online，其次 standby，最后 busy；offline/dead 仅用于拓扑展示。
     const dispatchable = allMatches.filter(isAgentDispatchable);
     if (allMatches.length > 1) {
       console.warn(`[Workflow] ⚠️  agent "${node.agent_name}" 有 ${allMatches.length} 条记录:`);
@@ -535,9 +539,7 @@ export class WorkflowEngine {
         console.warn(`           ${a.status} ${a.user_id}@${a.host_user} → ${a.client_endpoint}`);
       }
     }
-    const agent = dispatchable.find(a => a.status === 'online')
-      || dispatchable.find(a => a.status === 'busy')
-      || dispatchable[0];
+    const agent = dispatchable.sort((a, b) => dispatchPriority(b.status) - dispatchPriority(a.status))[0];
     if (!agent) {
       const states = [...new Set(allMatches.map(a => a.status))].join(', ');
       const msg = `agent "${node.agent_name}" 当前不可调度（status: ${states || 'unknown'}）`;
@@ -557,8 +559,8 @@ export class WorkflowEngine {
 
     const previousAgentStatus = agent.status;
     if (agent.status !== 'busy') {
-      if (agent.status === 'offline') {
-        console.log(`[Workflow] ⚠ [${node.id}] ${node.agent_name} runtime 离线，交给 Daemon 按需拉起`);
+      if (agent.status === 'standby') {
+        console.log(`[Workflow] ℹ [${node.id}] ${node.agent_name} 待启动，交给 Daemon 按需拉起`);
       }
       agentRegistry.updateStatus(agent.id, 'busy');
       agentRegistry.touchHeartbeat(agent.id);
