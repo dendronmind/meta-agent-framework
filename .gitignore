@@ -4,6 +4,7 @@ node_modules/
 state/
 data/
 dist/
+/out/
 .env
 .env.*
 *.secret
