@@ -39,6 +39,7 @@ function startDaemon({ mafHome, projectDir, port }) {
     stdio: "ignore",
     env: {
       ...process.env,
+      HOME: mafHome,
       MAF_HOME: mafHome,
       MAF_DIRECTORY: projectDir,
       MAF_NODE_PORT: String(port),

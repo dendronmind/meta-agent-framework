@@ -23,7 +23,7 @@
  */
 
 import { createServer } from "node:http";
-import { spawn, execSync, execFileSync } from "node:child_process";
+import { spawn, execSync, execFile, execFileSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync, rmSync, createWriteStream } from "node:fs";
 import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { homedir, hostname, userInfo, networkInterfaces } from "node:os";
@@ -501,6 +501,7 @@ const RESULT_MAX_CHARS = parseInt(process.env.MAF_RESULT_MAX_CHARS || "0") || 20
 const EXECUTION_TASK_TIMEOUT_MS = parseInt(process.env.MAF_EXECUTION_TIMEOUT_MS || "0") || 60 * 60_000;
 const PATCH_MAX_BYTES = parseInt(process.env.MAF_PATCH_MAX_BYTES || "0") || 8 * 1024 * 1024;
 const WORKSPACE_WAIT_TIMEOUT_MS = parseInt(process.env.MAF_WORKSPACE_WAIT_TIMEOUT_MS || "0") || 23 * 60 * 60_000;
+const DAEMON_INSTANCE_ID = randomUUID();
 const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 45 * 60_000;
 const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
@@ -606,18 +607,60 @@ function gitOutput(cwd, args) {
   }
 }
 
-function selectRemoteBranch(base) {
+function execFileAsync(command, args, options = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise({ stdout, stderr });
+    });
+  });
+}
+
+async function gitOutputAsync(cwd, args) {
   try {
-    const upstream = gitOutput(base, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+      encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+    });
+    return stdout.trim();
+  } catch (err) {
+    const detail = String(err?.stderr || err?.message || err).trim();
+    throw new Error(`git ${args.join(" ")} 失败: ${detail.slice(0, 2000)}`);
+  }
+}
+
+async function selectRemoteBranch(base) {
+  // Android/Gerrit workspaces are often checked out detached at a release
+  // commit and do not have origin/main or origin/master. Prefer a remote ref
+  // that contains the current commit so the managed workspace preserves the
+  // exact source baseline selected by the Agent owner.
+  try {
+    const containing = await gitOutputAsync(base, [
+      "for-each-ref", "--format=%(refname:short)", "--contains", "HEAD", "refs/remotes/origin",
+    ]);
+    const match = containing.split("\n").map(item => item.trim()).find(item => item.startsWith("origin/"));
+    if (match) return match;
+  } catch {}
+  try {
+    const upstream = await gitOutputAsync(base, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if (upstream.startsWith("origin/")) return upstream;
   } catch {}
   try {
-    const head = gitOutput(base, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    const head = await gitOutputAsync(base, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
     if (head.startsWith("origin/")) return head;
   } catch {}
   for (const candidate of ["origin/main", "origin/master"]) {
-    try { gitOutput(base, ["rev-parse", "--verify", `${candidate}^{commit}`]); return candidate; } catch {}
+    try { await gitOutputAsync(base, ["rev-parse", "--verify", `${candidate}^{commit}`]); return candidate; } catch {}
   }
+  try {
+    const refs = await gitOutputAsync(base, ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]);
+    const match = refs.split("\n").map(item => item.trim()).find(item => item.startsWith("origin/"));
+    if (match) return match;
+  } catch {}
   throw new Error("Agent 源码仓库没有可用的 origin 跟踪分支");
 }
 
@@ -645,9 +688,14 @@ function managedWorkspacePaths(base, remoteUrl, remoteBranch) {
   };
 }
 
-function acquireWorkspaceLock(paths, context) {
+async function acquireWorkspaceLock(paths, context) {
   mkdirSync(paths.workspaceDir, { recursive: true, mode: 0o700 });
-  const lock = { pid: process.pid, execution_id: String(context.execution_id), acquired_at: new Date().toISOString() };
+  const lock = {
+    pid: process.pid,
+    daemon_instance_id: DAEMON_INSTANCE_ID,
+    execution_id: String(context.execution_id),
+    acquired_at: new Date().toISOString(),
+  };
   try {
     writeFileSync(paths.lockPath, `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     return;
@@ -655,11 +703,11 @@ function acquireWorkspaceLock(paths, context) {
     if (err?.code !== "EEXIST") throw err;
   }
   const existing = readJsonFile(paths.lockPath) || {};
-  if (existing.pid && isProcessAlive(Number(existing.pid))) {
+  if (existing.daemon_instance_id === DAEMON_INSTANCE_ID && existing.pid === process.pid) {
     throw new Error(`MAF managed workspace locked by execution ${existing.execution_id || "unknown"}`);
   }
   if (existsSync(paths.sourceDir)) {
-    const dirty = gitOutput(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]);
+    const dirty = await gitOutputAsync(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]);
     if (dirty) throw new Error(`MAF managed workspace has preserved changes from an interrupted execution: ${paths.sourceDir}`);
   }
   try { unlinkSync(paths.lockPath); } catch {}
@@ -704,37 +752,39 @@ async function prepareExecutionWorkspace(context, baseRepo) {
   let base = resolve(String(baseRepo || ""));
   if (!existsSync(base)) throw new Error(`Agent 源码目录不存在: ${base}`);
   if (context.workdir_policy === "none") return { ...local, sourceDir: base, managed: false };
-  base = resolve(gitOutput(base, ["rev-parse", "--show-toplevel"]));
+  base = resolve(await gitOutputAsync(base, ["rev-parse", "--show-toplevel"]));
   if (context.workdir_policy === "configured_workspace") return { ...local, sourceDir: base, managed: false };
 
   try {
-    execFileSync("git", ["-C", base, "fetch", "--prune", "origin"], { stdio: ["ignore", "pipe", "pipe"], timeout: 120000 });
+    await execFileAsync("git", ["-C", base, "fetch", "--prune", "origin"], {
+      encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+    });
   } catch (err) {
     throw new Error(`更新远端源码失败（基础工作区未修改）: ${String(err?.stderr || err?.message || err).slice(0, 2000)}`);
   }
-  const remoteRef = selectRemoteBranch(base);
+  const remoteRef = await selectRemoteBranch(base);
   const branch = remoteRef.replace(/^origin\//, "");
-  const remoteUrl = normalizedRemoteUrl(base, gitOutput(base, ["remote", "get-url", "origin"]));
+  const remoteUrl = normalizedRemoteUrl(base, await gitOutputAsync(base, ["remote", "get-url", "origin"]));
   const workspace = managedWorkspacePaths(base, remoteUrl, branch);
-  acquireWorkspaceLock(workspace, context);
+  await acquireWorkspaceLock(workspace, context);
   try {
     const manifest = readJsonFile(workspace.manifestPath);
     if (!existsSync(workspace.sourceDir)) {
       rmSync(workspace.gitMetaDir, { recursive: true, force: true });
-      execFileSync("git", ["clone", "--no-local", "--single-branch", "--branch", branch,
+      await execFileAsync("git", ["clone", "--no-local", "--single-branch", "--branch", branch,
         `--separate-git-dir=${workspace.gitMetaDir}`, remoteUrl, workspace.sourceDir], {
-        stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024,
+        encoding: "utf-8", timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024,
       });
     } else if (!manifest || manifest.remote_url !== remoteUrl || manifest.branch !== branch) {
       throw new Error(`MAF managed workspace identity mismatch: ${workspace.sourceDir}`);
     }
-    gitOutput(workspace.sourceDir, ["remote", "set-url", "origin", remoteUrl]);
-    gitOutput(workspace.sourceDir, ["fetch", "--prune", "origin"]);
-    gitOutput(workspace.sourceDir, ["reset", "--hard", remoteRef]);
-    gitOutput(workspace.sourceDir, ["clean", "-fdx"]);
-    gitOutput(workspace.sourceDir, ["checkout", "-B", "maf-managed-execution", remoteRef]);
-    gitOutput(workspace.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
-    const baseCommit = gitOutput(workspace.sourceDir, ["rev-parse", "HEAD"]);
+    await gitOutputAsync(workspace.sourceDir, ["remote", "set-url", "origin", remoteUrl]);
+    await gitOutputAsync(workspace.sourceDir, ["fetch", "--prune", "origin"]);
+    await gitOutputAsync(workspace.sourceDir, ["reset", "--hard", remoteRef]);
+    await gitOutputAsync(workspace.sourceDir, ["clean", "-fdx"]);
+    await gitOutputAsync(workspace.sourceDir, ["checkout", "-B", "maf-managed-execution", remoteRef]);
+    await gitOutputAsync(workspace.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
+    const baseCommit = await gitOutputAsync(workspace.sourceDir, ["rev-parse", "HEAD"]);
     writeFileSync(workspace.manifestPath, `${JSON.stringify({ remote_url: remoteUrl, branch }, null, 2)}\n`, { mode: 0o600 });
     const paths = { ...local, ...workspace, managed: true, sourceBranch: branch, sourceCommit: baseCommit, remoteUrl };
     writeFileSync(local.manifestPath, `${JSON.stringify({ execution_id: context.execution_id, workspace: workspace.sourceDir,
@@ -1601,18 +1651,19 @@ async function reportTaskStarted(task) {
   }
 }
 
-function captureManagedWorkspacePatch(task) {
+async function captureManagedWorkspacePatch(task) {
   const paths = task?.run_paths;
   if (!task?.run_context || !paths?.managed) return null;
-  gitOutput(paths.sourceDir, ["rev-parse", "--verify", `${paths.sourceCommit}^{commit}`]);
-  execFileSync("git", ["-C", paths.sourceDir, "add", "-A"], { stdio: ["ignore", "pipe", "pipe"], timeout: 30000 });
-  const content = execFileSync("git", ["-C", paths.sourceDir, "diff", "--cached", "--binary", "--full-index", paths.sourceCommit], {
-    stdio: ["ignore", "pipe", "pipe"], timeout: 60000, maxBuffer: PATCH_MAX_BYTES + 1024,
+  await gitOutputAsync(paths.sourceDir, ["rev-parse", "--verify", `${paths.sourceCommit}^{commit}`]);
+  await execFileAsync("git", ["-C", paths.sourceDir, "add", "-A"], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout: content } = await execFileAsync("git", ["-C", paths.sourceDir, "diff", "--cached", "--binary", "--full-index", paths.sourceCommit], {
+    timeout: 60000, maxBuffer: PATCH_MAX_BYTES + 1024,
   });
   if (content.length > PATCH_MAX_BYTES) throw new Error(`Patch 超过 ${PATCH_MAX_BYTES} 字节限制`);
-  const changedFiles = execFileSync("git", ["-C", paths.sourceDir, "diff", "--cached", "--name-only", "-z", paths.sourceCommit], {
-    encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 30000, maxBuffer: 4 * 1024 * 1024,
-  }).split("\0").filter(Boolean);
+  const { stdout: names } = await execFileAsync("git", ["-C", paths.sourceDir, "diff", "--cached", "--name-only", "-z", paths.sourceCommit], {
+    encoding: "utf-8", timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+  });
+  const changedFiles = names.split("\0").filter(Boolean);
   const patchPath = join(paths.outputDir, "changes.patch");
   if (content.length) writeFileSync(patchPath, content, { mode: 0o600 });
   else try { unlinkSync(patchPath); } catch {}
@@ -1645,14 +1696,14 @@ async function uploadManagedWorkspacePatch(task, patch) {
   }
 }
 
-function cleanManagedWorkspace(task) {
+async function cleanManagedWorkspace(task) {
   const paths = task?.run_paths;
   if (!task?.run_context || !paths?.managed) return;
   try {
-    gitOutput(paths.sourceDir, ["reset", "--hard", paths.sourceCommit]);
-    gitOutput(paths.sourceDir, ["clean", "-fdx"]);
-    gitOutput(paths.sourceDir, ["remote", "set-url", "origin", paths.remoteUrl]);
-    gitOutput(paths.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
+    await gitOutputAsync(paths.sourceDir, ["reset", "--hard", paths.sourceCommit]);
+    await gitOutputAsync(paths.sourceDir, ["clean", "-fdx"]);
+    await gitOutputAsync(paths.sourceDir, ["remote", "set-url", "origin", paths.remoteUrl]);
+    await gitOutputAsync(paths.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
     releaseWorkspaceLock(paths, task.run_context);
     log(`🧹 managed workspace 已清理并释放: ${paths.sourceDir}`);
   } catch (err) {
@@ -1701,7 +1752,7 @@ async function performTaskResultReport(task, status, result, durationMs) {
       mkdirSync(task.run_paths.outputDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(task.run_paths.outputDir, "result.md"), `${cleanResult.trim()}\n`, { mode: 0o600 });
       if (task.run_paths.managed && !task._patchUploaded) {
-        await uploadManagedWorkspacePatch(task, captureManagedWorkspacePatch(task));
+        await uploadManagedWorkspacePatch(task, await captureManagedWorkspacePatch(task));
         task._patchUploaded = true;
       }
     } catch (err) {
@@ -1743,7 +1794,7 @@ async function performTaskResultReport(task, status, result, durationMs) {
         return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
       }
       log(`✅ workflow 回报成功: workflow=${task.workflow_id} node=${task.node_id}`);
-      if (patchReady) cleanManagedWorkspace(task);
+      if (patchReady) await cleanManagedWorkspace(task);
       return { ok: true, workflow_reported: true };
     } catch (err) {
       log(`⚠ workflow 回报失败: ${err.message}`);
@@ -1760,7 +1811,7 @@ async function performTaskResultReport(task, status, result, durationMs) {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
-    if (patchReady) cleanManagedWorkspace(task);
+    if (patchReady) await cleanManagedWorkspace(task);
     return { ok: true, workflow_reported: true };
   } catch (err) {
     log(`⚠ 回报失败: ${err.message}`);
