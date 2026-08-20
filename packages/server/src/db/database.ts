@@ -73,7 +73,8 @@ export async function initDb(): Promise<void> {
   sqlJsDb.run(`UPDATE executions SET status = 'failed', result = CASE WHEN result = '' THEN 'MAF Server restarted before execution completed' ELSE result END,
     error = 'MAF Server restarted before execution completed', error_code = 'DISPATCH_FAILED',
     completed_at = datetime('now'), updated_at = datetime('now')
-    WHERE status IN ('routing', 'running')`);
+    WHERE status IN ('routing', 'running')
+       OR (status = 'queued' AND (started_at IS NOT NULL OR workflow_id != '' OR mas_session_id != ''))`);
   persistDb();
 }
 

@@ -5,7 +5,8 @@
  * 用法：
  *   maf-client init        # 配置 Server 地址 + 安装 Plugin
  *   maf-client status      # 查看安装状态
- *   maf-client uninstall   # 卸载
+ *   maf-client uninstall   # 卸载程序，保留运行数据
+ *   maf-client uninstall --purge-data  # 卸载并删除运行数据
  *
  * npm install -g 时会自动执行 postinstall → --auto 模式
  *
@@ -523,7 +524,7 @@ function configureEnv(serverUrl) {
 // ============================================================
 // 卸载
 // ============================================================
-function uninstall() {
+function uninstall({ purgeData = false } = {}) {
   console.log("\n🗑  卸载 Meta-Agent Framework Client...\n");
 
   // 杀 Node Daemon
@@ -571,11 +572,15 @@ function uninstall() {
     }
   } catch {}
 
-  // 清理配置目录
-  const mafHome = join(HOME, ".meta-agent-framework");
-  if (existsSync(mafHome)) {
-    execSync(`rm -rf "${mafHome}"`);
-    ok("删除数据目录 ~/.meta-agent-framework");
+  // MAF_HOME 同时保存 Server DB、Execution 工件和 Client 身份。普通卸载
+  // 只移除 Client runtime，避免同机部署时误删 Server 运行数据。
+  if (purgeData && existsSync(MAF_HOME)) {
+    execSync(`rm -rf "${MAF_HOME}"`);
+    ok("删除运行数据目录 ~/.meta-agent-framework");
+  } else {
+    try { if (existsSync(STANDALONE_DAEMON)) unlinkSync(STANDALONE_DAEMON); } catch {}
+    try { if (existsSync(join(MAF_HOME, "package.json"))) unlinkSync(join(MAF_HOME, "package.json")); } catch {}
+    ok("保留运行数据 ~/.meta-agent-framework（需要删除时使用 --purge-data）");
   }
 
   console.log("\n✅ Client 卸载完成");
@@ -895,7 +900,7 @@ if (cmd === "--version" || cmd === "version" || cmd === "-v") {
 }
 
 if (cmd === "uninstall") {
-  uninstall();
+  uninstall({ purgeData: args.includes("--purge-data") });
   process.exit(0);
 }
 
@@ -965,7 +970,7 @@ Meta-Agent-Framework Client
   resume [agent]  恢复上一个 session（支持 --agent / --runtime）
   sessions [agent]  列出最近的 sessions（支持 --limit N）
   status      查看安装状态
-  uninstall   卸载（停 Daemon + 清 Plugin + 删 npm 包）
+  uninstall   卸载程序并保留运行数据（--purge-data 才删除数据）
   help        显示此帮助
 
 Resume 用法:

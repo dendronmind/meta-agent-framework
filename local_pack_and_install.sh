@@ -3,7 +3,7 @@
 #
 # What it does:
 #   1. Pack @maf/meta-agent-server and @maf/meta-agent-client into ./out
-#   2. Stop/uninstall old global installs
+#   2. Back up critical runtime state and stop old processes
 #   3. Install the freshly generated local tgz packages
 #   4. Run maf-client install --auto to refresh daemon/plugins/wrappers
 #
@@ -13,7 +13,7 @@
 # Optional env:
 #   OUT_DIR=/path/to/out        Override package output directory (default: ./out)
 #   NPM_CONFIG_CACHE=/tmp/cache Override npm cache (default: /tmp/npm-cache)
-#   SKIP_UNINSTALL=1            Do not uninstall existing global packages first
+#   RUNTIME_BACKUP_DIR=/path    Runtime backup root (default: ~/.meta-agent-framework-backups)
 #   SKIP_INSTALL=1              Only pack, do not install
 #   SKIP_E2E=0                  Run npm run test:e2e before packing (default: skip)
 
@@ -26,6 +26,7 @@ export npm_config_cache="$NPM_CONFIG_CACHE"
 
 SERVER_DIR="$ROOT_DIR/packages/server"
 CLIENT_DIR="$ROOT_DIR/packages/client"
+RUNTIME_BACKUP_DIR="${RUNTIME_BACKUP_DIR:-$HOME/.meta-agent-framework-backups}"
 
 echo "╔════════════════════════════════════════════╗"
 echo "║  MAF local pack + reinstall               ║"
@@ -82,38 +83,32 @@ if [[ "${SKIP_INSTALL:-0}" == "1" ]]; then
   exit 0
 fi
 
-if [[ "${SKIP_UNINSTALL:-0}" != "1" ]]; then
-  echo "▶ Stopping existing MAF server if present..."
-  if command -v maf-server >/dev/null 2>&1; then
-    maf-server stop || true
-  else
-    echo "  maf-server not found, skip stop"
+echo "▶ Backing up critical MAF runtime state..."
+BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_PATH="$RUNTIME_BACKUP_DIR/$BACKUP_STAMP"
+mkdir -p "$BACKUP_PATH"
+for item in data/maf.db maf.config.json auth state/agent-inventory.json; do
+  if [[ -e "$HOME/.meta-agent-framework/$item" ]]; then
+    mkdir -p "$BACKUP_PATH/$(dirname "$item")"
+    cp -a "$HOME/.meta-agent-framework/$item" "$BACKUP_PATH/$item"
   fi
-  echo ""
+done
+echo "  runtime backup: $BACKUP_PATH"
+echo ""
 
-  echo "▶ Uninstalling existing MAF client plugins/wrappers if present..."
-  if command -v maf-client >/dev/null 2>&1; then
-    # maf-client uninstall also removes the old daemon/plugins/wrappers and npm package.
-    maf-client uninstall || true
-  else
-    echo "  maf-client not found, skip maf-client uninstall"
-  fi
-  echo ""
-
-  echo "▶ Removing old global npm packages if present..."
-  npm uninstall -g @maf/meta-agent-server @maf/meta-agent-client || true
-  echo ""
-else
-  echo "▶ SKIP_UNINSTALL=1, keeping existing global installs before npm install"
-  echo ""
+echo "▶ Stopping existing MAF processes without deleting runtime data..."
+if command -v maf-server >/dev/null 2>&1; then
+  maf-server stop || true
 fi
+pkill -f "MAF_Node_Daemon" 2>/dev/null || true
+echo ""
 
 echo "▶ Installing server package..."
-npm install -g "$SERVER_TGZ"
+npm install -g --force "$SERVER_TGZ"
 echo ""
 
 echo "▶ Installing client package..."
-npm install -g "$CLIENT_TGZ"
+npm install -g --force "$CLIENT_TGZ"
 echo ""
 
 echo "▶ Refreshing client runtime installation..."
