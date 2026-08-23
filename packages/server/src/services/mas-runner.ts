@@ -49,6 +49,8 @@ interface MASSubmitOptions {
   origin?: Record<string, unknown>;
   notify?: Record<string, unknown>;
   onWorkflowCreated?: (workflowId: string, sessionId: string) => void;
+  onSessionCreated?: (sessionId: string) => void;
+  maxRounds?: number;
 }
 
 interface WorkflowDirective {
@@ -117,8 +119,9 @@ export function extractMASDirective(output: string): MASDirective | null {
 
 export class MASRunner {
   private activeChildren = new Set<ChildProcessWithoutNullStreams>();
+  private activeSessionChildren = new Map<string, ChildProcessWithoutNullStreams>();
   private activeRuns = 0;
-  private runWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
+  private runWaiters: Array<{ sessionId: string; resolve: () => void; reject: (error: Error) => void }> = [];
   private shuttingDown = false;
   private workflowCreatedCallbacks = new Map<string, (workflowId: string, sessionId: string) => void>();
 
@@ -132,13 +135,14 @@ export class MASRunner {
       description: taskDescription,
       status: 'active',
       rounds: [],
-      max_rounds: MAX_ROUNDS,
+      max_rounds: Math.max(1, options.maxRounds || MAX_ROUNDS),
       origin: options.origin,
       notify: options.notify,
       created_at: new Date().toISOString(),
     };
 
     sessions.set(session.id, session);
+    options.onSessionCreated?.(session.id);
     if (options.onWorkflowCreated) this.workflowCreatedCallbacks.set(session.id, options.onWorkflowCreated);
     console.log(`[MAS] 📋 新会话 ${session.id}: "${taskTitle}"`);
 
@@ -161,6 +165,7 @@ export class MASRunner {
    *             如果没有（直接回答或 DONE）→ 会话结束
    */
   private async executeRound(session: MASSession): Promise<void> {
+    if ((session.status as string) === 'cancelled') return;
     const roundNum = session.rounds.length + 1;
 
     if (roundNum > session.max_rounds) {
@@ -177,8 +182,9 @@ export class MASRunner {
 
     let output: string;
     try {
-      output = await this.runMetaAgentServer(prompt);
+      output = await this.runMetaAgentServer(prompt, session.id);
     } catch (err: any) {
+      if ((session.status as string) === 'cancelled') return;
       console.error(`[MAS] ❌ Round ${roundNum} 失败: ${err.message}`);
       session.status = 'failed';
       session.completed_at = new Date().toISOString();
@@ -190,6 +196,7 @@ export class MASRunner {
       });
       return;
     }
+    if ((session.status as string) === 'cancelled') return;
 
     // 记录本轮
     const round: SessionRound = {
@@ -250,11 +257,19 @@ export class MASRunner {
 
       console.log(`[MAS] 📊 Round ${roundNum} 工作流 ${summary.status}`);
 
-      // 工作流执行完 → 自动进入下一轮
+      // 正式 Execution 的 MAS 只负责一次分诊和一次远端 Workflow。
+      if (session.origin?.require_remote_dispatch === true) {
+        session.status = summary.status === 'completed' ? 'completed' : 'failed';
+        session.completed_at = new Date().toISOString();
+        return;
+      }
+
+      // 普通 MAS 会话仍可在工作流结束后进入下一轮。
       session.status = 'active';
       await this.executeRound(session);
 
     } catch (err: any) {
+      if ((session.status as string) === 'cancelled') return;
       console.error(`[MAS] ❌ Round ${roundNum} 工作流异常: ${err.message}`);
       round.workflow_result = `ERROR: ${err.message}`;
       session.status = 'failed';
@@ -440,16 +455,16 @@ failure_policy 可选：
    * - opencode runtime → `opencode run --pure`（避免加载 MAF opencode plugin 常驻循环）
    * - claude runtime → `claude --print` 且只加载 user settings（避免项目 hooks 常驻等待）
    */
-  private async runMetaAgentServer(prompt: string): Promise<string> {
-    await this.acquireRunSlot();
+  private async runMetaAgentServer(prompt: string, sessionId: string): Promise<string> {
+    await this.acquireRunSlot(sessionId);
     try {
       const runtime = this.getServerRuntime();
       const mafHome = this.getMafHome();
       console.log(`[MAS] 🧠 使用 ${runtime} runtime 执行 Meta-Agent-Server headless（并发 ${this.activeRuns}/${MAS_MAX_CONCURRENCY}）`);
 
-      if (runtime === 'codex') return await this.runCodex(prompt, mafHome);
-      if (runtime === 'claude') return await this.runClaude(prompt, mafHome);
-      return await this.runOpencode(prompt, mafHome);
+      if (runtime === 'codex') return await this.runCodex(prompt, mafHome, sessionId);
+      if (runtime === 'claude') return await this.runClaude(prompt, mafHome, sessionId);
+      return await this.runOpencode(prompt, mafHome, sessionId);
     } finally {
       this.releaseRunSlot();
     }
@@ -490,14 +505,14 @@ failure_policy 可选：
     };
   }
 
-  private acquireRunSlot(): Promise<void> {
+  private acquireRunSlot(sessionId: string): Promise<void> {
     if (this.shuttingDown) return Promise.reject(new Error('MAS runner is shutting down'));
     if (this.activeRuns < MAS_MAX_CONCURRENCY) {
       this.activeRuns += 1;
       return Promise.resolve();
     }
     console.log(`[MAS] ⏳ Headless 分诊达到并发上限 ${MAS_MAX_CONCURRENCY}，进入等待队列`);
-    return new Promise((resolve, reject) => this.runWaiters.push({ resolve, reject }));
+    return new Promise((resolve, reject) => this.runWaiters.push({ sessionId, resolve, reject }));
   }
 
   private releaseRunSlot(): void {
@@ -520,6 +535,7 @@ failure_policy 可选：
       input?: string;
       timeoutMs?: number;
       allowEmptyOutput?: boolean;
+      sessionId?: string;
     },
   ): Promise<string> {
     if (this.shuttingDown) {
@@ -534,6 +550,7 @@ failure_policy 可选：
         detached: true,
       });
       this.activeChildren.add(child);
+      if (options.sessionId) this.activeSessionChildren.set(options.sessionId, child);
 
       let stdout = '';
       let stderr = '';
@@ -553,6 +570,7 @@ failure_policy 可选：
         settled = true;
         clearTimeout(timer);
         this.activeChildren.delete(child);
+        if (options.sessionId) this.activeSessionChildren.delete(options.sessionId);
         reject(new Error(`${label} spawn failed: ${e.message}`));
       });
       child.on('close', code => {
@@ -560,6 +578,7 @@ failure_policy 可选：
         settled = true;
         clearTimeout(timer);
         this.activeChildren.delete(child);
+        if (options.sessionId) this.activeSessionChildren.delete(options.sessionId);
         const output = stdout.trim();
         const errOutput = stderr.trim();
         if (this.shuttingDown) {
@@ -595,6 +614,24 @@ failure_policy 可选：
     try { child.kill(signal); } catch {}
   }
 
+  cancelSession(id: string, reason = 'Execution cancelled'): boolean {
+    const session = sessions.get(id);
+    if (!session || session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') return false;
+    session.status = 'cancelled';
+    session.completed_at = new Date().toISOString();
+    const waiter = this.runWaiters.find(candidate => candidate.sessionId === id);
+    if (waiter) {
+      this.runWaiters = this.runWaiters.filter(candidate => candidate !== waiter);
+      waiter.reject(new Error(reason));
+    }
+    const child = this.activeSessionChildren.get(id);
+    if (child) {
+      this.killChild(child, 'SIGTERM');
+      setTimeout(() => this.killChild(child, 'SIGKILL'), 2000).unref();
+    }
+    return true;
+  }
+
   shutdown(reason = 'Server shutdown'): void {
     this.shuttingDown = true;
     const now = new Date().toISOString();
@@ -618,7 +655,7 @@ failure_policy 可选：
     }, 2000).unref();
   }
 
-  private async runCodex(prompt: string, mafHome: string): Promise<string> {
+  private async runCodex(prompt: string, mafHome: string, sessionId: string): Promise<string> {
     const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
     const outputFile = path.join(routerDir, 'result.txt');
     try {
@@ -641,6 +678,7 @@ failure_policy 可选：
           MAF_CODEX_AUTO_ATTACHED_RECEIVER: '0',
           MAF_CODEX_ATTACHED_RECEIVER_DISABLE: '1',
         },
+        sessionId,
       });
       const final = existsSync(outputFile) ? readFileSync(outputFile, 'utf-8').trim() : '';
       const result = final || stdout.trim();
@@ -651,7 +689,7 @@ failure_policy 可选：
     }
   }
 
-  private async runClaude(prompt: string, mafHome: string): Promise<string> {
+  private async runClaude(prompt: string, mafHome: string, sessionId: string): Promise<string> {
     const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
     try {
       return await this.runCommand('claude --print', CLAUDE_BIN, [
@@ -664,13 +702,14 @@ failure_policy 可选：
       ], {
         cwd: routerDir,
         env: this.routerRuntimeEnv(mafHome, 'claude'),
+        sessionId,
       });
     } finally {
       try { rmSync(routerDir, { recursive: true, force: true }); } catch {}
     }
   }
 
-  private async runOpencode(prompt: string, mafHome: string): Promise<string> {
+  private async runOpencode(prompt: string, mafHome: string, sessionId: string): Promise<string> {
     const routerDir = mkdtempSync(path.join(os.tmpdir(), 'maf-mas-router-'));
     try {
       return await this.runCommand('opencode run', OPENCODE_BIN, [
@@ -680,6 +719,7 @@ failure_policy 可选：
       ], {
         cwd: routerDir,
         env: this.routerRuntimeEnv(mafHome, 'opencode'),
+        sessionId,
       });
     } finally {
       try { rmSync(routerDir, { recursive: true, force: true }); } catch {}

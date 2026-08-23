@@ -171,7 +171,7 @@ export interface Feedback {
 
 // --- Meta-Agent-Server Session ---
 
-export type SessionStatus = 'active' | 'waiting' | 'completed' | 'failed';
+export type SessionStatus = 'active' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 
 export type RoutingDecisionCode =
   | 'NO_MATCHING_AGENT'
@@ -215,7 +215,7 @@ export interface MASSession {
 // --- Workflow ---
 
 /** 工作流节点状态 */
-export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
+export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped';
 
 export type ExecutionErrorCode =
   | 'WORKSPACE_NOT_GIT'
@@ -224,6 +224,8 @@ export type ExecutionErrorCode =
   | 'CLIENT_UNREACHABLE'
   | 'AGENT_START_FAILED'
   | 'EXECUTION_TIMEOUT'
+  | 'EXECUTION_CANCELLED'
+  | 'EXECUTION_PROTOCOL'
   | 'MAS_ROUTING_FAILED'
   | 'PATCH_EXPORT_FAILED'
   | 'DISPATCH_FAILED';
@@ -256,7 +258,7 @@ export interface Workflow {
   id: string;
   title: string;
   nodes: WorkflowNode[];
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   failure_policy?: WorkflowFailurePolicy;  // fail_fast（默认）| all_settled（等所有已可达分支完成/失败/超时后汇总）
   origin?: Record<string, unknown>;        // 发起方上下文（用于结果通知路由）
   notify?: Record<string, unknown>;        // 通知偏好/目标（用于前台 TUI 注入）
@@ -316,7 +318,7 @@ export interface ExecuteCommand {
 
 // --- Framework Execution Protocol ---
 
-export type WorkdirPolicy = 'managed_workspace' | 'configured_workspace' | 'none';
+export type WorkdirPolicy = 'direct_repository';
 
 export interface ExecutionRunContext {
   execution_id: string;
@@ -334,11 +336,14 @@ export type FrameworkExecutionStatus =
   | 'queued'
   | 'routing'
   | 'running'
+  | 'cancelling'
   | 'awaiting_agent'
   | 'waiting_agent_online'
   | 'needs_routing_review'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled'
+  | 'timeout';
 
 export interface ExecutionPatch {
   available: boolean;
@@ -373,6 +378,10 @@ export interface FrameworkExecution {
   result?: string;
   error?: string;
   error_code?: ExecutionErrorCode;
+  deadline_at?: string;
+  cancel_requested_at?: string;
+  cancel_request_id?: string;
+  termination_confirmed?: boolean;
   created_at: string;
   started_at?: string;
   completed_at?: string;

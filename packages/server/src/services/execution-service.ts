@@ -31,6 +31,7 @@ export interface CreateExecutionInput {
   preferred_agent?: string;
   workdir_policy?: WorkdirPolicy;
   artifact_base_url?: string;
+  timeout_seconds?: number;
   auto_start?: boolean;
 }
 
@@ -83,7 +84,7 @@ function parseStringList(value: unknown): string[] {
 
 export function inferExecutionErrorCode(value: unknown): ExecutionErrorCode {
   const message = String(value || '');
-  const explicit = message.match(/\[(WORKSPACE_NOT_GIT|QUEUE_FULL|AGENT_NOT_DISPATCHABLE|CLIENT_UNREACHABLE|AGENT_START_FAILED|EXECUTION_TIMEOUT|MAS_ROUTING_FAILED|PATCH_EXPORT_FAILED|DISPATCH_FAILED)\]/)?.[1];
+  const explicit = message.match(/\[(WORKSPACE_NOT_GIT|QUEUE_FULL|AGENT_NOT_DISPATCHABLE|CLIENT_UNREACHABLE|AGENT_START_FAILED|EXECUTION_TIMEOUT|EXECUTION_CANCELLED|EXECUTION_PROTOCOL|MAS_ROUTING_FAILED|PATCH_EXPORT_FAILED|DISPATCH_FAILED)\]/)?.[1];
   if (explicit) return explicit as ExecutionErrorCode;
   if (/not a git repository|不是 git 仓库/i.test(message)) return 'WORKSPACE_NOT_GIT';
   if (/queue full|队列已满/i.test(message)) return 'QUEUE_FULL';
@@ -144,7 +145,7 @@ function rowToExecution(row: any, artifacts: { path: string; size: number }[]): 
     workspace_id: row.workspace_id || undefined,
     mas_session_id: row.mas_session_id || undefined,
     workflow_id: row.workflow_id || undefined,
-    workdir_policy: row.workdir_policy || 'managed_workspace',
+    workdir_policy: row.workdir_policy || 'direct_repository',
     artifact_base_url: row.artifact_base_url || undefined,
     artifacts,
     patch: {
@@ -160,6 +161,10 @@ function rowToExecution(row: any, artifacts: { path: string; size: number }[]): 
     result: row.result || undefined,
     error: row.error || undefined,
     error_code: row.error_code || undefined,
+    deadline_at: row.deadline_at || undefined,
+    cancel_requested_at: row.cancel_requested_at || undefined,
+    cancel_request_id: row.cancel_request_id || undefined,
+    termination_confirmed: Boolean(row.termination_confirmed),
     created_at: String(row.created_at),
     started_at: row.started_at || undefined,
     completed_at: row.completed_at || undefined,
@@ -168,6 +173,8 @@ function rowToExecution(row: any, artifacts: { path: string; size: number }[]): 
 }
 
 export class ExecutionService {
+  private deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   create(input: CreateExecutionInput): { execution: FrameworkExecution; created: boolean } {
     const requestId = String(input.request_id || '').trim();
     if (!requestId || !input.title || !input.prompt) throw new Error('request_id, title and prompt required');
@@ -175,20 +182,23 @@ export class ExecutionService {
     const existing = getDb().prepare('SELECT * FROM executions WHERE request_id = ?').get(requestId);
     if (existing) return { execution: rowToExecution(existing, this.listArtifacts(String(existing.id))), created: false };
 
-    const policy = input.workdir_policy || 'managed_workspace';
-    if (!['managed_workspace', 'configured_workspace', 'none'].includes(policy)) throw new Error('invalid workdir_policy');
+    const policy: WorkdirPolicy = 'direct_repository';
     const now = new Date().toISOString();
+    const configuredTimeout = Number.parseInt(process.env.MAF_EXECUTION_TIMEOUT_SECONDS || '3600', 10);
+    const requestedTimeout = Number(input.timeout_seconds || configuredTimeout);
+    const timeoutSeconds = Math.min(24 * 60 * 60, Math.max(60, Number.isFinite(requestedTimeout) ? requestedTimeout : configuredTimeout));
+    const deadlineAt = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
     const id = uuidv4();
     const artifactBaseUrl = String(input.artifact_base_url || '')
       .replace('{execution_id}', encodeURIComponent(id))
       .replace(/\/$/, '');
     getDb().prepare(`INSERT INTO executions (
       id, request_id, external_id, source_type, source_ref, title, prompt, metadata, status,
-      preferred_agent, workdir_policy, artifact_base_url, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`).run(
+      preferred_agent, workdir_policy, artifact_base_url, deadline_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`).run(
       id, requestId, String(input.external_id || ''), String(input.source_type || 'custom'), String(input.source_ref || ''),
       String(input.title), String(input.prompt), JSON.stringify(parseObject(input.metadata)), String(input.preferred_agent || ''),
-      policy, artifactBaseUrl, now, now,
+      policy, artifactBaseUrl, deadlineAt, now, now,
     );
     fs.mkdirSync(this.inputDir(id), { recursive: true, mode: 0o700 });
     fs.mkdirSync(this.outputDir(id), { recursive: true, mode: 0o700 });
@@ -207,6 +217,7 @@ export class ExecutionService {
       "UPDATE executions SET status = 'routing', started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'"
     ).run(startedAt, startedAt, id).changes > 0;
     if (!changed) return { execution: this.get(id)!, started: false };
+    this.armDeadline(id, record.deadline_at);
     queueMicrotask(() => void this.run(id).catch(err => this.fail(id, err?.message || String(err))));
     return { execution: this.get(id)!, started: true };
   }
@@ -219,6 +230,52 @@ export class ExecutionService {
   list(): FrameworkExecution[] {
     return getDb().prepare('SELECT * FROM executions ORDER BY created_at DESC').all()
       .map((row: any) => rowToExecution(row, this.listArtifacts(String(row.id))));
+  }
+
+  async cancel(id: string, reason = 'Execution cancelled', finalStatus: 'cancelled' | 'timeout' = 'cancelled'): Promise<FrameworkExecution | undefined> {
+    const record = this.get(id);
+    if (!record) return undefined;
+    if (['completed', 'failed', 'cancelled', 'timeout', 'awaiting_agent', 'waiting_agent_online', 'needs_routing_review'].includes(record.status)) {
+      return record;
+    }
+    const now = new Date().toISOString();
+    const requestId = record.cancel_request_id || uuidv4();
+    getDb().prepare(`UPDATE executions SET status = 'cancelling', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+      cancel_request_id = ?, error = ?, error_code = ?, updated_at = ?
+      WHERE id = ? AND status NOT IN ('completed','failed','cancelled','timeout','awaiting_agent','waiting_agent_online','needs_routing_review')`).run(
+      now, requestId, reason.slice(0, 4000), finalStatus === 'timeout' ? 'EXECUTION_TIMEOUT' : 'EXECUTION_CANCELLED', now, id,
+    );
+    const active = this.get(id) || record;
+    if (active.mas_session_id) masRunner.cancelSession(active.mas_session_id, reason);
+    const workflowResult = active.workflow_id
+      ? await workflowEngine.cancel(active.workflow_id, reason)
+      : { cancelled: true, termination_confirmed: true };
+    const completedAt = new Date().toISOString();
+    getDb().prepare(`UPDATE executions SET status = ?, result = ?, error = ?, error_code = ?,
+      termination_confirmed = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'cancelling'`).run(
+      finalStatus, reason, reason.slice(0, 4000), finalStatus === 'timeout' ? 'EXECUTION_TIMEOUT' : 'EXECUTION_CANCELLED',
+      workflowResult.termination_confirmed ? 1 : 0, completedAt, completedAt, id,
+    );
+    this.clearDeadline(id);
+    return this.get(id);
+  }
+
+  private armDeadline(id: string, deadline?: string): void {
+    this.clearDeadline(id);
+    if (!deadline) return;
+    const delay = Math.max(0, new Date(deadline).getTime() - Date.now());
+    const timer = setTimeout(() => {
+      this.deadlineTimers.delete(id);
+      void this.cancel(id, `Execution exceeded its total deadline ${deadline}`, 'timeout');
+    }, Math.min(delay, 2_147_000_000));
+    timer.unref?.();
+    this.deadlineTimers.set(id, timer);
+  }
+
+  private clearDeadline(id: string): void {
+    const timer = this.deadlineTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.deadlineTimers.delete(id);
   }
 
   inputDir(id: string): string { return path.join(EXECUTION_ARTIFACTS_DIR, safePart(id, 'execution'), 'input'); }
@@ -283,7 +340,7 @@ export class ExecutionService {
 
   private async run(id: string): Promise<void> {
     const record = this.get(id);
-    if (!record) return;
+    if (!record || ['cancelling', 'cancelled', 'timeout'].includes(record.status)) return;
     const routingPrompt = [
       'This is a formal framework Execution and requires remote dispatch.',
       'Route semantically using Agent descriptions, live status, Skills, MCPs, runtime, and workspace metadata.',
@@ -299,26 +356,52 @@ export class ExecutionService {
         source_type: record.source_type,
         source_ref: record.source_ref,
         metadata: record.metadata,
-        workdir_policy: record.workdir_policy,
+        workdir_policy: 'direct_repository',
         artifact_base_url: record.artifact_base_url,
         artifacts: record.artifacts.map(item => item.path),
         portable_prompt: record.prompt,
         require_remote_dispatch: true,
       },
+      maxRounds: 1,
+      onSessionCreated: (sessionId) => {
+        const now = new Date().toISOString();
+        const updated = getDb().prepare("UPDATE executions SET mas_session_id = ?, updated_at = ? WHERE id = ? AND status = 'routing'")
+          .run(sessionId, now, id);
+        if (updated.changes === 0) masRunner.cancelSession(sessionId, 'Execution was cancelled before MAS routing started');
+      },
       onWorkflowCreated: (workflowId, sessionId) => {
         const now = new Date().toISOString();
-        getDb().prepare("UPDATE executions SET status = 'running', workflow_id = ?, mas_session_id = ?, updated_at = ? WHERE id = ?")
+        const updated = getDb().prepare("UPDATE executions SET status = 'running', workflow_id = ?, mas_session_id = ?, updated_at = ? WHERE id = ? AND status = 'routing'")
           .run(workflowId, sessionId, now, id);
+        if (updated.changes === 0) {
+          masRunner.cancelSession(sessionId, 'Execution was cancelled before Workflow registration completed');
+          void workflowEngine.cancel(workflowId, 'Execution was cancelled before Workflow registration completed')
+            .then(result => {
+              const completedAt = new Date().toISOString();
+              getDb().prepare(`UPDATE executions SET termination_confirmed = ?, updated_at = ?
+                WHERE id = ? AND status IN ('cancelled','timeout')`).run(
+                result.termination_confirmed ? 1 : 0, completedAt, id,
+              );
+            });
+        }
       },
     });
     const workflowIds = session.rounds.map(round => round.workflow_id).filter(Boolean) as string[];
+    const current = this.get(id);
+    if (!current || current.status === 'cancelling' || current.status === 'cancelled' || current.status === 'timeout') {
+      masRunner.cancelSession(session.id, 'Execution no longer accepts routing output');
+      await Promise.all(workflowIds.map(workflowId => workflowEngine.cancel(workflowId, 'Execution no longer accepts routing output')));
+      return;
+    }
+    if (workflowIds.length > 1) throw new Error('[EXECUTION_PROTOCOL] Formal Execution created more than one workflow');
     if (!workflowIds.length) {
       if (session.routing_decision) {
         const now = new Date().toISOString();
         getDb().prepare(`UPDATE executions SET status = ?, mas_session_id = ?, result = ?, error = '', error_code = '',
-          completed_at = ?, updated_at = ? WHERE id = ?`).run(
+          completed_at = ?, updated_at = ? WHERE id = ? AND status NOT IN ('cancelling','cancelled','timeout')`).run(
           routingDecisionStatus(session.routing_decision.decision), session.id, session.routing_decision.reason, now, now, id,
         );
+        this.clearDeadline(id);
         return;
       }
       const reason = String(session.rounds[session.rounds.length - 1]?.mas_output || 'MAS returned no workflow or routing decision');
@@ -330,17 +413,22 @@ export class ExecutionService {
     const completedAt = new Date().toISOString();
     fs.writeFileSync(path.join(this.outputDir(id), 'result.md'), `${outcome.result.trim()}\n`, { encoding: 'utf-8', mode: 0o600 });
     getDb().prepare(`UPDATE executions SET status = ?, selected_agent = ?, workspace_id = ?, mas_session_id = ?,
-      workflow_id = ?, result = ?, error = ?, error_code = ?, completed_at = ?, updated_at = ? WHERE id = ?`).run(
+      workflow_id = ?, result = ?, error = ?, error_code = ?, completed_at = ?, updated_at = ?
+      WHERE id = ? AND status NOT IN ('cancelling','cancelled','timeout')`).run(
       outcome.status, outcome.selected_agent, outcome.selected_agent, session.id, outcome.workflow_id,
       outcome.result, outcome.error, outcome.error_code || '', completedAt, completedAt, id,
     );
+    this.clearDeadline(id);
   }
 
   private fail(id: string, error: string): void {
+    const current = this.get(id);
+    if (!current || current.status === 'cancelling' || current.status === 'cancelled' || current.status === 'timeout') return;
     const now = new Date().toISOString();
     const code = inferExecutionErrorCode(error);
     getDb().prepare("UPDATE executions SET status = 'failed', result = ?, error = ?, error_code = ?, completed_at = ?, updated_at = ? WHERE id = ?")
       .run(error, error.slice(0, 4000), code, now, now, id);
+    this.clearDeadline(id);
   }
 }
 

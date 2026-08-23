@@ -25,7 +25,7 @@
 import { createServer } from "node:http";
 import { spawn, execSync, execFile, execFileSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, appendFileSync, readdirSync, statSync, renameSync, chmodSync, rmSync, createWriteStream } from "node:fs";
-import { join, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { join, dirname, relative, resolve, sep } from "node:path";
 import { homedir, hostname, userInfo, networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -499,7 +499,6 @@ const AGENT_ALIVE_TIMEOUT = 5_000;  // 5s（long-poll 2s 周期 × 2 + 裕量）
 const MAX_QUEUE_SIZE = 10;
 const RESULT_MAX_CHARS = parseInt(process.env.MAF_RESULT_MAX_CHARS || "0") || 200_000;
 const EXECUTION_TASK_TIMEOUT_MS = parseInt(process.env.MAF_EXECUTION_TIMEOUT_MS || "0") || 60 * 60_000;
-const PATCH_MAX_BYTES = parseInt(process.env.MAF_PATCH_MAX_BYTES || "0") || 8 * 1024 * 1024;
 const WORKSPACE_WAIT_TIMEOUT_MS = parseInt(process.env.MAF_WORKSPACE_WAIT_TIMEOUT_MS || "0") || 23 * 60 * 60_000;
 const DAEMON_INSTANCE_ID = randomUUID();
 const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 45 * 60_000;
@@ -511,6 +510,10 @@ const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || 
 const codexQueueRunners = new Set();
 const managedExecutionQueueRunners = new Set();
 const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
+const executionProcesses = new Map(); // execution_id/task_id → ChildProcess
+const cancelledExecutions = new Map(); // execution_id/task_id → cancelled_at
+const CANCELLED_EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
+const CANCELLED_EXECUTION_MAX = 10_000;
 
 function normalizeCodexDelivery(value) {
   const v = String(value || "detached").trim().toLowerCase();
@@ -596,17 +599,6 @@ function executionPaths(context) {
   };
 }
 
-function gitOutput(cwd, args) {
-  try {
-    return execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 120000, maxBuffer: 8 * 1024 * 1024,
-    }).trim();
-  } catch (err) {
-    const detail = String(err?.stderr || err?.message || err).trim();
-    throw new Error(`git ${args.join(" ")} 失败: ${detail.slice(0, 2000)}`);
-  }
-}
-
 function execFileAsync(command, args, options = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     execFile(command, args, options, (error, stdout, stderr) => {
@@ -633,62 +625,63 @@ async function gitOutputAsync(cwd, args) {
   }
 }
 
-async function selectRemoteBranch(base) {
-  // Android/Gerrit workspaces are often checked out detached at a release
-  // commit and do not have origin/main or origin/master. Prefer a remote ref
-  // that contains the current commit so the managed workspace preserves the
-  // exact source baseline selected by the Agent owner.
-  try {
-    const containing = await gitOutputAsync(base, [
-      "for-each-ref", "--format=%(refname:short)", "--contains", "HEAD", "refs/remotes/origin",
-    ]);
-    const match = containing.split("\n").map(item => item.trim()).find(item => item.startsWith("origin/"));
-    if (match) return match;
-  } catch {}
-  try {
-    const upstream = await gitOutputAsync(base, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
-    if (upstream.startsWith("origin/")) return upstream;
-  } catch {}
-  try {
-    const head = await gitOutputAsync(base, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-    if (head.startsWith("origin/")) return head;
-  } catch {}
-  for (const candidate of ["origin/main", "origin/master"]) {
-    try { await gitOutputAsync(base, ["rev-parse", "--verify", `${candidate}^{commit}`]); return candidate; } catch {}
-  }
-  try {
-    const refs = await gitOutputAsync(base, ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]);
-    const match = refs.split("\n").map(item => item.trim()).find(item => item.startsWith("origin/"));
-    if (match) return match;
-  } catch {}
-  throw new Error("Agent 源码仓库没有可用的 origin 跟踪分支");
-}
-
-function normalizedRemoteUrl(base, remoteUrl) {
-  const value = String(remoteUrl || "").trim();
-  if (!value) throw new Error("Agent 源码仓库缺少 origin 地址");
-  if (isAbsolute(value) || /^\w+:\/\//.test(value) || /^[^/]+@[^:]+:/.test(value)) return value;
-  return resolve(base, value.replace(/^~(?=\/)/, homedir()));
-}
-
 function readJsonFile(file) {
   try { return JSON.parse(readFileSync(file, "utf-8")); } catch { return null; }
 }
 
-function managedWorkspacePaths(base, remoteUrl, remoteBranch) {
-  const repoName = safeExecutionPart(remoteUrl.split(/[/:]/).pop()?.replace(/\.git$/, "") || base.split(sep).pop(), "repository");
-  const identity = createHash("sha256").update(`${remoteUrl}\n${remoteBranch}`).digest("hex").slice(0, 12);
-  const workspaceDir = join(STATE_DIR, "workspaces", `${repoName}-${identity}`);
+function agentRepositoryConfig(agentName, base) {
+  const definition = codexAgentDefPaths(agentName, base)[0];
+  if (!definition) return { definition: "", targetBranch: "", remoteName: "", definitionHash: "" };
+  const raw = readFileSync(definition, "utf-8");
   return {
-    workspaceDir,
-    sourceDir: join(workspaceDir, "source"),
-    gitMetaDir: join(workspaceDir, "git-meta"),
-    lockPath: join(workspaceDir, "workspace.lock"),
-    manifestPath: join(workspaceDir, "workspace.json"),
+    definition,
+    targetBranch: parseTomlString(raw, "target_branch"),
+    remoteName: parseTomlString(raw, "remote_name"),
+    definitionHash: createHash("sha256").update(raw).digest("hex"),
   };
 }
 
-async function acquireWorkspaceLock(paths, context) {
+async function resolveRepositoryRemote(base, targetBranch, configuredRemote) {
+  const remotes = (await gitOutputAsync(base, ["remote"])).split("\n").map(item => item.trim()).filter(Boolean);
+  if (configuredRemote) {
+    if (!remotes.includes(configuredRemote)) throw new Error(`配置的 Git remote 不存在: ${configuredRemote}`);
+    return configuredRemote;
+  }
+  try {
+    const upstreamRemote = await gitOutputAsync(base, ["config", "--get", `branch.${targetBranch}.remote`]);
+    if (upstreamRemote && upstreamRemote !== "." && remotes.includes(upstreamRemote)) return upstreamRemote;
+  } catch {}
+  const candidates = [];
+  for (const remote of remotes) {
+    try {
+      await gitOutputAsync(base, ["rev-parse", "--verify", `refs/remotes/${remote}/${targetBranch}^{commit}`]);
+      candidates.push(remote);
+    } catch {}
+  }
+  if (candidates.length === 1) return candidates[0];
+  if (remotes.length === 1) return remotes[0];
+  if (candidates.length > 1) throw new Error(`目标分支 ${targetBranch} 同时存在于多个 remote: ${candidates.join(", ")}，请配置 remote_name`);
+  throw new Error(`无法为目标分支 ${targetBranch} 唯一确定 Git remote，请配置 remote_name`);
+}
+
+function repositoryLockPaths(base) {
+  const identity = createHash("sha256").update(resolve(base)).digest("hex").slice(0, 20);
+  const directory = join(STATE_DIR, "repository-locks");
+  return { workspaceDir: directory, lockPath: join(directory, `${identity}.lock`) };
+}
+
+function repositoryDirtyLines(raw) {
+  return String(raw || "").split("\n").filter(Boolean);
+}
+
+async function restoreDirectRepository(paths) {
+  if (!paths?.direct || !paths.writeAllowed) return;
+  if (paths.originalBranch) await gitOutputAsync(paths.sourceDir, ["checkout", paths.originalBranch]);
+  else await gitOutputAsync(paths.sourceDir, ["checkout", "--detach", paths.originalCommit]);
+  try { await gitOutputAsync(paths.sourceDir, ["branch", "-D", paths.taskBranch]); } catch {}
+}
+
+async function acquireRepositoryLock(paths, context) {
   mkdirSync(paths.workspaceDir, { recursive: true, mode: 0o700 });
   const lock = {
     pid: process.pid,
@@ -704,11 +697,7 @@ async function acquireWorkspaceLock(paths, context) {
   }
   const existing = readJsonFile(paths.lockPath) || {};
   if (existing.daemon_instance_id === DAEMON_INSTANCE_ID && existing.pid === process.pid) {
-    throw new Error(`MAF managed workspace locked by execution ${existing.execution_id || "unknown"}`);
-  }
-  if (existsSync(paths.sourceDir)) {
-    const dirty = await gitOutputAsync(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]);
-    if (dirty) throw new Error(`MAF managed workspace has preserved changes from an interrupted execution: ${paths.sourceDir}`);
+    throw new Error(`registered repository locked by execution ${existing.execution_id || "unknown"}`);
   }
   try { unlinkSync(paths.lockPath); } catch {}
   writeFileSync(paths.lockPath, `${JSON.stringify(lock, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -739,7 +728,7 @@ async function downloadExecutionArtifact(context, inputDir, relativePath) {
   }
 }
 
-async function prepareExecutionWorkspace(context, baseRepo) {
+async function prepareExecutionWorkspace(context, baseRepo, agentName) {
   if (!context) return null;
   const local = executionPaths(context);
   mkdirSync(local.inputDir, { recursive: true, mode: 0o700 });
@@ -751,80 +740,166 @@ async function prepareExecutionWorkspace(context, baseRepo) {
 
   let base = resolve(String(baseRepo || ""));
   if (!existsSync(base)) throw new Error(`Agent 源码目录不存在: ${base}`);
-  if (context.workdir_policy === "none") return { ...local, sourceDir: base, managed: false };
   base = resolve(await gitOutputAsync(base, ["rev-parse", "--show-toplevel"]));
-  if (context.workdir_policy === "configured_workspace") return { ...local, sourceDir: base, managed: false };
-
+  const repository = agentRepositoryConfig(agentName, base);
+  const lockPaths = repositoryLockPaths(base);
+  await acquireRepositoryLock(lockPaths, context);
   try {
-    await execFileAsync("git", ["-C", base, "fetch", "--prune", "origin"], {
-      encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch (err) {
-    throw new Error(`更新远端源码失败（基础工作区未修改）: ${String(err?.stderr || err?.message || err).slice(0, 2000)}`);
-  }
-  const remoteRef = await selectRemoteBranch(base);
-  const branch = remoteRef.replace(/^origin\//, "");
-  const remoteUrl = normalizedRemoteUrl(base, await gitOutputAsync(base, ["remote", "get-url", "origin"]));
-  const workspace = managedWorkspacePaths(base, remoteUrl, branch);
-  await acquireWorkspaceLock(workspace, context);
-  try {
-    const manifest = readJsonFile(workspace.manifestPath);
-    if (!existsSync(workspace.sourceDir)) {
-      rmSync(workspace.gitMetaDir, { recursive: true, force: true });
-      await execFileAsync("git", ["clone", "--no-local", "--single-branch", "--branch", branch,
-        `--separate-git-dir=${workspace.gitMetaDir}`, remoteUrl, workspace.sourceDir], {
-        encoding: "utf-8", timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024,
-      });
-    } else if (!manifest || manifest.remote_url !== remoteUrl || manifest.branch !== branch) {
-      throw new Error(`MAF managed workspace identity mismatch: ${workspace.sourceDir}`);
+    const originalCommit = await gitOutputAsync(base, ["rev-parse", "HEAD"]);
+    let originalBranch = "";
+    try { originalBranch = await gitOutputAsync(base, ["symbolic-ref", "--quiet", "--short", "HEAD"]); } catch {}
+    const dirty = repositoryDirtyLines(await gitOutputAsync(base, ["status", "--porcelain", "--untracked-files=all"]));
+    if (dirty.length || !repository.targetBranch) {
+      const readOnlyReason = dirty.length
+        ? `注册仓库存在本地修改：${dirty.slice(0, 20).join("; ")}`
+        : "Agent 配置缺少 target_branch";
+      return { ...local, ...lockPaths, sourceDir: base, managed: false, direct: true, writeAllowed: false,
+        readOnlyReason, originalCommit, originalBranch, agentDefinition: repository.definition,
+        agentDefinitionHash: repository.definitionHash, initialStatus: dirty.join("\n") };
     }
-    await gitOutputAsync(workspace.sourceDir, ["remote", "set-url", "origin", remoteUrl]);
-    await gitOutputAsync(workspace.sourceDir, ["fetch", "--prune", "origin"]);
-    await gitOutputAsync(workspace.sourceDir, ["reset", "--hard", remoteRef]);
-    await gitOutputAsync(workspace.sourceDir, ["clean", "-fdx"]);
-    await gitOutputAsync(workspace.sourceDir, ["checkout", "-B", "maf-managed-execution", remoteRef]);
-    await gitOutputAsync(workspace.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
-    const baseCommit = await gitOutputAsync(workspace.sourceDir, ["rev-parse", "HEAD"]);
-    writeFileSync(workspace.manifestPath, `${JSON.stringify({ remote_url: remoteUrl, branch }, null, 2)}\n`, { mode: 0o600 });
-    const paths = { ...local, ...workspace, managed: true, sourceBranch: branch, sourceCommit: baseCommit, remoteUrl };
-    writeFileSync(local.manifestPath, `${JSON.stringify({ execution_id: context.execution_id, workspace: workspace.sourceDir,
-      source_branch: branch, source_commit: baseCommit, created_at: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+
+    let remoteName = "";
+    try {
+      remoteName = await resolveRepositoryRemote(base, repository.targetBranch, repository.remoteName);
+      await execFileAsync("git", ["-C", base, "fetch", "--prune", remoteName, repository.targetBranch], {
+        encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+      });
+    } catch (err) {
+      return { ...local, ...lockPaths, sourceDir: base, managed: false, direct: true, writeAllowed: false,
+        readOnlyReason: String(err?.message || err), originalCommit, originalBranch,
+        agentDefinition: repository.definition, agentDefinitionHash: repository.definitionHash, initialStatus: "" };
+    }
+
+    const remoteRef = `refs/remotes/${remoteName}/${repository.targetBranch}`;
+    const sourceCommit = await gitOutputAsync(base, ["rev-parse", `${remoteRef}^{commit}`]);
+    const taskBranch = `maf/${safeExecutionPart(context.external_id || context.execution_id).slice(0, 80)}-${safeExecutionPart(context.execution_id).slice(0, 8)}`;
+    try {
+      await gitOutputAsync(base, ["show-ref", "--verify", "--quiet", `refs/heads/${taskBranch}`]);
+      return { ...local, ...lockPaths, sourceDir: base, managed: false, direct: true, writeAllowed: false,
+        readOnlyReason: `任务分支已存在：${taskBranch}，为保护上一次现场不覆盖该分支`, originalCommit, originalBranch,
+        agentDefinition: repository.definition, agentDefinitionHash: repository.definitionHash, initialStatus: "" };
+    } catch {}
+    await gitOutputAsync(base, ["checkout", "-b", taskBranch, remoteRef]);
+    const paths = { ...local, ...lockPaths, sourceDir: base, managed: false, direct: true, writeAllowed: true,
+      sourceBranch: repository.targetBranch, sourceCommit, remoteName, remoteRef, taskBranch,
+      originalCommit, originalBranch, agentDefinition: repository.definition, agentDefinitionHash: repository.definitionHash };
+    writeFileSync(local.manifestPath, `${JSON.stringify({ execution_id: context.execution_id, repository: base,
+      target_branch: repository.targetBranch, remote_name: remoteName, source_commit: sourceCommit,
+      task_branch: taskBranch, original_branch: originalBranch, original_commit: originalCommit,
+      created_at: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
     return paths;
   } catch (err) {
-    releaseWorkspaceLock(workspace, context);
+    releaseWorkspaceLock(lockPaths, context);
     throw err;
   }
 }
 
 function withExecutionRuntimeContext(prompt, projectPath, paths) {
   if (!paths) return String(prompt || "");
-  return [String(prompt || ""), "", "---", "", "## MAF Execution directories", "",
-    `- Source workspace: \`${projectPath}\``,
-    `- Input artifacts: \`${paths.inputDir}\``,
-    `- Output artifacts: \`${paths.outputDir}\``,
-    paths.managed ? `- Source baseline: \`${paths.sourceBranch}\` @ \`${paths.sourceCommit}\`` : "",
-    "- Use $MAF_SOURCE_DIR, $MAF_INPUT_DIR, and $MAF_OUTPUT_DIR for these locations.",
-    paths.managed ? "- Do not pull, switch, checkout, reset, clean, commit, rebase, or push. Leave source changes uncommitted; MAF exports them as a patch." : "",
-    "- Keep downloaded evidence, logs, attachments, and temporary files outside the source workspace.",
-    "- Return the complete final result as Markdown.",
+  return [String(prompt || ""), "", "---", "", "## MAF 运行时仓库契约", "",
+    `- 注册源码目录：\`${projectPath}\``,
+    `- 证据目录：\`${paths.inputDir}\``,
+    `- 报告目录：\`${paths.outputDir}\``,
+    `- 源码访问：\`${paths.writeAllowed ? "read_write" : "read_only"}\``,
+    paths.sourceBranch ? `- Gerrit 目标分支：\`${paths.sourceBranch}\`` : "",
+    paths.remoteName ? `- Git remote：\`${paths.remoteName}\`` : "",
+    paths.sourceCommit ? `- 远程基线：\`${paths.sourceCommit}\`` : "",
+    paths.readOnlyReason ? `- 只读原因：${paths.readOnlyReason}` : "",
+    "- 使用 $MAF_SOURCE_DIR、$MAF_INPUT_DIR 和 $MAF_OUTPUT_DIR 定位上述目录。",
+    paths.writeAllowed
+      ? "- 允许修改和测试。完成修改后必须创建且只创建一个本地非 merge commit，提交信息必须包含 Gerrit Change-Id；不要自行 push，Daemon 校验后提交 Gerrit。"
+      : "- 当前只允许读取和分析；不得修改源码、创建提交、切换分支或执行 push。仍需基于现有证据和源码输出完整中文分析报告。",
+    "- 下载的日志、附件、解压文件和临时文件必须保存在证据目录，不得写入源码仓库。",
+    "- 最终结果必须是完整 Markdown，并说明分析、修改、测试和未解决风险。",
   ].filter(Boolean).join("\n");
 }
 
 function workspaceErrorCode(error) {
   const message = String(error?.message || error || "");
   if (/not a git repository|不是 git 仓库|源码目录不存在|rev-parse --show-toplevel/i.test(message)) return "WORKSPACE_NOT_GIT";
-  if (/locked by execution|workspace.+locked/i.test(message)) return "QUEUE_FULL";
+  if (/locked by execution|workspace.+locked|repository locked/i.test(message)) return "QUEUE_FULL";
   return "DISPATCH_FAILED";
 }
 
 function waitMs(ms) { return new Promise(resolveWait => setTimeout(resolveWait, ms)); }
+
+function executionKeys(task) {
+  return [...new Set([task?.id, task?.execution_id, task?.run_context?.execution_id].map(String).filter(Boolean))];
+}
+
+function rememberCancelledExecution(key) {
+  const now = Date.now();
+  cancelledExecutions.set(String(key), now);
+  for (const [candidate, cancelledAt] of cancelledExecutions) {
+    if (cancelledExecutions.size <= CANCELLED_EXECUTION_MAX && now - cancelledAt <= CANCELLED_EXECUTION_TTL_MS) break;
+    cancelledExecutions.delete(candidate);
+  }
+}
+
+function isCancelledExecution(key) {
+  const cancelledAt = cancelledExecutions.get(String(key));
+  if (!cancelledAt) return false;
+  if (Date.now() - cancelledAt <= CANCELLED_EXECUTION_TTL_MS) return true;
+  cancelledExecutions.delete(String(key));
+  return false;
+}
+
+function trackExecutionProcess(task, child) {
+  for (const key of executionKeys(task)) executionProcesses.set(key, child);
+  const clear = () => {
+    for (const key of executionKeys(task)) {
+      if (executionProcesses.get(key) === child) executionProcesses.delete(key);
+    }
+  };
+  child.once("close", clear);
+  child.once("error", clear);
+}
+
+function terminateExecutionProcess(child) {
+  if (!child) return false;
+  try { if (child.pid) process.kill(-child.pid, "SIGTERM"); else child.kill("SIGTERM"); } catch {
+    try { child.kill("SIGTERM"); } catch {}
+  }
+  setTimeout(() => {
+    try { if (child.pid) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); } catch {
+      try { child.kill("SIGKILL"); } catch {}
+    }
+  }, 5000).unref?.();
+  return true;
+}
+
+async function cancelRunningTask(task, reason) {
+  task._cancelled = true;
+  for (const key of executionKeys(task)) rememberCancelledExecution(key);
+  const child = executionKeys(task).map(key => executionProcesses.get(key)).find(Boolean);
+  let terminationConfirmed = !child;
+  if (child) {
+    const closed = new Promise(resolveClose => child.once("close", () => resolveClose(true)));
+    terminateExecutionProcess(child);
+    terminationConfirmed = await Promise.race([closed, waitMs(7000).then(() => false)]);
+  }
+  const paths = task.run_paths;
+  if (paths?.direct) {
+    try {
+      const dirty = repositoryDirtyLines(await gitOutputAsync(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]));
+      if (!dirty.length && paths.writeAllowed) await restoreDirectRepository(paths);
+    } catch (err) {
+      log(`⚠ 取消任务后恢复注册仓库失败，保留现场: ${err.message}`);
+      terminationConfirmed = false;
+    } finally {
+      releaseWorkspaceLock(paths, task.run_context);
+    }
+  }
+  log(`⛔ Execution 已取消: task=${task.id} reason=${reason}`);
+  return terminationConfirmed;
+}
 
 async function prepareTaskWorkspace(task) {
   if (!task?.run_context || task._workspacePrepared) return task;
   const deadline = Date.now() + WORKSPACE_WAIT_TIMEOUT_MS;
   for (;;) {
     try {
-      task.run_paths = await prepareExecutionWorkspace(task.run_context, task._base_project_path);
+      task.run_paths = await prepareExecutionWorkspace(task.run_context, task._base_project_path, task.target_agent);
       task.project_path = task.run_paths?.sourceDir || task._base_project_path;
       task.description = withExecutionRuntimeContext(task._raw_description || task.description, task.project_path, task.run_paths);
       task._workspacePrepared = true;
@@ -1651,67 +1726,81 @@ async function reportTaskStarted(task) {
   }
 }
 
-async function captureManagedWorkspacePatch(task) {
-  const paths = task?.run_paths;
-  if (!task?.run_context || !paths?.managed) return null;
-  await gitOutputAsync(paths.sourceDir, ["rev-parse", "--verify", `${paths.sourceCommit}^{commit}`]);
-  await execFileAsync("git", ["-C", paths.sourceDir, "add", "-A"], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
-  const { stdout: content } = await execFileAsync("git", ["-C", paths.sourceDir, "diff", "--cached", "--binary", "--full-index", paths.sourceCommit], {
-    timeout: 60000, maxBuffer: PATCH_MAX_BYTES + 1024,
-  });
-  if (content.length > PATCH_MAX_BYTES) throw new Error(`Patch 超过 ${PATCH_MAX_BYTES} 字节限制`);
-  const { stdout: names } = await execFileAsync("git", ["-C", paths.sourceDir, "diff", "--cached", "--name-only", "-z", paths.sourceCommit], {
-    encoding: "utf-8", timeout: 30000, maxBuffer: 4 * 1024 * 1024,
-  });
-  const changedFiles = names.split("\0").filter(Boolean);
-  const patchPath = join(paths.outputDir, "changes.patch");
-  if (content.length) writeFileSync(patchPath, content, { mode: 0o600 });
-  else try { unlinkSync(patchPath); } catch {}
-  return { content, changedFiles };
+function gerritUrlFromPush(output) {
+  const matches = String(output || "").match(/https?:\/\/[^\s)]+/g) || [];
+  return matches.find(value => /\/\+\/\d+/.test(value)) || matches[0] || "";
 }
 
-async function uploadManagedWorkspacePatch(task, patch) {
-  if (!patch || !task?.run_context?.execution_id) return;
-  const url = `${META_AGENT_SERVER}/api/v1/executions/${encodeURIComponent(task.run_context.execution_id)}/patch`;
-  const body = JSON.stringify({
-    content_base64: patch.content.toString("base64"),
-    base_commit: task.run_paths.sourceCommit || "",
-    base_branch: task.run_paths.sourceBranch || "",
-    changed_files: patch.changedFiles,
-    workspace_path: task.run_paths.sourceDir || "",
-    workflow_id: task.workflow_id || "",
-    node_id: task.node_id || "",
-    agent_name: task.target_agent || "",
-  });
-  const res = await fetch(url, {
-    method: "POST",
-    headers: clientAuthHeaders("POST", url, body, { "Content-Type": "application/json" }),
-    body,
-    signal: AbortSignal.timeout(60000),
-  });
-  if (!res.ok) {
-    let detail = "";
-    try { detail = await res.text(); } catch {}
-    throw new Error(`Patch 回传失败: HTTP ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
-  }
-}
-
-async function cleanManagedWorkspace(task) {
+async function finalizeDirectRepository(task, status) {
   const paths = task?.run_paths;
-  if (!task?.run_context || !paths?.managed) return;
+  if (!task?.run_context || !paths?.direct) return { status, suffix: "" };
   try {
-    await gitOutputAsync(paths.sourceDir, ["reset", "--hard", paths.sourceCommit]);
-    await gitOutputAsync(paths.sourceDir, ["clean", "-fdx"]);
-    await gitOutputAsync(paths.sourceDir, ["remote", "set-url", "origin", paths.remoteUrl]);
-    await gitOutputAsync(paths.sourceDir, ["remote", "set-url", "--push", "origin", "disabled://maf-managed-workspace"]);
-    releaseWorkspaceLock(paths, task.run_context);
-    log(`🧹 managed workspace 已清理并释放: ${paths.sourceDir}`);
+    const rawStatus = await gitOutputAsync(paths.sourceDir, ["status", "--porcelain", "--untracked-files=all"]);
+    const dirty = repositoryDirtyLines(rawStatus);
+    if (!paths.writeAllowed) {
+      const current = dirty.join("\n");
+      if (current !== String(paths.initialStatus || "")) {
+        return { status: "failed", suffix: "\n\n## 源码处理\n\n只读执行期间仓库状态发生变化，已停止交付并保留现场。" };
+      }
+      return { status, suffix: `\n\n## 源码处理\n\n本次为只读分析：${paths.readOnlyReason || "仓库不满足安全修改条件"}` };
+    }
+    if (paths.agentDefinition && paths.agentDefinitionHash) {
+      const currentHash = createHash("sha256").update(readFileSync(paths.agentDefinition, "utf-8")).digest("hex");
+      if (currentHash !== paths.agentDefinitionHash) {
+        return { status: "failed", suffix: "\n\n## Gerrit 交付\n\nAgent 配置在执行期间发生变化，未提交 Gerrit，已保留现场。" };
+      }
+    }
+    if (status !== "completed") {
+      if (!dirty.length && await gitOutputAsync(paths.sourceDir, ["rev-parse", "HEAD"]) === paths.sourceCommit) {
+        await restoreDirectRepository(paths);
+      }
+      return { status, suffix: dirty.length ? "\n\n## Gerrit 交付\n\nAgent 执行失败且仓库存在修改，未提交 Gerrit，已保留现场。" : "" };
+    }
+    if (dirty.length) {
+      return { status: "failed", suffix: `\n\n## Gerrit 交付\n\n仓库仍有未提交修改，未提交 Gerrit，已保留现场：\n\n${dirty.map(line => `- \`${line}\``).join("\n")}` };
+    }
+    const head = await gitOutputAsync(paths.sourceDir, ["rev-parse", "HEAD"]);
+    const count = Number(await gitOutputAsync(paths.sourceDir, ["rev-list", "--count", `${paths.remoteRef}..HEAD`]));
+    if (count === 0 && head === paths.sourceCommit) {
+      await restoreDirectRepository(paths);
+      return { status, suffix: "\n\n## Gerrit 交付\n\n本次未产生源码修改，无需提交 Gerrit。" };
+    }
+    if (count !== 1) {
+      return { status: "failed", suffix: `\n\n## Gerrit 交付\n\n提交门禁拒绝交付：当前相对目标分支领先 ${count} 个提交，必须恰好为 1。已保留现场。` };
+    }
+    await gitOutputAsync(paths.sourceDir, ["merge-base", "--is-ancestor", paths.remoteRef, "HEAD"]);
+    const parents = (await gitOutputAsync(paths.sourceDir, ["show", "-s", "--format=%P", "HEAD"])).split(/\s+/).filter(Boolean);
+    if (parents.length !== 1) return { status: "failed", suffix: "\n\n## Gerrit 交付\n\n提交门禁拒绝 merge commit，已保留现场。" };
+    const message = await gitOutputAsync(paths.sourceDir, ["log", "-1", "--format=%B"]);
+    if (!/^Change-Id:\s+I[0-9a-f]+\s*$/im.test(message)) {
+      return { status: "failed", suffix: "\n\n## Gerrit 交付\n\n提交信息缺少有效 Change-Id，未提交 Gerrit，已保留现场。" };
+    }
+    await execFileAsync("git", ["-C", paths.sourceDir, "fetch", "--prune", paths.remoteName, paths.sourceBranch], {
+      encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+    });
+    const latest = await gitOutputAsync(paths.sourceDir, ["rev-parse", `${paths.remoteRef}^{commit}`]);
+    if (latest !== paths.sourceCommit) {
+      return { status: "failed", suffix: "\n\n## Gerrit 交付\n\n执行期间远程目标分支已前进，未自动 rebase 或提交，已保留现场。" };
+    }
+    const pushed = await execFileAsync("git", ["-C", paths.sourceDir, "push", paths.remoteName, `HEAD:refs/for/${paths.sourceBranch}`], {
+      encoding: "utf-8", timeout: 120000, maxBuffer: 8 * 1024 * 1024,
+    });
+    const pushOutput = `${pushed.stdout || ""}\n${pushed.stderr || ""}`;
+    const gerritUrl = gerritUrlFromPush(pushOutput);
+    await restoreDirectRepository(paths);
+    return { status, suffix: `\n\n## Gerrit 交付\n\n- 提交：\`${head}\`\n- 目标：\`${paths.remoteName}/${paths.sourceBranch}\`${gerritUrl ? `\n- Gerrit：${gerritUrl}` : "\n- Gerrit Push 已成功，远端未返回可解析链接。"}` };
   } catch (err) {
-    log(`❌ managed workspace 清理失败，保留锁与现场: ${err.message}`);
+    return { status: "failed", suffix: `\n\n## Gerrit 交付\n\n提交或恢复失败，未继续自动处理并保留现场：${err.message}` };
+  } finally {
+    releaseWorkspaceLock(paths, task.run_context);
   }
 }
 
 async function reportTaskResult(task, status, result, durationMs) {
+  if (task?._cancelled || executionKeys(task).some(isCancelledExecution)) {
+    log(`ℹ️ 忽略已取消任务的迟到结果: task=${task?.id || "unknown"}`);
+    return { ok: true, workflow_reported: false, cancelled: true };
+  }
   if (!isPublishedAgent(task?.target_agent)) {
     return { ok: false, workflow_reported: false, error: "agent is local-only" };
   }
@@ -1745,20 +1834,19 @@ async function performTaskResultReport(task, status, result, durationMs) {
   // 更新 workflow 跟踪表
   // Strip ANSI escape codes from result（远端 agent 输出可能带终端颜色码）
   let cleanResult = (result || "").replace(/\x1b\[[0-9;]*m/g, "");
-  let patchReady = true;
+  let repositoryFinalized = true;
 
   if (task.run_context && task.run_paths) {
     try {
       mkdirSync(task.run_paths.outputDir, { recursive: true, mode: 0o700 });
-      writeFileSync(join(task.run_paths.outputDir, "result.md"), `${cleanResult.trim()}\n`, { mode: 0o600 });
-      if (task.run_paths.managed && !task._patchUploaded) {
-        await uploadManagedWorkspacePatch(task, await captureManagedWorkspacePatch(task));
-        task._patchUploaded = true;
-      }
+      const finalized = await finalizeDirectRepository(task, status);
+      status = finalized.status;
+      cleanResult = `${cleanResult}${finalized.suffix || ""}`.trim();
+      writeFileSync(join(task.run_paths.outputDir, "result.md"), `${cleanResult}\n`, { mode: 0o600 });
     } catch (err) {
-      patchReady = false;
+      repositoryFinalized = false;
       status = "failed";
-      cleanResult = `${cleanResult}\n\n[PATCH_EXPORT_FAILED] ${err.message}`.trim();
+      cleanResult = `${cleanResult}\n\n[DISPATCH_FAILED] 注册仓库收尾失败: ${err.message}`.trim();
     }
   }
 
@@ -1794,7 +1882,6 @@ async function performTaskResultReport(task, status, result, durationMs) {
         return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
       }
       log(`✅ workflow 回报成功: workflow=${task.workflow_id} node=${task.node_id}`);
-      if (patchReady) await cleanManagedWorkspace(task);
       return { ok: true, workflow_reported: true };
     } catch (err) {
       log(`⚠ workflow 回报失败: ${err.message}`);
@@ -1811,7 +1898,7 @@ async function performTaskResultReport(task, status, result, durationMs) {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return { ok: false, workflow_reported: false, error: `HTTP ${res.status}` };
-    if (patchReady) await cleanManagedWorkspace(task);
+    if (!repositoryFinalized) log(`⚠ 注册仓库收尾未完成: task=${task.id}`);
     return { ok: true, workflow_reported: true };
   } catch (err) {
     log(`⚠ 回报失败: ${err.message}`);
@@ -1893,7 +1980,7 @@ function buildCodexArgs(cwd, outputFile, runPaths = null) {
   if (CODEX_BYPASS_SANDBOX) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   } else {
-    args.push("--sandbox", CODEX_SANDBOX);
+    args.push("--sandbox", runPaths?.writeAllowed === false ? "read-only" : CODEX_SANDBOX);
   }
   if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
   args.push("-C", cwd);
@@ -2109,6 +2196,7 @@ async function executeCodexExecTask(agentName, task, projectPath) {
     const child = spawn(CODEX_BIN, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
       env: {
         ...process.env,
         MAF_SOURCE_DIR: cwd,
@@ -2116,11 +2204,11 @@ async function executeCodexExecTask(agentName, task, projectPath) {
         MAF_OUTPUT_DIR: task.run_paths?.outputDir || "",
       },
     });
+    trackExecutionProcess(task, child);
 
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill("SIGTERM"); } catch {}
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000).unref?.();
+      terminateExecutionProcess(child);
     }, CODEX_TASK_TIMEOUT_MS);
 
     child.stdout.on("data", d => { stdout += d.toString(); });
@@ -2182,6 +2270,7 @@ async function executeManagedExecutionTask(agentName, task, runtime, projectPath
     const child = spawn(executable, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
       env: {
         ...process.env,
         MAF_SOURCE_DIR: cwd,
@@ -2189,10 +2278,10 @@ async function executeManagedExecutionTask(agentName, task, runtime, projectPath
         MAF_OUTPUT_DIR: task.run_paths?.outputDir || "",
       },
     });
+    trackExecutionProcess(task, child);
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill("SIGTERM"); } catch {}
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000).unref?.();
+      terminateExecutionProcess(child);
     }, EXECUTION_TASK_TIMEOUT_MS);
     child.stdout.on("data", data => { stdout += data.toString(); });
     child.stderr.on("data", data => { stderr += data.toString(); });
@@ -2738,7 +2827,8 @@ const httpServer = createServer(async (req, res) => {
     ? await readRawBody()
     : Buffer.alloc(0);
   const authorized = req.method === "POST" && pathname === "/execute"
-    ? serverSignatureAuthorized(req, signedBody)
+    ? (serverSignatureAuthorized(req, signedBody)
+      || (process.env.MAF_TEST_ALLOW_LOCAL_EXECUTE === "1" && requestAuthorized(req, signedBody)))
     : requestAuthorized(req, signedBody);
   if (!authorized) {
     json(401, { error: "Unauthorized" });
@@ -2938,6 +3028,43 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // POST /cancel — Server 取消正式 Execution，并等待本地进程终止回执。
+  if (req.method === "POST" && pathname === "/cancel") {
+    const body = await readBody();
+    const keys = new Set([body.execution_id, body.framework_execution_id].map(String).filter(Boolean));
+    if (!keys.size) {
+      json(400, { error: "execution_id required" });
+      return;
+    }
+    let activeTask = null;
+    let removedPending = 0;
+    for (const [, queue] of taskQueues) {
+      const before = queue.pending.length;
+      queue.pending = queue.pending.filter(task => {
+        const match = executionKeys(task).some(key => keys.has(key));
+        if (match) {
+          task._cancelled = true;
+          for (const key of executionKeys(task)) rememberCancelledExecution(key);
+        }
+        return !match;
+      });
+      removedPending += before - queue.pending.length;
+      if (queue.lastExecuted && executionKeys(queue.lastExecuted).some(key => keys.has(key))) activeTask = queue.lastExecuted;
+    }
+    const terminationConfirmed = activeTask
+      ? await cancelRunningTask(activeTask, String(body.reason || "Execution cancelled"))
+      : true;
+    json(200, {
+      accepted: true,
+      execution_id: String(body.execution_id || body.framework_execution_id),
+      status: "cancelled",
+      removed_pending: removedPending,
+      termination_confirmed: terminationConfirmed,
+      completed_at: new Date().toISOString(),
+    });
+    return;
+  }
+
   // POST /execute — Server 推送任务 → 按 agent_name 路由入队（无 Plugin 时自动拉起 serve）
   if (req.method === "POST" && pathname === "/execute") {
     const body = await readBody();
@@ -2991,7 +3118,7 @@ const httpServer = createServer(async (req, res) => {
     }
 
     // Framework Execution 固定走 Daemon 托管的串行 headless 队列；轮到任务时
-    // 再准备 managed workspace，避免与前台会话或同仓库其它 Execution 混用。
+    // 再锁定注册仓库，避免与前台会话或同仓库其它 Execution 混用。
     if (task.run_context) {
       if (!enqueueManagedExecutionTask(targetAgent, task)) {
         json(409, { accepted: false, agent: targetAgent, error_code: "QUEUE_FULL", error: "queue full" });
