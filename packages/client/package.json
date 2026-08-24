@@ -5,7 +5,8 @@
     "maf-client": "./bin/maf-client"
   },
   "scripts": {
-    "postinstall": "node bin/maf-install.mjs --auto"
+    "postinstall": "node bin/maf-install.mjs --auto",
+    "test": "node --test tests/*.test.mjs"
   },
   "files": [
     "bin/maf-client",

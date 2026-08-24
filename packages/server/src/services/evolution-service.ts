@@ -208,7 +208,9 @@ export class EvolutionService {
   async broadcast(
     command: Omit<EvolveCommand, 'evolve_id' | 'target_runtime'>,
   ): Promise<{ total: number; pushed: number; results: { endpoint: string; evolve_id: string; status: string }[] }> {
-    const allAgents = agentRegistry.listAll().filter(a => a.status === 'online');
+    const allAgents = agentRegistry.listAll().filter(
+      a => a.status === 'online' || a.status === 'standby' || a.status === 'busy'
+    );
 
     // 按 client_endpoint 去重（一个 Client 只推一次）
     const endpointMap = new Map<string, Agent>();
@@ -270,7 +272,7 @@ export class EvolutionService {
 
   private findOnlineAgent(agentName: string): Agent | undefined {
     const agents = agentRegistry.listAll().filter(
-      a => a.agent_name === agentName && (a.status === 'online' || a.status === 'busy')
+      a => a.agent_name === agentName && (a.status === 'online' || a.status === 'standby' || a.status === 'busy')
     );
     return agents.length > 0 ? agents[0] : undefined;
   }

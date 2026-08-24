@@ -38,15 +38,17 @@ test('generic error and historical status policies remain deterministic', () => 
   assert.equal(inferExecutionErrorCode('queue full'), 'QUEUE_FULL');
   assert.equal(inferExecutionErrorCode('operation timed out'), 'EXECUTION_TIMEOUT');
   assert.equal(isHistoricalAgentStatus('online'), false);
+  assert.equal(isHistoricalAgentStatus('standby'), false);
   assert.equal(isHistoricalAgentStatus('busy'), false);
   assert.equal(isHistoricalAgentStatus('offline'), true);
   assert.equal(isHistoricalAgentStatus('dead'), true);
 });
 
-test('offline runtime remains dispatchable through Daemon auto-launch', () => {
+test('only live and explicit standby runtimes are dispatchable', () => {
   assert.equal(isAgentDispatchable({ status: 'online', client_endpoint: 'http://client:4100' }), true);
+  assert.equal(isAgentDispatchable({ status: 'standby', client_endpoint: 'http://client:4100' }), true);
   assert.equal(isAgentDispatchable({ status: 'busy', client_endpoint: 'http://client:4100' }), true);
-  assert.equal(isAgentDispatchable({ status: 'offline', client_endpoint: 'http://client:4100' }), true);
+  assert.equal(isAgentDispatchable({ status: 'offline', client_endpoint: 'http://client:4100' }), false);
   assert.equal(isAgentDispatchable({ status: 'offline', client_endpoint: '' }), false);
   assert.equal(isAgentDispatchable({ status: 'dead', client_endpoint: 'http://client:4100' }), false);
 });

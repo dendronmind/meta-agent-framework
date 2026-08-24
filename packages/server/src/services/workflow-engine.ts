@@ -58,7 +58,7 @@ function codedFailure(code: ExecutionErrorCode, message: string): string {
 
 function executionErrorCode(value: unknown): ExecutionErrorCode {
   const message = String(value || '');
-  const explicit = message.match(/\[(WORKSPACE_NOT_GIT|QUEUE_FULL|AGENT_NOT_DISPATCHABLE|CLIENT_UNREACHABLE|AGENT_START_FAILED|EXECUTION_TIMEOUT|MAS_ROUTING_FAILED|PATCH_EXPORT_FAILED|DISPATCH_FAILED)\]/)?.[1];
+  const explicit = message.match(/\[(WORKSPACE_NOT_GIT|QUEUE_FULL|AGENT_NOT_DISPATCHABLE|CLIENT_UNREACHABLE|AGENT_START_FAILED|EXECUTION_TIMEOUT|EXECUTION_CANCELLED|EXECUTION_PROTOCOL|MAS_ROUTING_FAILED|PATCH_EXPORT_FAILED|DISPATCH_FAILED)\]/)?.[1];
   if (explicit) return explicit as ExecutionErrorCode;
   if (/queue full|队列已满/i.test(message)) return 'QUEUE_FULL';
   if (/offline|dead|不可调度/i.test(message)) return 'AGENT_NOT_DISPATCHABLE';
@@ -68,16 +68,20 @@ function executionErrorCode(value: unknown): ExecutionErrorCode {
 }
 
 export function isAgentDispatchable(agent: Pick<Agent, 'status' | 'client_endpoint'>): boolean {
-  if (agent.status === 'online' || agent.status === 'busy') return true;
-  // offline 表示 Agent runtime 当前未连接；只要 Daemon endpoint 仍有记录，
-  // /execute 就能进入 Client 侧 auto-launch 分支。dead 才表示 Client 不可达。
-  return agent.status === 'offline' && Boolean(agent.client_endpoint);
+  return agent.status === 'online' || agent.status === 'standby' || agent.status === 'busy';
+}
+
+function dispatchPriority(status: Agent['status']): number {
+  if (status === 'online') return 3;
+  if (status === 'standby') return 2;
+  if (status === 'busy') return 1;
+  return 0;
 }
 
 export interface WorkflowSummary {
   workflow_id: string;
   title?: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'cancelled';
   failure_policy?: WorkflowFailurePolicy;
   origin?: Record<string, unknown>;
   notify?: Record<string, unknown>;
@@ -109,6 +113,77 @@ export interface ResultReportOutcome {
 // ============================================================
 
 export class WorkflowEngine {
+
+  async cancel(id: string, reason = 'Execution cancelled'): Promise<{ cancelled: boolean; termination_confirmed: boolean }> {
+    const workflow = workflows.get(id);
+    if (!workflow) return { cancelled: false, termination_confirmed: false };
+    if (workflow.status !== 'running') {
+      return { cancelled: workflow.status === 'cancelled', termination_confirmed: true };
+    }
+
+    const active = workflow.nodes.filter(node => node.status === 'queued' || node.status === 'running');
+    const confirmations = await Promise.all(active.map(async node => {
+      const timer = nodeTimeouts.get(`${workflow.id}:${node.id}`);
+      if (timer) clearTimeout(timer);
+      nodeTimeouts.delete(`${workflow.id}:${node.id}`);
+      node.status = 'cancelled';
+      node.error_code = 'EXECUTION_CANCELLED';
+      node.result = codedFailure('EXECUTION_CANCELLED', reason);
+      node.completed_at = new Date().toISOString();
+
+      const agent = agentRegistry.findByName(node.agent_name).find(isAgentDispatchable)
+        || agentRegistry.findByName(node.agent_name)[0];
+      if (!agent?.client_endpoint || !node.execution_id) return false;
+      const url = `${agent.client_endpoint}/cancel`;
+      const body = JSON.stringify({
+        execution_id: node.execution_id,
+        framework_execution_id: String(workflow.origin?.execution_id || ''),
+        workflow_id: workflow.id,
+        node_id: node.id,
+        agent_name: node.agent_name,
+        reason,
+      });
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+          body,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) return false;
+        const value = await response.json() as { termination_confirmed?: boolean };
+        return value.termination_confirmed === true;
+      } catch {
+        return false;
+      }
+    }));
+
+    for (const node of workflow.nodes) {
+      if (node.status === 'pending') {
+        node.status = 'cancelled';
+        node.error_code = 'EXECUTION_CANCELLED';
+        node.result = codedFailure('EXECUTION_CANCELLED', reason);
+        node.completed_at = new Date().toISOString();
+      }
+    }
+    workflow.status = 'cancelled';
+    workflow.completed_at = new Date().toISOString();
+    const summary: WorkflowSummary = {
+      workflow_id: workflow.id,
+      title: workflow.title,
+      status: 'cancelled',
+      failure_policy: workflow.failure_policy,
+      origin: workflow.origin,
+      notify: workflow.notify,
+      nodes: workflow.nodes.map(node => ({
+        id: node.id, agent_name: node.agent_name, status: node.status, result: node.result, error_code: node.error_code,
+      })),
+    };
+    const callback = completionCallbacks.get(workflow.id);
+    if (callback) { callback.resolve(summary); completionCallbacks.delete(workflow.id); }
+    this.notifyRelease(workflow, true);
+    return { cancelled: true, termination_confirmed: confirmations.every(Boolean) };
+  }
 
   /**
    * 创建并启动工作流
@@ -295,7 +370,7 @@ export class WorkflowEngine {
     if (wf && wf.status !== 'running') {
       return Promise.resolve({
         workflow_id: wf.id,
-        status: wf.status as 'completed' | 'failed',
+        status: wf.status as 'completed' | 'failed' | 'cancelled',
         failure_policy: wf.failure_policy,
         nodes: wf.nodes.map(n => ({ id: n.id, agent_name: n.agent_name, status: n.status, result: n.result, error_code: n.error_code })),
       });
@@ -527,7 +602,7 @@ export class WorkflowEngine {
     }
 
     // 注册表保证每个 agent_name 唯一归属一个用户+机器。
-    // online/busy 优先；offline 且有 Daemon endpoint 时仍可按需拉起。
+    // 优先 online，其次 standby，最后 busy；offline/dead 仅用于拓扑展示。
     const dispatchable = allMatches.filter(isAgentDispatchable);
     if (allMatches.length > 1) {
       console.warn(`[Workflow] ⚠️  agent "${node.agent_name}" 有 ${allMatches.length} 条记录:`);
@@ -535,9 +610,7 @@ export class WorkflowEngine {
         console.warn(`           ${a.status} ${a.user_id}@${a.host_user} → ${a.client_endpoint}`);
       }
     }
-    const agent = dispatchable.find(a => a.status === 'online')
-      || dispatchable.find(a => a.status === 'busy')
-      || dispatchable[0];
+    const agent = dispatchable.sort((a, b) => dispatchPriority(b.status) - dispatchPriority(a.status))[0];
     if (!agent) {
       const states = [...new Set(allMatches.map(a => a.status))].join(', ');
       const msg = `agent "${node.agent_name}" 当前不可调度（status: ${states || 'unknown'}）`;
@@ -557,8 +630,8 @@ export class WorkflowEngine {
 
     const previousAgentStatus = agent.status;
     if (agent.status !== 'busy') {
-      if (agent.status === 'offline') {
-        console.log(`[Workflow] ⚠ [${node.id}] ${node.agent_name} runtime 离线，交给 Daemon 按需拉起`);
+      if (agent.status === 'standby') {
+        console.log(`[Workflow] ℹ [${node.id}] ${node.agent_name} 待启动，交给 Daemon 按需拉起`);
       }
       agentRegistry.updateStatus(agent.id, 'busy');
       agentRegistry.touchHeartbeat(agent.id);
@@ -660,8 +733,7 @@ export class WorkflowEngine {
       external_id: String(origin.external_id || ''),
       source_type: String(origin.source_type || 'custom'),
       source_ref: String(origin.source_ref || ''),
-      workdir_policy: origin.workdir_policy === 'none' || origin.workdir_policy === 'configured_workspace'
-        ? origin.workdir_policy : 'managed_workspace',
+      workdir_policy: 'direct_repository',
       artifact_base_url: origin.artifact_base_url ? String(origin.artifact_base_url) : undefined,
       artifacts: Array.isArray(origin.artifacts) ? origin.artifacts.map(String) : [],
       metadata: origin.metadata && typeof origin.metadata === 'object' ? origin.metadata as Record<string, unknown> : {},

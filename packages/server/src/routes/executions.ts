@@ -37,6 +37,14 @@ router.post('/:id/start', (req: Request, res: Response) => {
   res.status(value.started ? 202 : 200).json({ ...value.execution, started: value.started });
 });
 
+router.post('/:id/cancel', async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const reason = String(req.body?.reason || 'Execution cancelled by caller').trim().slice(0, 4000);
+  const record = await executionService.cancel(id, reason || 'Execution cancelled by caller');
+  if (!record) { res.status(404).json({ error: 'Execution not found' }); return; }
+  res.status(record.status === 'cancelling' ? 202 : 200).json(record);
+});
+
 router.get('/:id', (req: Request, res: Response) => {
   const record = executionService.get(String(req.params.id));
   if (!record) { res.status(404).json({ error: 'Execution not found' }); return; }

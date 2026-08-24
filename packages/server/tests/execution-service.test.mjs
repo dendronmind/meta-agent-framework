@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-test('generic Execution supports idempotency, staged artifacts, and Patch metadata', async () => {
+test('generic Execution defaults to direct repository delivery and remains idempotent', async () => {
   const mafHome = mkdtempSync(path.join(os.tmpdir(), 'maf-execution-test-'));
   process.env.MAF_HOME = mafHome;
   process.env.DB_PATH = path.join(mafHome, 'data', 'execution-test.db');
@@ -28,6 +28,8 @@ test('generic Execution supports idempotency, staged artifacts, and Patch metada
 
     assert.equal(first.created, true);
     assert.equal(first.execution.status, 'queued');
+    assert.equal(first.execution.workdir_policy, 'direct_repository');
+    assert.ok(first.execution.deadline_at);
     assert.equal(first.execution.source_type, 'arbitrary-source');
     assert.deepEqual(first.execution.metadata, { opaque_business_context: { value: 42 } });
     assert.equal('case_id' in first.execution, false);
@@ -56,6 +58,13 @@ test('generic Execution supports idempotency, staged artifacts, and Patch metada
     assert.equal(patched.patch.sha256, createHash('sha256').update(patch).digest('hex'));
     assert.deepEqual(patched.patch.changed_files, ['a.txt']);
     assert.equal(readFileSync(executionService.getPatchFile(first.execution.id).path).equals(patch), true);
+
+    const cancelled = await executionService.cancel(first.execution.id, 'test cancellation');
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.error_code, 'EXECUTION_CANCELLED');
+    assert.equal(cancelled.termination_confirmed, true);
+    const duplicateCancel = await executionService.cancel(first.execution.id, 'duplicate cancellation');
+    assert.equal(duplicateCancel.cancel_request_id, cancelled.cancel_request_id);
   } finally {
     closeDb();
     rmSync(mafHome, { recursive: true, force: true });

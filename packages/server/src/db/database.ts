@@ -70,10 +70,18 @@ export async function initDb(): Promise<void> {
   }
 
   initTables();
+  sqlJsDb.run("UPDATE executions SET workdir_policy = 'direct_repository' WHERE workdir_policy != 'direct_repository' OR workdir_policy IS NULL");
+  sqlJsDb.run(`UPDATE executions SET status = 'cancelled',
+    result = CASE WHEN result = '' THEN 'Execution cancellation was interrupted by MAF Server restart' ELSE result END,
+    error = 'Execution cancellation was interrupted by MAF Server restart; remote termination is unconfirmed',
+    error_code = 'EXECUTION_CANCELLED', termination_confirmed = 0,
+    completed_at = datetime('now'), updated_at = datetime('now')
+    WHERE status = 'cancelling'`);
   sqlJsDb.run(`UPDATE executions SET status = 'failed', result = CASE WHEN result = '' THEN 'MAF Server restarted before execution completed' ELSE result END,
     error = 'MAF Server restarted before execution completed', error_code = 'DISPATCH_FAILED',
     completed_at = datetime('now'), updated_at = datetime('now')
-    WHERE status IN ('routing', 'running')`);
+    WHERE status IN ('routing', 'running')
+       OR (status = 'queued' AND (started_at IS NOT NULL OR workflow_id != '' OR mas_session_id != ''))`);
   persistDb();
 }
 
@@ -272,7 +280,7 @@ function initTables(): void {
       result TEXT NOT NULL DEFAULT '',
       error TEXT NOT NULL DEFAULT '',
       error_code TEXT NOT NULL DEFAULT '',
-      workdir_policy TEXT NOT NULL DEFAULT 'managed_workspace',
+      workdir_policy TEXT NOT NULL DEFAULT 'direct_repository',
       artifact_base_url TEXT NOT NULL DEFAULT '',
       patch_path TEXT NOT NULL DEFAULT '',
       patch_filename TEXT NOT NULL DEFAULT '',
@@ -285,6 +293,10 @@ function initTables(): void {
       created_at TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT,
+      deadline_at TEXT,
+      cancel_requested_at TEXT,
+      cancel_request_id TEXT NOT NULL DEFAULT '',
+      termination_confirmed INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     )
   `);
@@ -303,28 +315,45 @@ function initTables(): void {
         prompt TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued',
         preferred_agent TEXT NOT NULL DEFAULT '', selected_agent TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '',
         mas_session_id TEXT NOT NULL DEFAULT '', workflow_id TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
-        error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '', workdir_policy TEXT NOT NULL DEFAULT 'managed_workspace',
+        error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '', workdir_policy TEXT NOT NULL DEFAULT 'direct_repository',
         artifact_base_url TEXT NOT NULL DEFAULT '', patch_path TEXT NOT NULL DEFAULT '', patch_filename TEXT NOT NULL DEFAULT '',
         patch_size INTEGER NOT NULL DEFAULT 0, patch_sha256 TEXT NOT NULL DEFAULT '', base_commit TEXT NOT NULL DEFAULT '',
         base_branch TEXT NOT NULL DEFAULT '', changed_files TEXT NOT NULL DEFAULT '[]', remote_workspace_path TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL
+        created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+        deadline_at TEXT, cancel_requested_at TEXT, cancel_request_id TEXT NOT NULL DEFAULT '',
+        termination_confirmed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
       )
     `);
     sqlJsDb.run(`INSERT INTO executions (
       id, request_id, external_id, source_type, source_ref, title, prompt, status, preferred_agent,
       selected_agent, workspace_id, mas_session_id, workflow_id, result, error, error_code, workdir_policy,
       artifact_base_url, patch_path, patch_filename, patch_size, patch_sha256, base_commit, base_branch,
-      changed_files, remote_workspace_path, created_at, started_at, completed_at, updated_at
+      changed_files, remote_workspace_path, created_at, started_at, completed_at,
+      deadline_at, cancel_requested_at, cancel_request_id, termination_confirmed, updated_at
     ) SELECT id, ${value('run_id', 'id')}, ${value('case_id', "''")}, ${value('case_type', "'custom'")},
       ${value('source_ref', "''")}, title, prompt, status, ${value('preferred_agent', "''")},
       ${value('selected_agent', "''")}, ${value('workspace_id', "''")}, ${value('mas_session_id', "''")},
       ${value('workflow_id', "''")}, ${value('result', "''")}, ${value('error', "''")},
-      ${value('error_code', "''")}, ${value('workdir_policy', "'managed_workspace'")},
+      ${value('error_code', "''")}, ${value('workdir_policy', "'direct_repository'")},
       ${value('artifact_base_url', "''")}, ${value('patch_path', "''")}, ${value('patch_filename', "''")},
       ${value('patch_size', '0')}, ${value('patch_sha256', "''")}, ${value('base_commit', "''")},
       ${value('base_branch', "''")}, ${value('changed_files', "'[]'")}, ${value('remote_workspace_path', "''")},
-      created_at, started_at, completed_at, updated_at FROM executions_business_v0`);
+      created_at, started_at, completed_at, ${value('deadline_at', "NULL")},
+      ${value('cancel_requested_at', "NULL")}, ${value('cancel_request_id', "''")},
+      ${value('termination_confirmed', '0')}, updated_at FROM executions_business_v0`);
     sqlJsDb.run('DROP TABLE executions_business_v0');
+  }
+
+  const executionMigrations: Record<string, string> = {
+    deadline_at: 'TEXT',
+    cancel_requested_at: 'TEXT',
+    cancel_request_id: "TEXT NOT NULL DEFAULT ''",
+    termination_confirmed: 'INTEGER NOT NULL DEFAULT 0',
+  };
+  const currentExecutionInfo = sqlJsDb.exec("PRAGMA table_info('executions')")?.[0];
+  const currentExecutionColumns = new Set<string>((currentExecutionInfo?.values || []).map((row: any[]) => String(row[1])));
+  for (const [name, definition] of Object.entries(executionMigrations)) {
+    if (!currentExecutionColumns.has(name)) sqlJsDb.run(`ALTER TABLE executions ADD COLUMN ${name} ${definition}`);
   }
 
   // 索引

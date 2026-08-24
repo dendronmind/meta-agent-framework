@@ -134,7 +134,7 @@ Client 可以在本机 `~/.meta-agent-framework/maf.config.json` 中决定哪些
 
 #### 通用 Execution API
 
-Server 本机集成可使用 `POST /api/v1/executions` 提交需要 MAS 语义路由、远端 Agent 执行和 Patch 回传的通用任务。框架字段是 `request_id`、`external_id`、`source_type`、`source_ref` 和透明 `metadata`；MAF 不校验或解释 Jira、Case、Run 等业务模型。
+Server 本机集成可使用 `POST /api/v1/executions` 提交需要 MAS 语义路由和远端 Agent 执行的通用任务。框架字段是 `request_id`、`external_id`、`source_type`、`source_ref` 和透明 `metadata`；MAF 不校验或解释 Jira、Case、Run 等业务模型。
 
 ```json
 {
@@ -145,14 +145,20 @@ Server 本机集成可使用 `POST /api/v1/executions` 提交需要 MAS 语义�
   "title": "分析并修复问题",
   "prompt": "任务正文",
   "metadata": { "opaque_caller_context": {} },
-  "workdir_policy": "managed_workspace",
+  "timeout_seconds": 3600,
   "auto_start": false
 }
 ```
 
-`request_id` 是幂等键。默认 `auto_start` 为 `true`；需要先上传证据时设为 `false`，依次调用 `PUT /api/v1/executions/:id/artifacts/<path>` 和 `POST /api/v1/executions/:id/start`。结果通过 `GET /api/v1/executions/:id` 查询，Patch 通过 `GET /api/v1/executions/:id/patch` 下载。
+`request_id` 是幂等键。默认 `auto_start` 为 `true`；需要先上传证据时设为 `false`，依次调用 `PUT /api/v1/executions/:id/artifacts/<path>` 和 `POST /api/v1/executions/:id/start`。结果通过 `GET /api/v1/executions/:id` 查询。调用方可用 `POST /api/v1/executions/:id/cancel` 请求取消；Execution 还有覆盖 MAS、Workflow 和远端进程的总截止时间。
 
-`managed_workspace` 会按 Git remote 和分支复用 `$MAF_HOME/workspaces/<repository-id>/source`，执行前同步远端基线并持有串行锁。源码 Git 元数据位于 workspace 外，成功回传二进制 Patch 后清理工作区；失败时保留现场和锁供排查。每次 Execution 的输入输出位于 `$MAF_HOME/executions/<execution-id>/input|output`。
+正式 Execution 固定使用 Agent 注册的 `project_path`，不会 clone 或复制第二份源码。Codex Agent
+TOML 必须配置 `target_branch`；只有目标分支存在于多个 remote、无法唯一判断时才需要
+`remote_name`。Daemon 对同一注册仓库串行加锁并同步远程基线：仓库不干净或 Git 配置不明确时
+只读分析；仓库干净时切换到临时任务分支，要求 Agent 只创建一个带 Gerrit `Change-Id` 的
+非 merge commit。Daemon 在 Push 前确认远程未前进且本地仅领先一个提交，再 Push 到
+`refs/for/<target_branch>` 并恢复原分支。输入输出仍位于
+`$MAF_HOME/executions/<execution-id>/input|output`；下载证据不得写入源码仓库。
 
 安装完成后支持手动启动和自动拉起两种运行模式：
 
