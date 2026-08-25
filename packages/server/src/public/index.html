@@ -923,11 +923,17 @@
       return new Set(nodeList(workflow).map(n => n.agent_name).filter(Boolean));
     }
 
+    function agentStatusRank(status) {
+      return ({ online: 0, busy: 1, standby: 2, offline: 3, dead: 4 }[String(status || '')] ?? 5);
+    }
+
     function renderAgents() {
       const involved = workflowAgents();
       let agents = state.agents;
       if (config.agentName) agents = agents.filter(a => a.agent_name === config.agentName);
       else if (config.embedded && involved.size) agents = agents.filter(a => involved.has(a.agent_name));
+      agents = agents.slice().sort((a, b) => agentStatusRank(a.status) - agentStatusRank(b.status)
+        || String(a.agent_name || '').localeCompare(String(b.agent_name || '')));
       $('agent-count').textContent = agents.length;
       $('agent-board').innerHTML = agents.map(a => {
         const skills = parseJson(a.skills, []);

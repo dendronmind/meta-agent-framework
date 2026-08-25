@@ -10,6 +10,7 @@ test('dynamic Agent keeps a stable database id across registrations', async () =
   process.env.FEISHU_SYNC_DISABLED = '1';
   const { initDb, closeDb } = await import('../dist/db/database.js');
   const { agentRegistry, isHistoricalAgentStatus } = await import('../dist/services/agent-registry.js');
+  const { eventBus } = await import('../dist/services/event-bus.js');
 
   await initDb();
   const payload = {
@@ -27,6 +28,9 @@ test('dynamic Agent keeps a stable database id across registrations', async () =
     }],
   };
 
+  const events = [];
+  const originalEmit = eventBus.emit;
+  eventBus.emit = event => events.push(event);
   try {
     const first = agentRegistry.registerClient(payload)[0];
     const second = agentRegistry.registerClient({
@@ -40,7 +44,14 @@ test('dynamic Agent keeps a stable database id across registrations', async () =
     assert.equal(isHistoricalAgentStatus('busy'), false);
     assert.equal(isHistoricalAgentStatus('offline'), true);
     assert.equal(isHistoricalAgentStatus('dead'), true);
+    assert.equal(events.filter(event => event.type === 'client_registered').length, 1);
+
+    const heartbeat = agentRegistry.heartbeat('test-user', 'test-host', {
+      agent_statuses: { 'missing-agent': 'online' },
+    });
+    assert.deepEqual(heartbeat, { updated: 0, missing_agents: ['missing-agent'] });
   } finally {
+    eventBus.emit = originalEmit;
     closeDb();
     rmSync(mafHome, { recursive: true, force: true });
   }

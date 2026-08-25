@@ -66,6 +66,7 @@ E2E_DB_PATH="/tmp/maf-e2e.db"
 E2E_BIN="/tmp/maf-e2e-bin"
 MAS_RUNTIME_MOCK="$E2E_BIN/mas-runtime-mock"
 MOCK_CODEX_PROMPT_LOG="/tmp/e2e-codex-mock-prompt.log"
+MOCK_CODEX_ARGS_LOG="/tmp/e2e-codex-mock-args.log"
 DAEMON_LOG="$E2E_USER_HOME/.meta-agent-framework/logs/client-daemon.log"
 
 # 测试端口（与真实环境隔离）
@@ -329,7 +330,7 @@ cleanup() {
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project "$MOCK_CODEX_PROMPT_LOG"
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project "$MOCK_CODEX_PROMPT_LOG" "$MOCK_CODEX_ARGS_LOG"
 }
 trap cleanup EXIT
 
@@ -559,7 +560,7 @@ echo "mock codex stdout"
 CODEXMOCK
   chmod +x "$E2E_BIN/codex"
   export CODEX_BIN="$E2E_BIN/codex"
-  export MOCK_CODEX_PROMPT_LOG
+  export MOCK_CODEX_PROMPT_LOG MOCK_CODEX_ARGS_LOG
 fi
 
 # 启动 Server（所有 case 都需要）
@@ -1689,6 +1690,7 @@ cat > "$CODEX_PROJECT/AGENTS.md" << 'AGENTSEOF'
 Respond briefly for tests.
 AGENTSEOF
 create_codex_agent_toml "$CODEX_PROJECT" "$CODEX_AGENT" "Codex E2E test agent"
+rm -f "$MOCK_CODEX_ARGS_LOG"
 
 curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
   -d "{\"agent_name\":\"$CODEX_AGENT\",\"runtime\":\"codex\",\"directory\":\"$CODEX_PROJECT\"}" >/dev/null 2>&1
@@ -1711,6 +1713,9 @@ done
 assert "Codex workflow completed" "completed" "$CODEX_STATUS"
 CODEX_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$CODEX_WF_ID" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);ns=d.get('nodes',[]);print(ns[0].get('result','') if ns else '')" 2>/dev/null)
 assert "Codex result from mock" "mock codex completed" "$CODEX_RESULT"
+CODEX_ARGS=$(cat "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || true)
+assert "Codex detached 使用 danger-full-access" '\[-s\] \[danger-full-access\]' "$CODEX_ARGS"
+assert "Codex detached 禁止交互审批" '\[-a\] \[never\]' "$CODEX_ARGS"
 
 fi
 
@@ -2945,6 +2950,7 @@ RESULT_HOME="/tmp/maf-e2e-result-idempotency"
 RESULT_PORT=14148
 RESULT_DAEMON="http://127.0.0.1:${RESULT_PORT}"
 RESULT_AGENT="codex-result-idempotency-$$"
+rm -f "$MOCK_CODEX_ARGS_LOG"
 mkdir -p "$RESULT_HOME/.meta-agent-framework"
 cp "$SCRIPT_DIR/plugins/node-daemon/daemon.mjs" "$RESULT_HOME/.meta-agent-framework/daemon.mjs"
 cat > "$RESULT_HOME/.meta-agent-framework/package.json" << PKGJSON
@@ -2980,6 +2986,9 @@ RESULT_WF_RESULT=$(curl -s "$E2E_SERVER/api/workflows/$RESULT_WF_ID" | python3 -
 assert "自动收尾未覆盖 Server 权威结果" "authoritative detailed report" "$RESULT_WF_RESULT"
 assert "重复终态回报被明确忽略" "忽略任务重复终态回报" "$(tail -n 80 "$RESULT_HOME/.meta-agent-framework/logs/client-daemon.log")"
 assert "Headless Prompt 禁止自行回报" "不要调用 /tasks/done" "$(cat "$MOCK_CODEX_PROMPT_LOG")"
+RESULT_CODEX_ARGS=$(cat "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || true)
+assert "Codex headless 使用 danger-full-access" '\[-s\] \[danger-full-access\]' "$RESULT_CODEX_ARGS"
+assert "Codex headless 禁止交互审批" '\[-a\] \[never\]' "$RESULT_CODEX_ARGS"
 
 kill -9 "$RESULT_DAEMON_PID" 2>/dev/null || true
 wait "$RESULT_DAEMON_PID" 2>/dev/null || true

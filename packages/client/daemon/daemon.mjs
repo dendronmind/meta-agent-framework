@@ -502,7 +502,8 @@ const EXECUTION_TASK_TIMEOUT_MS = parseInt(process.env.MAF_EXECUTION_TIMEOUT_MS 
 const WORKSPACE_WAIT_TIMEOUT_MS = parseInt(process.env.MAF_WORKSPACE_WAIT_TIMEOUT_MS || "0") || 23 * 60 * 60_000;
 const DAEMON_INSTANCE_ID = randomUUID();
 const CODEX_TASK_TIMEOUT_MS = parseInt(process.env.MAF_CODEX_TIMEOUT_MS || "0") || 45 * 60_000;
-const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "workspace-write";
+const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "danger-full-access";
+const CODEX_APPROVAL = process.env.MAF_CODEX_APPROVAL || "never";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
@@ -1563,19 +1564,15 @@ async function registerToServer() {
   }
 }
 
-let lastFullRegister = 0;
-const FULL_REGISTER_INTERVAL = 3_000; // 每 3s 强制重新注册（防 Server 重启后状态丢失）
-
 async function heartbeat() {
   const published = publishedAgentEntries();
   if (published.length === 0) return;
 
-  // 检查是否有 agent 还没注册成功，或者距离上次完整注册超过 60s
+  // 只有首次连接、拓扑变化或 Server 明确表示缺少 Agent 时才完整注册。
+  // 常态只走 heartbeat，避免把周期性保活误显示为 client_registered。
   const anyUnregistered = published.some(([, info]) => !info.registered);
-  const needFullRegister = Date.now() - lastFullRegister > FULL_REGISTER_INTERVAL;
-  if (anyUnregistered || needFullRegister) {
+  if (anyUnregistered) {
     await registerToServer();
-    if (publishedAgentEntries().every(([, info]) => info.registered)) lastFullRegister = Date.now();
     return;
   }
 
@@ -1612,6 +1609,15 @@ async function heartbeat() {
     });
     if (!res.ok) {
       for (const [, info] of published) info.registered = false;
+      return;
+    }
+    const result = await res.json().catch(() => ({}));
+    const missingAgents = Array.isArray(result?.missing_agents) ? result.missing_agents : [];
+    if (missingAgents.length > 0) {
+      for (const [name, info] of published) {
+        if (missingAgents.includes(name)) info.registered = false;
+      }
+      await registerToServer();
     }
   } catch {
     for (const [, info] of published) info.registered = false;
@@ -1972,17 +1978,15 @@ function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
 
 function buildCodexArgs(cwd, outputFile, runPaths = null) {
   const args = [];
-  if (!CODEX_BYPASS_SANDBOX) {
-    args.push("-c", `approval_policy="${process.env.MAF_CODEX_APPROVAL || "never"}"`);
-  }
+  const sandboxMode = runPaths?.writeAllowed === false ? "read-only" : CODEX_SANDBOX;
   if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
-  args.push("exec");
   if (CODEX_BYPASS_SANDBOX) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   } else {
-    args.push("--sandbox", runPaths?.writeAllowed === false ? "read-only" : CODEX_SANDBOX);
+    args.push("-s", sandboxMode, "-a", CODEX_APPROVAL);
   }
   if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
+  args.push("exec");
   args.push("-C", cwd);
   for (const dir of [runPaths?.gitMetaDir, runPaths?.inputDir, runPaths?.outputDir].filter(Boolean)) args.push("--add-dir", dir);
   args.push("--skip-git-repo-check", "--color", "never", "-o", outputFile, "-");
@@ -1991,14 +1995,11 @@ function buildCodexArgs(cwd, outputFile, runPaths = null) {
 
 function buildCodexTuiArgs(cwd, promptFile) {
   const args = [];
-  if (!CODEX_BYPASS_SANDBOX) {
-    args.push("-c", `approval_policy="${process.env.MAF_CODEX_APPROVAL || "never"}"`);
-  }
   if (process.env.MAF_CODEX_MODEL) args.push("-m", process.env.MAF_CODEX_MODEL);
   if (CODEX_BYPASS_SANDBOX) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   } else {
-    args.push("--sandbox", CODEX_SANDBOX);
+    args.push("-s", CODEX_SANDBOX, "-a", CODEX_APPROVAL);
   }
   if (process.env.MAF_CODEX_PROFILE) args.push("--profile", process.env.MAF_CODEX_PROFILE);
   args.push("-C", cwd);

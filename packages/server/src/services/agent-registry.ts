@@ -173,6 +173,7 @@ export class AgentRegistry {
     `);
 
     const agents: Agent[] = [];
+    const insertedAgentNames: string[] = [];
     for (const info of clientAgentInfos) {
       // Daemon 上报的状态优先，没上报的默认 online（向后兼容旧版 Daemon）
       const agentStatus = agentStatuses[info.agent_name] || 'online';
@@ -202,6 +203,7 @@ export class AgentRegistry {
             now
           );
           existing = this.getById(id);
+          insertedAgentNames.push(info.agent_name);
         }
         if (existing) agents.push(existing);
       } else {
@@ -230,6 +232,7 @@ export class AgentRegistry {
             now,
           );
           existing = this.getById(id);
+          insertedAgentNames.push(info.agent_name);
         }
         if (existing) agents.push(existing);
       }
@@ -255,17 +258,24 @@ export class AgentRegistry {
       }
     }
 
-    eventBus.emit({
-      type: 'client_registered',
-      data: {
-        user_id: payload.user_id,
-        host_user: payload.host_user,
-        endpoint: payload.client_endpoint,
-        agent_count: agents.length,
-        agent_names: agents.map(a => a.agent_name),
-      },
-      timestamp: now,
-    });
+    // 只有真正插入新的 Agent 记录才是注册事件。重复 register/upsert 不再伪装成注册，
+    // 常态保活由 heartbeat 接口维护，状态变化由 client_offline/dead/revived 表达。
+    if (insertedAgentNames.length > 0) {
+      eventBus.emit({
+        type: 'client_registered',
+        data: {
+          client_id: payload.client_id,
+          user_id: payload.user_id,
+          host_user: payload.host_user,
+          endpoint: payload.client_endpoint,
+          agent_count: agents.length,
+          agent_names: agents.map(a => a.agent_name),
+          new_agent_count: insertedAgentNames.length,
+          new_agent_names: insertedAgentNames,
+        },
+        timestamp: now,
+      });
+    }
 
     // 版本或完整 Client bundle hash 不一致 → 自动触发 OTA（带冷却）。
     // 旧 Client 上报的是单个 OpenCode index.js hash，也会自然进入一次全量升级。
@@ -309,16 +319,24 @@ export class AgentRegistry {
   // ============================================================
 
   /** 心跳：更新心跳时间，按上报的 agent_statuses 精确恢复状态 */
-  heartbeat(userId: string, hostUser: string, payload: HeartbeatPayload): number {
+  heartbeat(userId: string, hostUser: string, payload: HeartbeatPayload): { updated: number; missing_agents: string[] } {
     const db = getDb();
     const now = new Date().toISOString();
     const registry = getRegistry();
 
     // 1. 按上报的 agent_statuses 精确更新心跳时间和状态（只更新上报了的 agent）
     let changes = 0;
+    const missingAgents: string[] = [];
     if (payload.agent_statuses) {
       for (const [agentName, status] of Object.entries(payload.agent_statuses)) {
         if (isServerAgentName(agentName)) continue;
+        const current = db.prepare(
+          'SELECT status FROM agents WHERE user_id = ? AND host_user = ? AND agent_name = ?'
+        ).get(userId, hostUser, agentName) as { status: string } | undefined;
+        if (!current) {
+          missingAgents.push(agentName);
+          continue;
+        }
         // 更新该 agent 的心跳时间
         db.prepare(`
           UPDATE agents SET last_heartbeat = ? WHERE user_id = ? AND host_user = ? AND agent_name = ?
@@ -326,9 +344,6 @@ export class AgentRegistry {
         changes++;
 
         // 先查当前状态，只在真正变化时更新 + 打日志
-        const current = db.prepare(
-          'SELECT status FROM agents WHERE user_id = ? AND host_user = ? AND agent_name = ?'
-        ).get(userId, hostUser, agentName) as { status: string } | undefined;
         const oldStatus = current?.status || '';
 
         if (oldStatus && oldStatus !== status) {
@@ -409,7 +424,7 @@ export class AgentRegistry {
       }
     }
 
-    return changes;
+    return { updated: changes, missing_agents: missingAgents };
   }
 
   // ============================================================

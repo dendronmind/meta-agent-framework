@@ -30,8 +30,8 @@ router.post('/clients/register', (req: Request, res: Response) => {
 router.post('/clients/heartbeat', (req: Request, res: Response) => {
   const { user_id, host_user, ...payload } = req.body;
   if (!user_id) { res.status(400).json({ error: 'user_id required' }); return; }
-  const count = agentRegistry.heartbeat(user_id, host_user || '', payload as HeartbeatPayload);
-  res.json({ updated: count });
+  const result = agentRegistry.heartbeat(user_id, host_user || '', payload as HeartbeatPayload);
+  res.json(result);
 });
 
 /** POST /api/clients/sync */
