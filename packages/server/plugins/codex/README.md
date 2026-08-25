@@ -12,16 +12,20 @@ MAF Codex agent identity inference:
 
 - `MAF_AGENT_NAME` environment variable, as an explicit temporary override;
 - project-local Codex standard agent definitions: `.codex/agents/*.toml`;
-- if no project-local TOML selects a main agent, the non-home project root directory name.
+- the exact first line `# Codex project agent: <agent>` in project-local `AGENTS.md`;
+- if neither project-local TOML nor the marker selects a main agent, the non-home project root directory name.
 
-MAF intentionally does **not** infer identity from `AGENTS.md`, because that file is free-form Codex project guidance and has no standard “I am agent X” metadata. MAF also does not use `~/.codex/agents/*.toml` for project identity, because those are global Codex subagents rather than the current project agent.
+Project-root discovery uses the nearest ancestor containing `.codex/agents` or a valid `AGENTS.md` first-line marker; if neither exists, it preserves the exact Codex launch directory. A `.git` directory is not a MAF project identity marker and never promotes a nested launch directory to the Git repository root.
 
-TOML selection rules:
+`AGENTS.md` remains free-form Codex project guidance; MAF only interprets the exact first-line marker above as an explicit compatibility convention. A later heading with the same text is ignored. MAF also does not use `~/.codex/agents/*.toml` for project identity, because those are global Codex subagents rather than the current project agent.
+
+Identity selection rules:
 
 1. prefer `.codex/agents/<project-dir-name>.toml` or a TOML whose `name` equals the project directory name;
 2. if there is exactly one `.codex/agents/*.toml`, use its `name` or file stem;
-3. otherwise fall back to the project root directory name;
-4. skip registration when the inferred name is not `[A-Za-z0-9_.-]+` or the project root is the user home directory.
+3. otherwise use a valid `AGENTS.md` first-line marker;
+4. otherwise fall back to the project root directory name;
+5. skip registration when the inferred name is not `[A-Za-z0-9_.-]+` or the project root is the user home directory.
 
 ## Attached receiver for current Codex TUI
 

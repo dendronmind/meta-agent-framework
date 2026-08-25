@@ -49,18 +49,14 @@ export function isHomeDir(dir) {
   return resolve(dir) === resolve(HOME);
 }
 
-export function isGitRoot(dir) {
-  const dotGit = join(dir, ".git");
-  if (isDir(dotGit)) return isFile(join(dotGit, "HEAD"));
-  if (!isFile(dotGit)) return false;
-  try { return /^gitdir:\s*.+/i.test(readFileSync(dotGit, "utf-8")); } catch { return false; }
-}
-
-export function findGitRoot(startDir) {
-  for (const dir of parentDirs(startDir)) {
-    if (isHomeDir(dir)) break;
-    if (isGitRoot(dir)) return dir;
-  }
+export function readAgentFromAgentsMd(projectDir) {
+  const file = join(projectDir, "AGENTS.md");
+  if (!isFile(file)) return "";
+  try {
+    const [firstLine = ""] = readFileSync(file, "utf-8").split(/\r?\n/, 1);
+    const match = firstLine.replace(/^\uFEFF/, "").match(/^#\s*Codex project agent:\s*([A-Za-z0-9_.-]+)\s*$/i);
+    return match && validAgentName(match[1]) ? match[1] : "";
+  } catch {}
   return "";
 }
 
@@ -68,6 +64,7 @@ export function findCodexAgentRoot(startDir) {
   for (const dir of parentDirs(startDir)) {
     if (isHomeDir(dir)) break;
     if (isDir(join(dir, ".codex", "agents"))) return dir;
+    if (readAgentFromAgentsMd(dir)) return dir;
   }
   return "";
 }
@@ -75,8 +72,6 @@ export function findCodexAgentRoot(startDir) {
 export function inferProjectRoot(startDir) {
   const codexRoot = findCodexAgentRoot(startDir);
   if (codexRoot) return codexRoot;
-  const gitRoot = findGitRoot(startDir);
-  if (gitRoot) return gitRoot;
   return resolve(startDir);
 }
 
@@ -136,6 +131,9 @@ export function pickCodexAgent(projectRoot) {
     const only = agents[0];
     return only.name || (validAgentName(only.fileName) ? only.fileName : "");
   }
+
+  const agentsMdAgent = readAgentFromAgentsMd(projectRoot);
+  if (agentsMdAgent) return agentsMdAgent;
 
   return validAgentName(projectName) ? projectName : "";
 }

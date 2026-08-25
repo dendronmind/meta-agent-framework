@@ -1695,7 +1695,7 @@ curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json'
 
 wait_until 10 "get_agent_field runtime $CODEX_AGENT" "codex" || true
 assert "Codex agent runtime" "codex" "$(get_agent_field runtime $CODEX_AGENT)"
-assert "Codex agent online" "online" "$(get_agent_field status $CODEX_AGENT)"
+assert "Codex agent standby" "standby" "$(get_agent_field status $CODEX_AGENT)"
 
 CODEX_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
   -H 'Content-Type: application/json' \
@@ -1753,7 +1753,7 @@ assert "Codex hook daemon agent" "$CODEX_AUTO_AGENT" "$(curl -s $CODEX_AUTO_DAEM
 
 wait_until 10 "get_agent_field runtime $CODEX_AUTO_AGENT" "codex" || true
 assert "Codex autostart runtime" "codex" "$(get_agent_field runtime $CODEX_AUTO_AGENT)"
-assert "Codex autostart online" "online" "$(get_agent_field status $CODEX_AUTO_AGENT)"
+assert "Codex autostart standby" "standby" "$(get_agent_field status $CODEX_AUTO_AGENT)"
 
 AUTO_PID=$(ss -tlnp 2>/dev/null | grep ":${CODEX_AUTO_PORT} " | grep -oP 'pid=\K\d+' | head -1)
 [[ -n "$AUTO_PID" ]] && kill -9 "$AUTO_PID" 2>/dev/null || true
@@ -1775,11 +1775,10 @@ CODEX_WRAP_DAEMON="http://127.0.0.1:${CODEX_WRAP_PORT}"
 rm -rf "$CODEX_WRAP_HOME" "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_MISC"
 mkdir -p "$CODEX_WRAP_HOME" "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_MISC"
 cat > "$CODEX_WRAP_PROJECT/AGENTS.md" << AGENTEOF
-# E2E Codex wrapper project
+# Codex project agent: $CODEX_WRAP_AGENT
 
 E2E Codex wrapper project.
 AGENTEOF
-create_codex_agent_toml "$CODEX_WRAP_PROJECT" "$CODEX_WRAP_AGENT" "Codex wrapper e2e agent"
 
 PATH="$E2E_BIN:$PATH" HOME="$CODEX_WRAP_HOME" XDG_CONFIG_HOME="$CODEX_WRAP_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_WRAP_PORT" MAF_CODEX_DELIVERY="detached" \
@@ -1813,7 +1812,7 @@ assert "Codex wrapper directory-name fallback agent" "$CODEX_WRAP_MISC_AGENT" "$
   timeout 5s codex -C "$CODEX_WRAP_PROJECT" --no-alt-screen >/tmp/e2e-codex-wrapper-run.log 2>&1 || true)
 
 wait_until 10 "curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null" "$CODEX_WRAP_AGENT" || true
-assert "Codex wrapper daemon agent" "$CODEX_WRAP_AGENT" "$(curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null)"
+assert "Codex wrapper AGENTS marker agent" "$CODEX_WRAP_AGENT" "$(curl -s $CODEX_WRAP_DAEMON/agents 2>/dev/null)"
 assert "Codex wrapper log" "codex-wrapper" "$(cat "$CODEX_WRAP_HOME/.meta-agent-framework/logs/codex-plugin.log" 2>/dev/null || true)"
 
 wait_until 10 "get_agent_field runtime $CODEX_WRAP_AGENT" "codex" || true
