@@ -58,9 +58,18 @@ Non-interactive/admin commands such as `codex exec`, `codex review`,
 `codex plugin`, `codex mcp`, `codex app-server`, `codex debug`, and login/update
 commands pass through to the real Codex binary without auto-remote conversion.
 
+## Persistent detached Codex TUI
+
+The default detached delivery keeps one background screen per agent, named
+`maf-codex-<agent>`. The first task starts a Codex TUI in that screen; later
+tasks are serialized and injected into the same TUI, preserving its conversation
+until the TUI or Node Daemon exits. Task completion only reports `/tasks/done`
+and does not close the screen. If the TUI exits before reporting, the Daemon
+fails the active task and creates a fresh persistent screen for the next task.
+
 Useful environment variables:
 
-- `MAF_CODEX_DELIVERY=detached|attached|auto`: task delivery policy; default `detached` starts a Daemon-managed background screen/TUI and never occupies the user's current Codex session. Use `attached` or `auto` only when current-session injection is explicitly wanted.
+- `MAF_CODEX_DELIVERY=detached|attached|auto`: task delivery policy; default `detached` reuses one Daemon-managed background screen/TUI per agent and never occupies the user's current Codex session. Use `attached` or `auto` only when current-session injection is explicitly wanted.
 - `MAF_CODEX_ATTACHED_TASK_TIMEOUT_MS=<ms>`: overall attached-turn limit; default 45 minutes while short `thread/read` attempts continue throughout the wait.
 - `MAF_CODEX_TURN_POLL_MS=<ms>`: attached `thread/read` poll interval; default 15000 ms.
 - `MAF_CODEX_TURN_READ_TIMEOUT_MS=<ms>`: timeout for one `thread/read` request; default 5000 ms. A failed read is retried until the overall task limit.

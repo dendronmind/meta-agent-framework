@@ -510,7 +510,7 @@ const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex 
 const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "detached");
 const codexQueueRunners = new Set();
 const managedExecutionQueueRunners = new Set();
-const codexTaskScreens = new Map(); // task_id → { agentName, screenName, startedAt, lastTaskAt }
+const codexAgentScreens = new Map(); // agent_name → { screenName, projectPath, startedAt, lastTaskAt, currentTaskId }
 const executionProcesses = new Map(); // execution_id/task_id → ChildProcess
 const cancelledExecutions = new Map(); // execution_id/task_id → cancelled_at
 const CANCELLED_EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1139,11 +1139,9 @@ function cleanIdleServes() {
       serveProcesses.delete(name);
     }
   }
-  for (const [taskId, info] of codexTaskScreens) {
-    if (now - info.lastTaskAt > SERVE_IDLE_TIMEOUT) {
-      log(`🗑 Codex screen 空闲超时，关闭: ${info.screenName}`);
-      try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
-      codexTaskScreens.delete(taskId);
+  for (const [agentName, info] of codexAgentScreens) {
+    if (!screenSessionExists(info.screenName)) {
+      void handleCodexScreenExit(agentName, info.screenName, "screen session disappeared");
     }
   }
 }
@@ -1171,18 +1169,6 @@ function closeServeScreen(agentName, reason = "") {
   return true;
 }
 
-function closeCodexTaskScreensForAgent(agentName, reason = "") {
-  let closed = 0;
-  for (const [taskId, info] of codexTaskScreens) {
-    if (info.agentName !== agentName) continue;
-    log(`🗑 关闭旧 Codex task screen: ${agentName} task=${taskId} (${info.screenName})${reason ? ` — ${reason}` : ""}`);
-    try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
-    codexTaskScreens.delete(taskId);
-    closed++;
-  }
-  return closed;
-}
-
 function retireIdleSameAgentInstance(agentName, existing, incomingPid) {
   if (!existing || !incomingPid) return;
   const existingPid = existing.pluginPid || 0;
@@ -1199,7 +1185,6 @@ function retireIdleSameAgentInstance(agentName, existing, incomingPid) {
   }
 
   closeServeScreen(agentName, "same-agent reconnect");
-  closeCodexTaskScreensForAgent(agentName, "same-agent reconnect");
 }
 
 /** 清理所有 screen 进程（Daemon 退出时） */
@@ -1208,10 +1193,10 @@ function cleanAllServes() {
     try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
   }
   serveProcesses.clear();
-  for (const [, info] of codexTaskScreens) {
+  for (const [, info] of codexAgentScreens) {
     try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
   }
-  codexTaskScreens.clear();
+  codexAgentScreens.clear();
 }
 
 /** 定期清理长期不活跃的 agent（1 小时无活跃则移除，仅清理真正被遗忘的残留） */
@@ -1924,6 +1909,56 @@ function safeFilePart(value) {
   return String(value || "task").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80) || "task";
 }
 
+function screenSessionExists(screenName) {
+  try {
+    const output = execFileSync("screen", ["-ls", screenName], { encoding: "utf-8", timeout: 2000 });
+    return output.includes(screenName);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 将多行任务作为一次 bracketed paste 注入已有 Codex TUI。
+ * screen 的 readreg/paste 避免把 prompt 拼进 shell 命令，也避免 stuff 的长度限制。
+ */
+function injectCodexPrompt(screenName, prompt, taskId) {
+  const inputFile = join(STATE_DIR, `${screenName}.input-${safeFilePart(taskId)}.txt`);
+  try {
+    writeFileSync(inputFile, `\x1b[200~${prompt}\x1b[201~`, "utf-8");
+    execFileSync("screen", ["-S", screenName, "-X", "readreg", "p", inputFile], { stdio: "ignore", timeout: 5000 });
+    execFileSync("screen", ["-S", screenName, "-X", "paste", "p"], { stdio: "ignore", timeout: 5000 });
+    execFileSync("screen", ["-S", screenName, "-X", "stuff", "\r"], { stdio: "ignore", timeout: 5000 });
+    return true;
+  } catch (err) {
+    log(`❌ Codex prompt 注入失败: screen=${screenName} task=${taskId} ${err.message}`);
+    return false;
+  } finally {
+    try { unlinkSync(inputFile); } catch {}
+  }
+}
+
+async function handleCodexScreenExit(agentName, screenName, detail = "") {
+  const info = codexAgentScreens.get(agentName);
+  if (!info || info.screenName !== screenName) return false;
+  codexAgentScreens.delete(agentName);
+
+  const q = taskQueues.get(agentName);
+  if (!q?.executingTaskId || !q.lastExecuted) {
+    log(`ℹ️ Codex 持久 screen 已退出: agent=${agentName} session=${screenName}${detail ? ` ${detail}` : ""}`);
+    return true;
+  }
+
+  const task = q.lastExecuted;
+  q.executingTaskId = null;
+  q.lastExecuted = null;
+  const message = `Codex 持久 screen 在任务回报前退出: ${screenName}${detail ? ` (${detail})` : ""}`;
+  log(`⚠ ${message} task=${task.id}`);
+  await reportTaskResult(task, "failed", message, 0);
+  if (q.pending.length > 0) scheduleCodexQueue(agentName);
+  return true;
+}
+
 function buildCodexPrompt(agentName, task, cwd, reportScript = "") {
   const agentInfo = agents.get(agentName);
   const def = readAgentInstruction(agentName, "codex", agentInfo?.directory || cwd);
@@ -2070,48 +2105,57 @@ async function spawnCodexTuiTask(agentName, task, projectPath) {
     return false;
   }
 
-  const screenName = `maf-codex-${safeFilePart(agentName)}-${safeFilePart(task.id).slice(0, 24)}`;
-  const promptFile = join(STATE_DIR, `${screenName}.prompt.md`);
-  const launchScript = join(STATE_DIR, `${screenName}.launch.mjs`);
+  // 一个 Agent 只保留一个长期 Codex TUI；后续任务复用同一个 screen。
+  const screenName = `maf-codex-${safeFilePart(agentName)}`;
   const reportScript = writeCodexReportScript(agentName, task);
-  const resultFile = join("/tmp", `maf-codex-result-${safeFilePart(task.id)}.md`);
-  const markerFile = `${reportScript}.sent`;
   const prompt = buildCodexPrompt(agentName, task, cwd, reportScript);
+  const existing = codexAgentScreens.get(agentName);
+
+  if (screenSessionExists(screenName)) {
+    if (!injectCodexPrompt(screenName, prompt, task.id)) {
+      await reportTaskResult(task, "failed", `Codex prompt 注入失败: ${screenName}`, Date.now() - started);
+      return false;
+    }
+    task.session_id = screenName;
+    codexAgentScreens.set(agentName, {
+      screenName,
+      projectPath: existing?.projectPath || cwd,
+      startedAt: existing?.startedAt || Date.now(),
+      lastTaskAt: Date.now(),
+      currentTaskId: task.id,
+    });
+    log(`✅ 复用 Codex TUI screen: agent=${agentName} task=${task.id} session=${screenName}`);
+    return true;
+  }
+
+  const promptFile = join(STATE_DIR, `${screenName}.prompt-${safeFilePart(task.id)}.md`);
+  const launchScript = join(STATE_DIR, `${screenName}.launch.mjs`);
   writeFileSync(promptFile, prompt, "utf-8");
   const codexArgs = buildCodexTuiArgs(cwd, promptFile);
   const launcher = `#!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 const prompt = readFileSync(${JSON.stringify(promptFile)}, "utf-8");
 const args = ${JSON.stringify(codexArgs)};
-const resultFile = ${JSON.stringify(resultFile)};
-const reportScript = ${JSON.stringify(reportScript)};
-const markerFile = ${JSON.stringify(markerFile)};
 let finished = false;
 
-function runReport(status, resultPath) {
-  return new Promise((resolve) => {
-    const reporter = spawn(process.execPath, [reportScript, status, resultPath], { stdio: "inherit", env: process.env });
-    reporter.on("error", (err) => { console.error(\`MAF report launcher failed: \${err.message}\`); resolve(1); });
-    reporter.on("close", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
-  });
-}
-
-async function finish(status, exitCode, signal, fallbackMessage = "") {
+async function finish(exitCode, signal, detail = "") {
   if (finished) return;
   finished = true;
-  let finalStatus = status;
-  if (!existsSync(markerFile)) {
-    if (!existsSync(resultFile)) {
-      finalStatus = "failed";
-      const reason = fallbackMessage || (exitCode === 0
-        ? "Codex exited without writing result file or calling MAF report script"
-        : "Codex exited before MAF report: exit=" + (exitCode ?? "") + (signal ? " signal=" + signal : ""));
-      try { writeFileSync(resultFile, reason + "\\n"); } catch (err) { console.error(\`write result fallback failed: \${err.message}\`); }
-    }
-    const reportCode = await runReport(finalStatus, resultFile);
-    if (reportCode !== 0) process.exit(reportCode);
-  }
+  try {
+    await fetch(${JSON.stringify(`http://127.0.0.1:${NODE_PORT}/codex/screen-exited`)}, {
+      method: "POST",
+      headers: ${JSON.stringify({ "Content-Type": "application/json", Authorization: `Bearer ${LOCAL_AUTH_TOKEN}` })},
+      body: JSON.stringify({
+        agent_name: ${JSON.stringify(agentName)},
+        screen_name: ${JSON.stringify(screenName)},
+        exit_code: exitCode,
+        signal: signal || "",
+        detail,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {}
   process.exit(exitCode ?? (signal ? 1 : 0));
 }
 
@@ -2119,15 +2163,18 @@ args.push(prompt);
 const child = spawn(${JSON.stringify(CODEX_BIN)}, args, { cwd: ${JSON.stringify(cwd)}, stdio: "inherit", env: process.env });
 child.on("exit", (code, signal) => {
   const exitCode = code ?? (signal ? 1 : 0);
-  finish(exitCode === 0 ? "completed" : "failed", exitCode, signal);
+  finish(exitCode, signal);
 });
 child.on("error", (err) => {
-  finish("failed", 1, null, \`Codex 启动失败: \${err.message}\`);
+  finish(1, null, \`Codex 启动失败: \${err.message}\`);
 });
 `;
   writeFileSync(launchScript, launcher, { mode: 0o700 });
 
   log(`🚀 拉起 Codex TUI (screen): agent=${agentName} task=${task.id} cwd=${cwd} session=${screenName}`);
+  task.session_id = screenName;
+  const screenInfo = { screenName, projectPath: cwd, startedAt: Date.now(), lastTaskAt: Date.now(), currentTaskId: task.id };
+  codexAgentScreens.set(agentName, screenInfo);
   const ok = await new Promise((resolve) => {
     const child = spawn("screen", ["-dmS", screenName, process.execPath, launchScript], {
       cwd,
@@ -2140,12 +2187,12 @@ child.on("error", (err) => {
     child.unref();
   });
   if (!ok) {
+    if (codexAgentScreens.get(agentName) === screenInfo) codexAgentScreens.delete(agentName);
     await reportTaskResult(task, "failed", `Codex screen 拉起失败: ${screenName}`, Date.now() - started);
     return false;
   }
+  if (codexAgentScreens.get(agentName) !== screenInfo) return false;
 
-  task.session_id = screenName;
-  codexTaskScreens.set(task.id, { agentName, screenName, startedAt: Date.now(), lastTaskAt: Date.now() });
   log(`✅ Codex TUI screen 已创建: ${screenName}`);
   return true;
 }
@@ -3386,6 +3433,21 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // POST /codex/screen-exited — 持久 Codex TUI 退出，由 Daemon 收尾当前任务
+  if (req.method === "POST" && pathname === "/codex/screen-exited") {
+    const body = await readBody();
+    const agentName = String(body.agent_name || "");
+    const screenName = String(body.screen_name || "");
+    if (!agentName || !screenName) {
+      json(400, { error: "agent_name and screen_name required" });
+      return;
+    }
+    const detail = body.detail || `exit=${body.exit_code ?? ""}${body.signal ? ` signal=${body.signal}` : ""}`;
+    const handled = await handleCodexScreenExit(agentName, screenName, detail);
+    json(200, { ok: true, handled });
+    return;
+  }
+
   // POST /tasks/done — Plugin 回报任务执行结果
   if (req.method === "POST" && pathname === "/tasks/done") {
     const body = await readBody();
@@ -3418,13 +3480,14 @@ const httpServer = createServer(async (req, res) => {
 
     const reportAck = await reportTaskResult(task, status, body.result || "", body.duration_ms || 0);
 
-    if (body.task_id && codexTaskScreens.has(body.task_id)) {
-      const info = codexTaskScreens.get(body.task_id);
+    if (agentName && codexAgentScreens.has(agentName)) {
+      const info = codexAgentScreens.get(agentName);
+      if (info.currentTaskId === body.task_id) info.currentTaskId = null;
       info.lastTaskAt = Date.now();
     }
 
     // Claude Code 模式：检查队列是否有下一个任务（续传，避免等 asyncRewake）
-    // Codex detached 模式：完成后再拉起下一个 screen + TUI/exec 任务（attached 不会被 scheduleCodexQueue 调度）
+    // Codex detached 模式：完成后继续向同一个持久 screen + TUI 注入下一个任务（attached 不会被 scheduleCodexQueue 调度）
     // opencode 模式不续传（它用 long-poll 自己取）
     let nextTask = null;
     const agentInfo = agentName ? agents.get(agentName) : null;
