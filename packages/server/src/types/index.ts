@@ -34,7 +34,7 @@ export function isServerAgentName(agentName?: string | null): boolean {
   return String(agentName || '').trim() === SERVER_AGENT_NAME;
 }
 
-export type AgentStatus = 'online' | 'standby' | 'offline' | 'busy' | 'dead';
+export type AgentStatus = 'online' | 'standby' | 'offline' | 'busy' | 'dead' | 'stopped';
 
 /** Agent 运行时类型：决定 Client 端使用哪个 CLI 工具执行 */
 export type AgentRuntime = 'opencode' | 'claude-code' | 'codex';
@@ -86,7 +86,7 @@ export interface Agent {
   user_id: string;             // 用户标识
   host_user: string;               // 宿主机用户名
   client_endpoint: string;         // Client 地址
-  status: AgentStatus;             // online/standby/offline/busy/dead
+  status: AgentStatus;             // online/standby/offline/busy/dead/stopped
   last_heartbeat: string;          // ISO timestamp
   agent_name: string;              // Agent 名称
   project_path: string;            // 项目路径
@@ -556,7 +556,7 @@ export interface SSEEvent {
         'heartbeat' | 'agents_synced' | 'registry_synced' |
         'workflow_started' | 'workflow_node_running' | 'workflow_node_completed' |
         'workflow_node_failed' | 'workflow_completed' | 'workflow_failed' |
-        'agent_launched' | 'agent_execute' |
+        'agent_launched' | 'agent_execute' | 'agent_stopped' | 'agent_started' |
         'evolve_started' | 'evolve_completed' | 'evolve_failed' |
         'proposal_created' | 'proposal_reviewed' | 'proposal_applied' |
         'server_shutdown';

@@ -240,6 +240,27 @@ class CodexConversationService {
     `).get(conversationId) as CodexTurn | undefined;
   }
 
+  interruptActiveTurnsForAgent(agentId: string, reason: string): string[] {
+    const conversations = this.list(500, agentId);
+    const interrupted: string[] = [];
+    const now = nowIso();
+    for (const conversation of conversations) {
+      const turn = this.activeTurn(conversation.id);
+      if (!turn) continue;
+      getDb().prepare(`
+        UPDATE codex_turns SET status = 'interrupted', error = ?, completed_at = ?, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'starting', 'running')
+      `).run(reason, now, now, turn.id);
+      this.setConversationStatus(conversation.id, 'reconnecting');
+      this.appendInternalEvent(conversation.id, turn.id, 'maf/interruptRequested', {
+        reason,
+        source: 'agent_stop',
+      });
+      interrupted.push(turn.id);
+    }
+    return interrupted;
+  }
+
   setTurnStarted(id: string, remoteTurnId: string): void {
     const now = nowIso();
     getDb().prepare(`

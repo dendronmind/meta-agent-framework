@@ -118,6 +118,7 @@ const LOCAL_TOKEN_FILE = join(AUTH_DIR, "local-token");
 const SERVER_PUBLIC_KEY_FILE = join(AUTH_DIR, "server-public.pem");
 const USER_ID_FILE = join(AUTH_DIR, "user-id");
 const AGENT_INVENTORY_FILE = join(STATE_DIR, "state", "agent-inventory.json");
+const STOPPED_AGENTS_FILE = join(STATE_DIR, "state", "stopped-agents.json");
 
 function readText(path) {
   try { return readFileSync(path, "utf-8").trim(); } catch { return ""; }
@@ -398,6 +399,57 @@ let CLIENT_BUNDLE_HASH = currentClientBundleHash();
 // ============================================================
 // agents Map: agent_name → { runtime, pluginPid, directory, registered, sessionId, lastSeen, visibility }
 const agents = new Map();
+const stoppedAgents = new Map(); // agent_name → { agent_name, runtime, directory, stopped_at, reason, visibility }
+
+function isAgentStopped(agentName) {
+  return stoppedAgents.has(String(agentName || ""));
+}
+
+function persistStoppedAgents() {
+  const temporary = `${STOPPED_AGENTS_FILE}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(STOPPED_AGENTS_FILE), { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, `${JSON.stringify({ version: 1, agents: [...stoppedAgents.values()] }, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, STOPPED_AGENTS_FILE);
+  } catch (err) {
+    try { unlinkSync(temporary); } catch {}
+    log(`⚠ stopped Agent 状态保存失败: ${err.message}`);
+  }
+}
+
+function restoreStoppedAgents() {
+  if (!existsSync(STOPPED_AGENTS_FILE)) return;
+  try {
+    const parsed = JSON.parse(readFileSync(STOPPED_AGENTS_FILE, "utf-8"));
+    const entries = Array.isArray(parsed?.agents) ? parsed.agents : [];
+    for (const entry of entries) {
+      const agentName = String(entry?.agent_name || "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(agentName) || isServerAgentName(agentName)) continue;
+      const current = agents.get(agentName);
+      const record = {
+        agent_name: agentName,
+        runtime: String(entry.runtime || current?.runtime || "opencode"),
+        directory: String(entry.directory || current?.directory || DIRECTORY),
+        stopped_at: String(entry.stopped_at || new Date().toISOString()),
+        reason: String(entry.reason || ""),
+        visibility: entry.visibility === "local-only" ? "local-only" : resolveAgentVisibility(agentName),
+      };
+      stoppedAgents.set(agentName, record);
+      agents.set(agentName, {
+        runtime: record.runtime,
+        pluginPid: 0,
+        directory: record.directory,
+        registered: false,
+        sessionId: "",
+        lastSeen: 0,
+        visibility: record.visibility,
+      });
+    }
+    if (stoppedAgents.size > 0) log(`📦 恢复 ${stoppedAgents.size} 个 stopped Agent 门禁`);
+  } catch (err) {
+    log(`⚠ stopped Agent 状态读取失败: ${err.message}`);
+  }
+}
 
 function persistCodexAgentInventory() {
   const entries = [...agents.entries()]
@@ -447,6 +499,7 @@ function restoreCodexAgentInventory() {
 }
 
 restoreCodexAgentInventory();
+restoreStoppedAgents();
 
 function publishedAgentEntries() {
   return [...agents.entries()].filter(([, info]) => info.visibility === "published");
@@ -600,6 +653,7 @@ function codexAttachedUnavailableMessage(agentName, task = {}) {
 
 function codexConversationAgent(body = {}) {
   const agentName = String(body.agent_name || "");
+  if (isAgentStopped(agentName)) throw new Error(`Agent 已停止: ${agentName}`);
   const info = agents.get(agentName);
   if (!agentName || !info || info.runtime !== "codex" || info.visibility !== "published") {
     throw new Error(`Codex Agent 不可用于实时对话: ${agentName || "missing"}`);
@@ -1641,6 +1695,7 @@ function isProcessAlive(pid) {
 function pruneDeadAgents() {
   const now = Date.now();
   for (const [name, info] of agents) {
+    if (isAgentStopped(name)) continue;
     const q = taskQueues.get(name);
     if (q?.executingTaskId) continue;  // 正在执行任务，不清理
 
@@ -1676,6 +1731,11 @@ function getAgentStatuses(agentEntries = agents) {
   const statuses = {};
   for (const [name, info] of agentEntries) {
     const q = taskQueues.get(name);
+
+    if (isAgentStopped(name)) {
+      statuses[name] = "stopped";
+      continue;
+    }
 
     // Codex 在线状态只表示真实执行器存活；Daemon 可达但执行器尚未拉起时是 standby。
     if (info.runtime === "codex") {
@@ -1757,6 +1817,10 @@ const SERVE_IDLE_TIMEOUT = 10 * 60_000; // 10 分钟无任务自动退出
  * 返回 true=拉起成功, false=失败
  */
 async function spawnAgent(agentName, projectPath, agentRuntime) {
+  if (isAgentStopped(agentName)) {
+    log(`⛔ 拒绝拉起 stopped Agent: ${agentName}`);
+    return false;
+  }
   const screenName = `maf-${agentName}`;
 
   // 已有 screen 在跑，直接复用
@@ -1875,11 +1939,190 @@ function closeWaitingResponse(q, payload = { task: null }) {
 
 function closeServeScreen(agentName, reason = "") {
   const info = serveProcesses.get(agentName);
-  if (!info) return false;
-  log(`🗑 关闭旧 agent screen: ${agentName} (${info.screenName})${reason ? ` — ${reason}` : ""}`);
-  try { execSync(`screen -S ${info.screenName} -X quit 2>/dev/null`, { stdio: "ignore" }); } catch {}
+  const screenName = info?.screenName || `maf-${agentName}`;
+  if (!screenSessionExists(screenName)) {
+    serveProcesses.delete(agentName);
+    return false;
+  }
+  log(`🗑 关闭 MAF agent screen: ${agentName} (${screenName})${reason ? ` — ${reason}` : ""}`);
+  try { execFileSync("screen", ["-S", screenName, "-X", "quit"], { stdio: "ignore", timeout: 5000 }); } catch {}
   serveProcesses.delete(agentName);
   return true;
+}
+
+function agentActivity(agentName) {
+  const q = taskQueues.get(agentName);
+  const bridges = codexAgentBridges(agentName);
+  return {
+    pending_tasks: (q?.pending || []).map(task => String(task?.id || "")).filter(Boolean),
+    executing_task: String(q?.executingTaskId || ""),
+    active_turns: bridges.filter(bridge => bridge.activeMafTurnId).map(bridge => bridge.activeMafTurnId),
+  };
+}
+
+function hasAgentActivity(agentName) {
+  const activity = agentActivity(agentName);
+  return activity.pending_tasks.length > 0 || Boolean(activity.executing_task) || activity.active_turns.length > 0;
+}
+
+function inspectAttachedReceiverProcess(pid, agentName) {
+  const numericPid = Number(pid || 0);
+  if (!numericPid || !isProcessAlive(numericPid)) return { alive: false, verified: true, matches: false };
+  if (process.platform !== "linux") return { alive: true, verified: false, matches: false };
+  try {
+    const args = readFileSync(`/proc/${numericPid}/cmdline`).toString("utf-8").split("\0").filter(Boolean);
+    const env = {};
+    for (const entry of readFileSync(`/proc/${numericPid}/environ`).toString("utf-8").split("\0")) {
+      const index = entry.indexOf("=");
+      if (index > 0) env[entry.slice(0, index)] = entry.slice(index + 1);
+    }
+    const receiverScript = args.some(arg => /(^|\/)maf-codex-attached-receiver\.mjs$/.test(arg));
+    const matches = receiverScript
+      && String(env.MAF_AGENT_NAME || env.MAF_CODEX_AGENT || "") === String(agentName);
+    return { alive: true, verified: true, matches };
+  } catch {
+    return { alive: isProcessAlive(numericPid), verified: false, matches: false };
+  }
+}
+
+async function stopAttachedReceiver(agentName, pid, reason) {
+  let identity = inspectAttachedReceiverProcess(pid, agentName);
+  if (!identity.alive) return true;
+  if (!identity.verified || !identity.matches) {
+    log(`ℹ️ 不终止未经验证的前台进程: agent=${agentName} pid=${pid}`);
+    return false;
+  }
+  try { process.kill(pid, "SIGTERM"); } catch {}
+  const deadline = Date.now() + 3000;
+  while (isProcessAlive(pid) && Date.now() < deadline) await waitMs(50);
+  if (!isProcessAlive(pid)) return true;
+  identity = inspectAttachedReceiverProcess(pid, agentName);
+  if (!identity.verified || !identity.matches) return false;
+  try { process.kill(pid, "SIGKILL"); } catch {}
+  return !isProcessAlive(pid);
+}
+
+async function closeAgentCodexBridges(agentName, force) {
+  let interrupted = 0;
+  let closed = 0;
+  for (const bridge of codexAgentBridges(agentName)) {
+    if (force && bridge.activeMafTurnId) {
+      const remoteTurnIds = [...bridge.remoteTurnToMaf.keys()];
+      for (const remoteTurnId of remoteTurnIds) {
+        try {
+          await bridge.request("turn/interrupt", { threadId: bridge.threadId, turnId: remoteTurnId }, 15_000);
+          interrupted++;
+        } catch {}
+      }
+    }
+    await bridge.close().catch(() => {});
+    closed++;
+  }
+  for (const [taskId, binding] of codexManagedTaskBindings) {
+    if (binding?.bridge?.agentName === agentName) codexManagedTaskBindings.delete(taskId);
+  }
+  return { closed, interrupted };
+}
+
+async function stopAgentLocally(agentName, options = {}) {
+  const force = options.force === true;
+  const existing = agents.get(agentName);
+  const previous = stoppedAgents.get(agentName);
+  const runtime = String(options.runtime || existing?.runtime || previous?.runtime || "opencode");
+  const directory = String(options.directory || existing?.directory || previous?.directory || DIRECTORY);
+  const visibility = existing?.visibility || previous?.visibility || resolveAgentVisibility(agentName);
+  const reason = String(options.reason || "Agent stopped by Server");
+  const q = taskQueues.get(agentName);
+
+  if (hasAgentActivity(agentName) && !force) {
+    return { stopped: false, conflict: true, activity: agentActivity(agentName) };
+  }
+
+  if (force && q) {
+    const pending = q.pending.splice(0);
+    for (const task of pending) {
+      task._cancelled = true;
+      for (const key of executionKeys(task)) rememberCancelledExecution(key);
+    }
+    if (q.lastExecuted) await cancelRunningTask(q.lastExecuted, reason).catch(() => false);
+    q.executingTaskId = null;
+    q.lastExecuted = null;
+  }
+  closeWaitingResponse(q, { task: null, stopped: true, status: "stopped" });
+
+  const codex = await closeAgentCodexBridges(agentName, force);
+  const attachedReceiverStopped = runtime === "codex" && existing?.pluginPid
+    ? await stopAttachedReceiver(agentName, existing.pluginPid, reason)
+    : false;
+  const serveScreenStopped = closeServeScreen(agentName, "agent stopped");
+  const codexScreenName = codexAgentScreens.get(agentName)?.screenName || `maf-codex-${safeFilePart(agentName)}`;
+  let codexScreenStopped = false;
+  if (runtime === "codex" && screenSessionExists(codexScreenName)) {
+    try {
+      execFileSync("screen", ["-S", codexScreenName, "-X", "quit"], { stdio: "ignore", timeout: 5000 });
+      codexScreenStopped = true;
+    } catch {}
+  }
+  codexAgentScreens.delete(agentName);
+  codexQueueRunners.delete(agentName);
+  managedExecutionQueueRunners.delete(agentName);
+
+  for (const entry of workflowTracker.values()) {
+    if (entry.agent_name === agentName && (entry.status === "pending" || entry.status === "running")) {
+      entry.status = "cancelled";
+      entry.completed_at = new Date().toISOString();
+      entry.result = reason;
+    }
+  }
+
+  stoppedAgents.set(agentName, {
+    agent_name: agentName,
+    runtime,
+    directory,
+    stopped_at: new Date().toISOString(),
+    reason,
+    visibility,
+  });
+  agents.set(agentName, {
+    runtime,
+    pluginPid: 0,
+    directory,
+    registered: existing?.registered || false,
+    sessionId: "",
+    lastSeen: 0,
+    visibility,
+  });
+  persistStoppedAgents();
+  if (runtime === "codex") persistCodexAgentInventory();
+  log(`📴 Agent 已停止: ${agentName} (runtime=${runtime}, force=${force})`);
+  return {
+    stopped: true,
+    status: "stopped",
+    activity: agentActivity(agentName),
+    executors: { ...codex, attached_receiver_stopped: attachedReceiverStopped, serve_screen_stopped: serveScreenStopped, codex_screen_stopped: codexScreenStopped },
+  };
+}
+
+function startAgentLocally(agentName, options = {}) {
+  const record = stoppedAgents.get(agentName);
+  const existing = agents.get(agentName);
+  if (!record) return { started: true, already_started: true, status: getAgentStatuses()[agentName] || "offline" };
+  stoppedAgents.delete(agentName);
+  persistStoppedAgents();
+  const runtime = String(options.runtime || existing?.runtime || record.runtime || "opencode");
+  agents.set(agentName, {
+    runtime,
+    pluginPid: existing?.pluginPid || 0,
+    directory: String(options.directory || existing?.directory || record.directory || DIRECTORY),
+    registered: existing?.registered || false,
+    sessionId: existing?.sessionId || "",
+    lastSeen: existing?.lastSeen || 0,
+    visibility: existing?.visibility || record.visibility || resolveAgentVisibility(agentName),
+  });
+  if (runtime === "codex") persistCodexAgentInventory();
+  const status = getAgentStatuses()[agentName] || "offline";
+  log(`🔌 Agent stopped 门禁已解除: ${agentName} (status=${status})`);
+  return { started: true, status };
 }
 
 function retireIdleSameAgentInstance(agentName, existing, incomingPid) {
@@ -1917,6 +2160,7 @@ function cleanDeadAgents() {
   const now = Date.now();
   const DEAD_TIMEOUT = 60 * 60_000;
   for (const [name, info] of agents) {
+    if (isAgentStopped(name)) continue;
     if (info.runtime === "codex") continue;
     if (now - (info.lastSeen || 0) > DEAD_TIMEOUT) {
       agents.delete(name);
@@ -2223,7 +2467,11 @@ async function registerToServer() {
   if (!await ensureEnrollment()) return;
   const agentDefs = [];
   for (const [name, info] of published) {
-    agentDefs.push(findAgentDef(name, info.runtime, info.directory));
+    const definition = findAgentDef(name, info.runtime, info.directory);
+    definition.agent_name = name;
+    definition.runtime = info.runtime || definition.runtime;
+    definition.project_path = info.directory || definition.project_path;
+    agentDefs.push(definition);
   }
 
   try {
@@ -2356,6 +2604,10 @@ async function reportAgentStatusToServer(agentName, status) {
 // 任务队列：按 agent_name 路由
 // ============================================================
 function enqueueTask(agentName, task) {
+  if (isAgentStopped(agentName)) {
+    log(`⛔ ${agentName} 已停止，拒绝任务: "${task?.title || task?.id || "unknown"}"`);
+    return false;
+  }
   const q = getAgentQueue(agentName);
   if (q.pending.length >= MAX_QUEUE_SIZE) {
     log(`⚠ ${agentName} 队列已满 (${MAX_QUEUE_SIZE})，拒绝: "${task.title}"`);
@@ -3062,6 +3314,7 @@ async function executeManagedExecutionTask(agentName, task, runtime, projectPath
 }
 
 function enqueueManagedExecutionTask(agentName, task) {
+  if (isAgentStopped(agentName)) return false;
   const q = getAgentQueue(agentName);
   if (q.pending.length >= MAX_QUEUE_SIZE) return false;
   q.pending.push(task);
@@ -3072,6 +3325,7 @@ async function runManagedExecutionQueue(agentName, runtime) {
   const q = getAgentQueue(agentName);
   try {
     while (q.pending.some(task => task?.run_context)) {
+      if (isAgentStopped(agentName)) break;
       if (q.executingTaskId) { await waitMs(1000); continue; }
       const index = q.pending.findIndex(task => task?.run_context);
       if (index < 0) break;
@@ -3095,6 +3349,7 @@ async function runManagedExecutionQueue(agentName, runtime) {
 }
 
 function scheduleManagedExecutionQueue(agentName, runtime) {
+  if (isAgentStopped(agentName)) return;
   if (managedExecutionQueueRunners.has(agentName)) return;
   managedExecutionQueueRunners.add(agentName);
   setImmediate(() => runManagedExecutionQueue(agentName, runtime).catch(err => {
@@ -3124,8 +3379,10 @@ async function runQueuedCodexManagedTask(agentName, task, agentInfo) {
 async function runCodexQueue(agentName) {
   const q = getAgentQueue(agentName);
   try {
+    if (isAgentStopped(agentName)) return;
     if (CODEX_MODE === "exec") {
       while (q.pending.length > 0) {
+        if (isAgentStopped(agentName)) break;
         const task = q.pending[0];
         if (!task) { q.pending.shift(); continue; }
         const agentInfo = agents.get(agentName);
@@ -3197,6 +3454,7 @@ async function runCodexQueue(agentName) {
 }
 
 function scheduleCodexQueue(agentName) {
+  if (isAgentStopped(agentName)) return;
   const agentInfo = agents.get(agentName);
   if (agentInfo?.runtime !== "codex") return;
   const q = getAgentQueue(agentName);
@@ -3217,6 +3475,7 @@ async function pollTasks() {
   const published = publishedAgentEntries();
   if (published.length === 0) return;
   for (const [name] of published) {
+    if (isAgentStopped(name)) continue;
     const q = getAgentQueue(name);
     if (q.pending.length > 0) continue;
     try {
@@ -3633,6 +3892,29 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/agents/stop") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    const body = await readBody();
+    const agentName = String(body.agent_name || "");
+    if (!agentName) { json(400, { error: "agent_name required" }); return; }
+    const result = await stopAgentLocally(agentName, body);
+    if (result.conflict) {
+      json(409, { error: "Agent has active work", activity: result.activity });
+      return;
+    }
+    json(200, { ok: true, agent_name: agentName, ...result });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/agents/start") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    const body = await readBody();
+    const agentName = String(body.agent_name || "");
+    if (!agentName) { json(400, { error: "agent_name required" }); return; }
+    json(200, { ok: true, agent_name: agentName, ...startAgentLocally(agentName, body) });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/codex/conversations/start") {
     if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
     try {
@@ -3690,6 +3972,28 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
 
+    if (isAgentStopped(name)) {
+      const stopped = stoppedAgents.get(name);
+      const current = agents.get(name);
+      const visibility = resolveAgentVisibility(name);
+      const runtime = body.runtime || current?.runtime || stopped?.runtime || "opencode";
+      const directory = body.directory || current?.directory || stopped?.directory || DIRECTORY;
+      agents.set(name, {
+        runtime,
+        pluginPid: body.plugin_pid || 0,
+        directory,
+        registered: current?.registered || false,
+        sessionId: body.session_id || "",
+        lastSeen: Date.now(),
+        visibility,
+      });
+      stoppedAgents.set(name, { ...stopped, agent_name: name, runtime, directory, visibility });
+      persistStoppedAgents();
+      if (runtime === "codex") persistCodexAgentInventory();
+      json(423, { ok: false, stopped: true, status: "stopped", agent_name: name });
+      return;
+    }
+
     const existing = agents.get(name);
     const incomingPid = body.plugin_pid || 0;
     retireIdleSameAgentInstance(name, existing, incomingPid);
@@ -3730,6 +4034,14 @@ const httpServer = createServer(async (req, res) => {
     if (isServerAgentName(name)) {
       log(`ℹ️ 忽略 Server 控制面断开，不按 Agent 注销: ${name}`);
       json(200, { ok: true, ignored: true, kind: "server", agents: agentNamesForRequest(req) });
+      return;
+    }
+    if (name && isAgentStopped(name)) {
+      const info = agents.get(name);
+      if (info) {
+        agents.set(name, { ...info, pluginPid: 0, sessionId: "", lastSeen: 0 });
+      }
+      json(200, { ok: true, retained: true, stopped: true, status: "stopped", agents: agentNamesForRequest(req) });
       return;
     }
     if (name && agents.has(name)) {
@@ -3835,6 +4147,10 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/agent") {
     const body = await readBody();
     if (body.agent_name) {
+      if (isAgentStopped(body.agent_name)) {
+        json(423, { ok: false, stopped: true, status: "stopped", agent_name: body.agent_name });
+        return;
+      }
       const visibility = resolveAgentVisibility(body.agent_name);
       const info = {
         runtime: body.runtime || "opencode",
@@ -3921,6 +4237,10 @@ const httpServer = createServer(async (req, res) => {
     }
     if (resolveAgentVisibility(targetAgent) !== "published") {
       json(404, { error: "not found" });
+      return;
+    }
+    if (isAgentStopped(targetAgent)) {
+      json(423, { accepted: false, stopped: true, status: "stopped", agent: targetAgent, error_code: "AGENT_NOT_DISPATCHABLE", error: "Agent is stopped" });
       return;
     }
 
@@ -4093,6 +4413,10 @@ const httpServer = createServer(async (req, res) => {
   // GET|POST /tasks/take — 取走任务（Claude Code: wait 通知后 take 取走）
   if ((req.method === "GET" || req.method === "POST") && pathname === "/tasks/take") {
     const agent = urlObj.searchParams.get("agent");
+    if (agent && isAgentStopped(agent)) {
+      json(423, { task: null, stopped: true, status: "stopped" });
+      return;
+    }
     // 按 agent 取
     if (agent) {
       const q = taskQueues.get(agent);
@@ -4136,6 +4460,10 @@ const httpServer = createServer(async (req, res) => {
 
     if (!targetAgent) {
       json(400, { error: "agent param required" });
+      return;
+    }
+    if (isAgentStopped(targetAgent)) {
+      json(423, { task: null, stopped: true, status: "stopped" });
       return;
     }
 
@@ -4218,6 +4546,10 @@ const httpServer = createServer(async (req, res) => {
     const taskId = body.task_id;
     if (!agentName || !taskId) {
       json(400, { error: "agent_name and task_id required" });
+      return;
+    }
+    if (isAgentStopped(agentName)) {
+      json(423, { error: "Agent is stopped", stopped: true, status: "stopped" });
       return;
     }
     const q = taskQueues.get(agentName);
@@ -4457,30 +4789,16 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // POST /shutdown — daemon=true 时退出 Daemon；否则兼容旧版：清理指定 agent
+  // POST /shutdown — 仅保留 Daemon 自更新重启；单 Agent 生命周期必须走签名控制端点。
   if (req.method === "POST" && pathname === "/shutdown") {
     const body = await readBody();
-    const agent = body.agent_name;
-    if (body.daemon === true || !agent) {
+    if (body.daemon === true) {
       log(`📴 shutdown: Daemon 退出${body.reason ? ` (${body.reason})` : ""}`);
       json(200, { ok: true, shutdown: true });
       setTimeout(() => process.exit(0), 100).unref?.();
       return;
     }
-    if (agent && agents.has(agent)) {
-      agents.delete(agent);
-      const q = taskQueues.get(agent);
-      if (q?.waitingResponse) {
-        try { q.waitingResponse.writeHead(200, { "Content-Type": "application/json" }); q.waitingResponse.end('{"task":null}'); } catch {}
-      }
-      taskQueues.delete(agent);
-      log(`📴 shutdown: 清理 agent ${agent} (剩余=[${[...agents.keys()].join(", ")}])`);
-    }
-    // Node Daemon 常驻——即使没有 agent 也不退出，等待新连接或 Server 推任务
-    json(200, {
-      ok: true,
-      agents: String(req.headers["x-maf-role"] || "") === "server" ? publishedAgentNames() : [...agents.keys()],
-    });
+    json(410, { error: "Agent shutdown moved to Server POST /api/agents/:id/stop" });
     return;
   }
 

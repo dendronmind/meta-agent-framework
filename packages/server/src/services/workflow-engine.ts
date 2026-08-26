@@ -603,7 +603,7 @@ export class WorkflowEngine {
     }
 
     // 注册表保证每个 agent_name 唯一归属一个用户+机器。
-    // 优先 online，其次 standby，最后 busy；offline/dead 仅用于拓扑展示。
+    // 优先 online，其次 standby，最后 busy；offline/dead/stopped 仅用于拓扑展示。
     const dispatchable = allMatches.filter(isAgentDispatchable);
     if (allMatches.length > 1) {
       console.warn(`[Workflow] ⚠️  agent "${node.agent_name}" 有 ${allMatches.length} 条记录:`);

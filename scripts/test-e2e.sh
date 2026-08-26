@@ -50,6 +50,7 @@
 #   49 通用 Execution 两阶段 Artifact + direct repository + Gerrit
 #   50 Codex Dashboard 实时对话完整链路
 #   51 Codex managed Workflow/Task 默认投递 + 取消
+#   52 Agent stop/start 持久生命周期
 #
 set -uo pipefail
 
@@ -96,7 +97,7 @@ export -f curl
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -123,7 +124,7 @@ NEED_DAEMON=false
 NEED_CC=false
 for c in "${RUN_CASES[@]}"; do
   NEED_SERVER=true
-  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]] || [[ $c -ge 48 && $c -le 51 ]]; then NEED_DAEMON=true; fi
+  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]] || [[ $c -ge 48 && $c -le 52 ]]; then NEED_DAEMON=true; fi
   if [[ $c -eq 5 || $c -eq 7 || $c -eq 8 || $c -eq 9 || $c -eq 10 || $c -eq 11 || $c -eq 13 || $c -eq 18 ]]; then NEED_CC=true; fi
 done
 
@@ -341,7 +342,7 @@ cleanup() {
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project /tmp/e2e-codex-conversation-project /tmp/e2e-codex-managed-project /tmp/maf-e2e-codex-conversation.sse "$MOCK_CODEX_PROMPT_LOG" "$MOCK_CODEX_ARGS_LOG"
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project /tmp/e2e-codex-conversation-project /tmp/e2e-codex-managed-project /tmp/e2e-codex-lifecycle-project /tmp/maf-e2e-codex-conversation.sse /tmp/maf-e2e-lifecycle-normal-stop.json /tmp/maf-e2e-lifecycle-reconnect.json "$MOCK_CODEX_PROMPT_LOG" "$MOCK_CODEX_ARGS_LOG"
 }
 trap cleanup EXIT
 
@@ -486,7 +487,7 @@ con.commit(); con.close()
 PYDB
 
 # Codex mock：需要在 Daemon 启动前放进环境，让 Daemon 读取 CODEX_BIN
-if should_run 33 || should_run 34 || should_run 35 || should_run 38 || should_run 48 || should_run 49 || should_run 50 || should_run 51; then
+if should_run 33 || should_run 34 || should_run 35 || should_run 38 || should_run 48 || should_run 49 || should_run 50 || should_run 51 || should_run 52; then
   mkdir -p "$E2E_BIN"
   cat > "$E2E_BIN/codex" << 'CODEXMOCK'
 #!/usr/bin/env bash
@@ -575,7 +576,7 @@ CODEXMOCK
   export CODEX_BIN="$E2E_BIN/codex"
   export MOCK_CODEX_PROMPT_LOG MOCK_CODEX_ARGS_LOG
   export MOCK_CODEX_APP_SERVER_SCRIPT="$ROOT_DIR/scripts/mock-codex-app-server.mjs"
-  if should_run 49 || should_run 50 || should_run 51; then export MAF_CODEX_APP_SERVER_BIN="$E2E_BIN/codex"; fi
+  if should_run 49 || should_run 50 || should_run 51 || should_run 52; then export MAF_CODEX_APP_SERVER_BIN="$E2E_BIN/codex"; fi
 fi
 
 # 启动 Server（所有 case 都需要）
@@ -3320,6 +3321,94 @@ wait_until 10 "curl -s '$E2E_SERVER/api/codex/conversations/$CODEX_CANCEL_CONVER
 assert "Task cancel 映射到 turn interrupt" "interrupted" "$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CANCEL_CONVERSATION_ID" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next((t.get('status','') for t in reversed(d.get('turns',[])) if t.get('task_id')=='$CODEX_CANCEL_TASK_ID'),''))")"
 sleep 2.2
 assert "取消后的迟到结果不覆盖 Task" "cancelled" "$(curl -s "$E2E_SERVER/api/tasks/$CODEX_CANCEL_TASK_ID" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+fi
+
+# ============================================================
+# Case 52: Agent stop/start 持久生命周期
+# ============================================================
+if should_run 52; then
+echo -e "\n${YELLOW}Case 52: Agent stop/start 持久生命周期${NC}"
+
+LIFECYCLE_PROJECT="/tmp/e2e-codex-lifecycle-project"
+LIFECYCLE_AGENT="codex-lifecycle-e2e"
+LIFECYCLE_PEER="codex-lifecycle-peer-e2e"
+rm -rf "$LIFECYCLE_PROJECT"
+mkdir -p "$LIFECYCLE_PROJECT"
+create_codex_agent_toml "$LIFECYCLE_PROJECT" "$LIFECYCLE_AGENT" "Codex lifecycle e2e agent"
+create_codex_agent_toml "$LIFECYCLE_PROJECT" "$LIFECYCLE_PEER" "Codex lifecycle isolation peer"
+
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$LIFECYCLE_AGENT\",\"runtime\":\"codex\",\"directory\":\"$LIFECYCLE_PROJECT\"}" >/dev/null
+curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$LIFECYCLE_PEER\",\"runtime\":\"codex\",\"directory\":\"$LIFECYCLE_PROJECT\"}" >/dev/null
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "standby" || true
+wait_until 10 "get_agent_field status '$LIFECYCLE_PEER'" "standby" || true
+assert "生命周期 Agent 初始待启动" "standby" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+assert "同机 Agent 初始待启动" "standby" "$(get_agent_field status "$LIFECYCLE_PEER")"
+
+LIFECYCLE_AGENT_ID=$(curl -s "$E2E_SERVER/api/agents?all=true" | python3 -c "import json,sys;print(next((a.get('id','') for a in json.load(sys.stdin) if a.get('agent_name')=='$LIFECYCLE_AGENT'),''))")
+LIFECYCLE_CONVERSATION=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations" -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$LIFECYCLE_AGENT_ID\"}")
+LIFECYCLE_CONVERSATION_ID=$(echo "$LIFECYCLE_CONVERSATION" | python3 -c "import json,sys;print(json.load(sys.stdin).get('conversation',{}).get('id',''))")
+assert "生命周期 conversation 已打开" "true" "$([ -n "$LIFECYCLE_CONVERSATION_ID" ] && echo true || echo false)"
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "online" || true
+assert "私有 app-server 存活才显示在线" "online" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+
+LOCAL_STOP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/agents/stop" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$LIFECYCLE_AGENT\",\"force\":true}")
+assert "local-token 不能伪造 Server lifecycle 控制" "403" "$LOCAL_STOP_CODE"
+
+curl -s -X POST "$E2E_SERVER/api/codex/conversations/$LIFECYCLE_CONVERSATION_ID/turns" \
+  -H 'Content-Type: application/json' -d '{"input":"MAF_E2E_SLOW_TURN lifecycle stop conflict"}' >/dev/null
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "busy" || true
+NORMAL_STOP_FILE="/tmp/maf-e2e-lifecycle-normal-stop.json"
+NORMAL_STOP_CODE=$(curl -s -o "$NORMAL_STOP_FILE" -w '%{http_code}' -X POST "$E2E_SERVER/api/agents/$LIFECYCLE_AGENT_ID/stop" \
+  -H 'Content-Type: application/json' -d '{"force":false,"reason":"lifecycle e2e normal stop"}')
+assert "活动 turn 时普通 stop 返回冲突" "409" "$NORMAL_STOP_CODE"
+assert "普通 stop 返回活动 turn 明细" "turns" "$(cat "$NORMAL_STOP_FILE")"
+
+FORCE_STOP=$(curl -s -X POST "$E2E_SERVER/api/agents/$LIFECYCLE_AGENT_ID/stop" -H 'Content-Type: application/json' \
+  -d '{"force":true,"reason":"lifecycle e2e force stop"}')
+assert "明确 force 后 stop 成功" '"status":"stopped"' "$FORCE_STOP"
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "stopped" || true
+assert "Agent 状态持久门禁为 stopped" "stopped" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+assert "停止一个 Agent 不影响同机其它 Agent" "standby" "$(get_agent_field status "$LIFECYCLE_PEER")"
+assert "stopped 状态落盘" "$LIFECYCLE_AGENT" "$(cat "$E2E_USER_HOME/.meta-agent-framework/state/stopped-agents.json")"
+LIFECYCLE_IDENTITY=$(curl -s "$E2E_SERVER/api/agents?all=true" | python3 -c "import json,sys;d=next(a for a in json.load(sys.stdin) if a.get('id')=='$LIFECYCLE_AGENT_ID');print(d.get('user_id','')+'|'+d.get('host_user',''))")
+LIFECYCLE_USER_ID=${LIFECYCLE_IDENTITY%%|*}
+LIFECYCLE_HOST_USER=${LIFECYCLE_IDENTITY#*|}
+curl -s -X POST "$E2E_SERVER/api/clients/heartbeat" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"$LIFECYCLE_USER_ID\",\"host_user\":\"$LIFECYCLE_HOST_USER\",\"agent_statuses\":{\"$LIFECYCLE_AGENT\":\"online\"}}" >/dev/null
+assert "陈旧 online 心跳不能解除 stopped" "stopped" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+
+STOPPED_CONVERSATION_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVER/api/codex/conversations" \
+  -H 'Content-Type: application/json' -d "{\"agent_id\":\"$LIFECYCLE_AGENT_ID\"}")
+assert "stopped Agent 不能打开 conversation" "409" "$STOPPED_CONVERSATION_CODE"
+STOPPED_EXECUTE=$(server_signed_fetch "$DAEMON_URL/execute" POST \
+  "{\"target_agent\":\"$LIFECYCLE_AGENT\",\"runtime\":\"codex\",\"prompt\":\"must reject\"}")
+assert "Daemon 拒绝 stopped Agent 新任务" "HTTP:423" "$STOPPED_EXECUTE"
+STOPPED_RECONNECT_CODE=$(curl -s -o /tmp/maf-e2e-lifecycle-reconnect.json -w '%{http_code}' -X POST "$DAEMON_URL/agents/connect" \
+  -H 'Content-Type: application/json' -d "{\"agent_name\":\"$LIFECYCLE_AGENT\",\"runtime\":\"codex\",\"directory\":\"$LIFECYCLE_PROJECT\"}")
+assert "Plugin/Hook 重连不能解除 stopped" "423" "$STOPPED_RECONNECT_CODE"
+assert "重连响应明确 stopped" '"stopped":true' "$(cat /tmp/maf-e2e-lifecycle-reconnect.json)"
+
+LIFECYCLE_DAEMON_PID=$(curl -s "$DAEMON_URL/health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('pid',''))")
+kill -9 "$LIFECYCLE_DAEMON_PID" 2>/dev/null || true
+wait_until 20 "curl -s '$DAEMON_URL/health'" '"ok":true' || true
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "stopped" || true
+assert "Daemon 重启后仍保持 stopped" "stopped" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+
+LIFECYCLE_START=$(curl -s -X POST "$E2E_SERVER/api/agents/$LIFECYCLE_AGENT_ID/start" -H 'Content-Type: application/json' \
+  -d '{"reason":"lifecycle e2e start"}')
+assert "start 解除 stopped 门禁" '"status":"standby"' "$LIFECYCLE_START"
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "standby" || true
+assert "start 不伪报在线" "standby" "$(get_agent_field status "$LIFECYCLE_AGENT")"
+
+LIFECYCLE_REOPEN=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations" -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$LIFECYCLE_AGENT_ID\"}")
+assert "start 后可恢复远端 conversation" "$LIFECYCLE_CONVERSATION_ID" "$LIFECYCLE_REOPEN"
+wait_until 10 "get_agent_field status '$LIFECYCLE_AGENT'" "online" || true
+assert "执行器重新存活后才恢复 online" "online" "$(get_agent_field status "$LIFECYCLE_AGENT")"
 fi
 
 # ============================================================

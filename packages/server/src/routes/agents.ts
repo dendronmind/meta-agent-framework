@@ -4,6 +4,8 @@ import { healthMonitor } from '../services/health-monitor';
 import { getRegistry } from '../services/registry';
 import { getConfig } from '../config';
 import { buildClientOtaBundle, getClientOtaBundleHash, pushClientOta } from '../services/client-ota';
+import { requireAdminAuth } from '../auth';
+import { agentLifecycleService, AgentLifecycleError } from '../services/agent-lifecycle-service';
 import type { ClientRegisterPayload, HeartbeatPayload } from '../types';
 
 const router = Router();
@@ -159,7 +161,7 @@ const pluginInstances = new Map<string, any[]>();
 /**
  * GET /api/agents
  * 支持 ?fields=agent_name,status,runtime 过滤返回字段（逗号分隔）
- * 默认去重：同名 agent 只保留最近心跳的一条；状态包含 online/standby/busy/offline/dead
+ * 默认去重：同名 agent 只保留最近心跳的一条；状态包含 online/standby/busy/stopped/offline/dead
  * ?all=true 返回全部（含重复）
  * ?include_server=true 诊断时返回控制面 Server 身份；默认不把 Server 当 Agent 展示/统计
  */
@@ -210,6 +212,36 @@ router.delete('/agents/:id', (req: Request, res: Response) => {
     return;
   }
   res.json(agent);
+});
+
+function sendLifecycleError(res: Response, error: unknown): void {
+  if (error instanceof AgentLifecycleError) {
+    res.status(error.status).json({ error: error.message, ...error.detail });
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  res.status(500).json({ error: message });
+}
+
+/** POST /api/agents/:id/stop — 停止单个远端 Agent，不退出共享 Daemon。 */
+router.post('/agents/:id/stop', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    res.json(await agentLifecycleService.stop(String(req.params.id), {
+      force: req.body?.force === true,
+      reason: req.body?.reason,
+    }));
+  } catch (error) {
+    sendLifecycleError(res, error);
+  }
+});
+
+/** POST /api/agents/:id/start — 解除 stopped 门禁，返回远端真实执行器状态。 */
+router.post('/agents/:id/start', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    res.json(await agentLifecycleService.start(String(req.params.id), { reason: req.body?.reason }));
+  } catch (error) {
+    sendLifecycleError(res, error);
+  }
 });
 
 /** GET /api/agents/stats */

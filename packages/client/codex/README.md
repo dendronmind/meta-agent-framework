@@ -80,6 +80,21 @@ Use `delivery_mode: "detached"` for the legacy screen/TUI path, or
 Managed formal Executions still run the existing workspace/repository lock,
 read-only gate, runtime directory environment, and Gerrit finalization.
 
+## Remote Agent lifecycle
+
+The Server controls one Agent through `POST /api/agents/:id/stop` and
+`POST /api/agents/:id/start`. Stop persists a `stopped` gate in
+`$MAF_HOME/state/stopped-agents.json`, closes that Agent's MAF-owned private
+app-server and detached screen, and terminates an attached receiver only after
+verifying its Linux process identity. It never kills a user-started foreground
+Codex TUI and never exits the machine-wide Node Daemon.
+
+An Agent with active work rejects normal stop. An explicitly forced stop first
+cancels Server Task/Workflow/Execution state, interrupts active managed turns,
+and then terminates local execution. Plugin or hook reconnects cannot clear the
+gate. Start only removes the gate; status returns to `standby`, `offline`, or
+`online` according to the executor that is actually alive.
+
 ## Persistent detached Codex TUI compatibility
 
 Explicit detached delivery keeps one background screen per agent, named

@@ -27,7 +27,7 @@ export class HealthMonitor {
     const agents = agentRegistry.listAll();
 
     for (const agent of agents) {
-      if ((agent.status as string) === 'dead') continue;
+      if ((agent.status as string) === 'dead' || (agent.status as string) === 'stopped') continue;
 
       const elapsed = now - new Date(agent.last_heartbeat).getTime();
 

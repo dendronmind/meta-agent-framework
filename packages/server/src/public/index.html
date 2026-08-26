@@ -215,6 +215,7 @@
     .pill.running, .pill.busy, .pill.active { color: #7dd3fc; background: rgba(7, 89, 133, 0.22); border-color: rgba(56, 189, 248, 0.25); }
     .pill.pending, .pill.dispatched { color: #fde68a; background: rgba(113, 63, 18, 0.18); border-color: rgba(251, 191, 36, 0.2); }
     .pill.failed, .pill.dead, .pill.error, .pill.outdated { color: #fda4af; background: rgba(127, 29, 29, 0.22); border-color: rgba(251, 113, 133, 0.24); }
+    .pill.stopped { color: #fdba74; background: rgba(124, 45, 18, 0.22); border-color: rgba(251, 146, 60, 0.24); }
     .pill.offline, .pill.skipped, .pill.unknown { color: #cbd5e1; background: rgba(71, 85, 105, 0.28); border-color: rgba(148, 163, 184, 0.18); }
     .pill.info, .pill.codex, .pill.opencode, .pill.claude-code, .pill.current { color: #c4b5fd; background: rgba(91, 33, 182, 0.2); border-color: rgba(192, 132, 252, 0.2); }
 
@@ -267,6 +268,7 @@
     .agent-card { width: 100%; color: inherit; font: inherit; text-align: left; cursor: pointer; }
     .agent-card:hover, .agent-card:focus-visible { border-color: rgba(56, 189, 248, 0.52); outline: none; }
     .agent-card.busy { border-color: rgba(56, 189, 248, 0.34); }
+    .agent-card.stopped { border-color: rgba(251, 146, 60, 0.3); }
     .agent-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
     .agent-name { font-weight: 800; color: var(--text-strong); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
     .agent-work { margin-top: 10px; padding: 9px; border-radius: 12px; background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(56, 189, 248, 0.16); color: #bfdbfe; font-size: 11px; line-height: 1.45; }
@@ -581,7 +583,10 @@
     <div class="agent-dialog-body" id="agent-detail-body"></div>
     <div class="agent-dialog-footer">
       <span class="agent-dialog-note" id="agent-delete-note"></span>
-      <button class="btn danger" id="agent-delete-btn" type="button" hidden>删除历史 Agent</button>
+      <div class="toolbar">
+        <button class="btn danger" id="agent-lifecycle-btn" type="button" hidden>关闭 Agent</button>
+        <button class="btn danger" id="agent-delete-btn" type="button" hidden>删除历史 Agent</button>
+      </div>
     </div>
   </dialog>
 
@@ -596,28 +601,28 @@
         pageTitle: 'MAF 控制台', pageSubtitle: 'Agent 网络 · Workflow 执行 · MAS 分诊 · Runtime 事件', embeddedTitle: 'MAF 执行面板', embeddedSubtitle: '可内嵌的 Agent / Workflow 执行面板',
         server: 'Server', agentsOnline: '在线 Agent', busyAgents: '忙碌 Agent', skills: 'Skills', mcps: 'MCPs', runningWorkflows: '运行中 Workflow', activeMasSessions: '活跃 MAS 会话', openTasks: '未完成任务',
         workflowFocus: 'Workflow 焦点', workflowFocusHint: '选择一个 workflow 查看执行详情', workflowDetail: 'Workflow 详情', workflowDetailHint: 'DAG 节点、执行结果和上下文',
-        agentBoard: 'Agent 看板', agentBoardHint: '点击 Agent 查看描述、源码路径和运行详情', agentDetail: 'Agent 详情', agentDescription: '职责描述', agentIdentity: '身份与运行位置', projectPath: '源码路径', clientEndpoint: 'Client 地址', clientId: 'Client ID', daemonPort: 'Daemon 端口', registeredAt: '注册时间', lastHeartbeat: '最后心跳', notConfigured: '未配置', deleteHistoricalAgent: '删除历史 Agent', deleteAgentConfirm: '确定删除这个历史 Agent 吗？此操作只删除注册记录。', deleteAgentFailed: '删除 Agent 失败', deleteAgentOnlyHistorical: '在线或忙碌 Agent 受保护，不能删除。', readonlyAgentDelete: '远程只读模式可查看详情；删除操作仅限 Server 本机管理视图。', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
+        agentBoard: 'Agent 看板', agentBoardHint: '点击 Agent 查看描述、源码路径和运行详情', agentDetail: 'Agent 详情', agentDescription: '职责描述', agentIdentity: '身份与运行位置', projectPath: '源码路径', clientEndpoint: 'Client 地址', clientId: 'Client ID', daemonPort: 'Daemon 端口', registeredAt: '注册时间', lastHeartbeat: '最后心跳', notConfigured: '未配置', stopAgent: '关闭 Agent', startAgent: '启动 Agent', stopAgentConfirm: '确定关闭这个远程 Agent 吗？空闲执行器会退出，并持续禁止自动拉起。', forceStopAgentConfirm: '该 Agent 有活动工作。强制关闭会先取消关联的 Task、Workflow 和 Execution，再终止执行器。确定继续吗？', startAgentConfirm: '确定解除 stopped 门禁并允许这个远程 Agent 再次启动吗？', agentLifecycleFailed: 'Agent 生命周期操作失败', agentStoppedNote: 'Agent 已由管理员关闭，不会接收任务或自动拉起。', deleteHistoricalAgent: '删除历史 Agent', deleteAgentConfirm: '确定删除这个历史 Agent 吗？此操作只删除注册记录。', deleteAgentFailed: '删除 Agent 失败', deleteAgentOnlyHistorical: '在线、待启动、忙碌或主动关闭的 Agent 受保护，不能删除。', readonlyAgentDelete: '远程只读模式可查看详情；生命周期和删除操作仅限 Server 本机管理视图。', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
         tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
         inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果', clientIdentities: 'Client 机器身份', clientIdentitiesHint: '机器身份准入、审批与单机吊销', approve: '批准', revoke: '吊销', noClientIdentities: '暂无 Client 机器身份。Client 首次上线后会自动出现在这里。', clientActionFailed: 'Client 身份操作失败', fingerprint: '指纹', sourceIp: '来源 IP', lastSeen: '最近在线',
         submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败', codexConversations: 'Codex 对话', codexConversationsHint: '当前远端 Codex 上下文与实时执行过程', codexAgents: 'Codex Agents', codexConversationList: '当前上下文', codexExecution: '执行过程', newConversation: '新开远端会话', sendMessage: '发送', stopTurn: '停止', openConversation: '打开对话', codexInputPlaceholder: '向远端 Codex 发送消息…', codexNoAgents: '暂无可对话的 Codex Agent。', codexNoConversations: '选择 Agent 以打开远端会话。', codexSelectConversation: '选择一个 Codex Agent。', codexReadonly: '当前为只读模式，发送和停止不可用。', codexConversationCreated: '远端会话已就绪', codexConversationFailed: '远端会话打开失败', codexTurnFailed: '消息发送失败', codexNewConversationConfirm: '新开远端会话会清空当前上下文，是否继续？', codexConnecting: '连接中', codexConnected: '实时流已连接', codexDisconnected: '实时流已断开', codexProcessDetails: '详情', codexProcessProtocol: '协议数据', codexFileAdd: '新增', codexFileDelete: '删除', codexFileUpdate: '修改',
         codexStep: { turnStart: '开始处理', turnComplete: '本轮完成', reasoning: '分析', plan: '计划', command: '运行命令', files: '修改文件', mcp: '调用 MCP', tool: '调用工具', collaboration: '协作调度', subagent: '子 Agent', web: '搜索网页', image: '处理图片', review: '代码审查', compaction: '压缩上下文', wait: '等待', hook: '运行 Hook', interrupt: '停止处理', error: '执行错误', event: '执行事件' },
         noWorkflow: '暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。', noSelectedWorkflow: '暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。', noNodes: '该 workflow 暂无节点信息。', noAgents: '暂无 agent 数据。', noSessions: '暂无 MAS session。调用 /api/workflows/mas/task 后会出现。', noTasks: '暂无传统 task 数据。', noEvents: '等待 SSE 事件。', noInventory: '暂无 Skills/MCP inventory 数据。等待 agent 心跳上报 skills/mcps 后会出现。', noEvolve: '暂无 evolve 结果。通过 /api/evolve/skill、/api/evolve/mcp 等接口推送后会出现。', noOta: '暂无 OTA 状态数据。',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: '创建时间', completedAt: '完成时间', nodes: '节点', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: '任务进入 MAF 控制面', dispatchNote: '按 agent_name 路由到节点', executeNoteIdle: '等待执行或已结束', resultNote: '最终状态', currentNode: '当前节点', coverage: '覆盖', gaps: '缺口', allAgents: '全部 Agent', latestHash: '最新 Hash', clientMinimum: 'Client 最低版本', serverVersion: 'Server 版本', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: '耗时', actions: '动作', endpoint: 'Endpoint', version: '版本', pluginHash: 'Plugin Hash', unknown: '未知', total: '总数', latest: '最新',
-        status: { online: '在线', standby: '待启动', offline: '离线', busy: '忙碌', dead: '已失联', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
+        status: { online: '在线', standby: '待启动', offline: '离线', busy: '忙碌', dead: '已失联', stopped: '已关闭', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
       },
       en: {
         htmlLang: 'en', all: 'all', refresh: 'Refresh', clear: 'Clear', lastRefresh: 'Refreshed', global: 'global', embedded: 'embedded', readonly: 'readonly', actionsEnabled: 'actions-enabled', currentFilter: 'Current filter', waitingServer: 'Waiting for Server', consoleVersionShort: 'MAF', consoleVersion: 'MAF version',
         pageTitle: 'MAF Console', pageSubtitle: 'Agent network · Workflow execution · MAS triage · Runtime events', embeddedTitle: 'MAF Execution Panel', embeddedSubtitle: 'Embeddable Agent / Workflow execution panel',
         server: 'Server', agentsOnline: 'Agents Online', busyAgents: 'Busy Agents', skills: 'Skills', mcps: 'MCPs', runningWorkflows: 'Running Workflows', activeMasSessions: 'Active MAS Sessions', openTasks: 'Open Tasks',
         workflowFocus: 'Workflow Focus', workflowFocusHint: 'Select a workflow to inspect execution details', workflowDetail: 'Workflow Detail', workflowDetailHint: 'DAG nodes, execution results, and context',
-        agentBoard: 'Agent Board', agentBoardHint: 'Select an Agent to inspect its description, source path, and runtime', agentDetail: 'Agent Details', agentDescription: 'Responsibilities', agentIdentity: 'Identity and location', projectPath: 'Source path', clientEndpoint: 'Client endpoint', clientId: 'Client ID', daemonPort: 'Daemon port', registeredAt: 'Registered at', lastHeartbeat: 'Last heartbeat', notConfigured: 'Not configured', deleteHistoricalAgent: 'Delete historical Agent', deleteAgentConfirm: 'Delete this historical Agent? This only removes its registry record.', deleteAgentFailed: 'Failed to delete Agent', deleteAgentOnlyHistorical: 'Online or busy Agents are protected and cannot be deleted.', readonlyAgentDelete: 'Remote readonly mode can inspect details; deletion is available only from the Server-local management view.', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
+        agentBoard: 'Agent Board', agentBoardHint: 'Select an Agent to inspect its description, source path, and runtime', agentDetail: 'Agent Details', agentDescription: 'Responsibilities', agentIdentity: 'Identity and location', projectPath: 'Source path', clientEndpoint: 'Client endpoint', clientId: 'Client ID', daemonPort: 'Daemon port', registeredAt: 'Registered at', lastHeartbeat: 'Last heartbeat', notConfigured: 'Not configured', stopAgent: 'Stop Agent', startAgent: 'Start Agent', stopAgentConfirm: 'Stop this remote Agent? Idle executors will exit and automatic startup will remain disabled.', forceStopAgentConfirm: 'This Agent has active work. Force stop cancels its Tasks, Workflows, and Executions before terminating the executor. Continue?', startAgentConfirm: 'Remove the stopped gate and allow this remote Agent to start again?', agentLifecycleFailed: 'Agent lifecycle action failed', agentStoppedNote: 'This Agent was stopped by an administrator and cannot receive work or auto-start.', deleteHistoricalAgent: 'Delete historical Agent', deleteAgentConfirm: 'Delete this historical Agent? This only removes its registry record.', deleteAgentFailed: 'Failed to delete Agent', deleteAgentOnlyHistorical: 'Online, standby, busy, or administratively stopped Agents are protected and cannot be deleted.', readonlyAgentDelete: 'Remote readonly mode can inspect details; lifecycle and deletion actions are available only from the Server-local management view.', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
         tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
         inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results', clientIdentities: 'Client Identities', clientIdentitiesHint: 'Machine enrollment, approval, and per-client revocation', approve: 'Approve', revoke: 'Revoke', noClientIdentities: 'No Client identities yet. A Client appears here after its first connection.', clientActionFailed: 'Client identity action failed', fingerprint: 'Fingerprint', sourceIp: 'Source IP', lastSeen: 'Last seen',
         submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed', codexConversations: 'Codex Conversations', codexConversationsHint: 'Current remote Codex context and live execution trace', codexAgents: 'Codex Agents', codexConversationList: 'Current context', codexExecution: 'Execution', newConversation: 'New remote session', sendMessage: 'Send', stopTurn: 'Stop', openConversation: 'Open conversation', codexInputPlaceholder: 'Send a message to remote Codex…', codexNoAgents: 'No Codex Agents are available for conversation.', codexNoConversations: 'Select an Agent to open its remote conversation.', codexSelectConversation: 'Select a Codex Agent.', codexReadonly: 'Readonly mode: sending and stopping are disabled.', codexConversationCreated: 'Remote session is ready', codexConversationFailed: 'Failed to open remote session', codexTurnFailed: 'Message send failed', codexNewConversationConfirm: 'Starting a new remote session clears the current context. Continue?', codexConnecting: 'connecting', codexConnected: 'live stream connected', codexDisconnected: 'live stream disconnected', codexProcessDetails: 'Details', codexProcessProtocol: 'Protocol data', codexFileAdd: 'Add', codexFileDelete: 'Delete', codexFileUpdate: 'Update',
         codexStep: { turnStart: 'Started', turnComplete: 'Turn completed', reasoning: 'Analysis', plan: 'Plan', command: 'Run command', files: 'File changes', mcp: 'MCP call', tool: 'Tool call', collaboration: 'Collaboration', subagent: 'Sub-agent', web: 'Web search', image: 'Image', review: 'Code review', compaction: 'Context compacted', wait: 'Wait', hook: 'Hook', interrupt: 'Stopped', error: 'Execution error', event: 'Execution event' },
         noWorkflow: 'No workflows. Create one via /api/workflows or /api/workflows/mas/task.', noSelectedWorkflow: 'No workflow to display. Select one on the left, or filter by workflow_id / agent_name / origin_id.', noNodes: 'This workflow has no node details.', noAgents: 'No agent data.', noSessions: 'No MAS sessions. Call /api/workflows/mas/task to create one.', noTasks: 'No legacy task data.', noEvents: 'Waiting for SSE events.', noInventory: 'No Skills/MCP inventory yet. It appears after agents report skills/mcps via heartbeat.', noEvolve: 'No evolve results yet. Push via /api/evolve/skill, /api/evolve/mcp, etc.', noOta: 'No OTA status data.',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: 'Created', completedAt: 'Completed', nodes: 'Nodes', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: 'Task entered the MAF control plane', dispatchNote: 'Routed by agent_name', executeNoteIdle: 'Waiting or finished', resultNote: 'Final state', currentNode: 'Current node', coverage: 'coverage', gaps: 'gaps', allAgents: 'all agents', latestHash: 'Latest hash', clientMinimum: 'Client minimum', serverVersion: 'Server version', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: 'Duration', actions: 'Actions', endpoint: 'Endpoint', version: 'Version', pluginHash: 'Plugin Hash', unknown: 'unknown', total: 'total', latest: 'latest',
-        status: { online: 'online', standby: 'standby', offline: 'offline', busy: 'busy', dead: 'unreachable', pending: 'pending', dispatched: 'dispatched', running: 'running', completed: 'completed', failed: 'failed', skipped: 'skipped', active: 'active', done: 'done', unknown: 'unknown', current: 'current', outdated: 'outdated', info: 'info' }
+        status: { online: 'online', standby: 'standby', offline: 'offline', busy: 'busy', dead: 'unreachable', stopped: 'stopped', pending: 'pending', dispatched: 'dispatched', running: 'running', completed: 'completed', failed: 'failed', skipped: 'skipped', active: 'active', done: 'done', unknown: 'unknown', current: 'current', outdated: 'outdated', info: 'info' }
       }
     };
 
@@ -646,6 +651,7 @@
       'workflow_started', 'workflow_completed', 'workflow_failed',
       'workflow_node_started', 'workflow_node_completed', 'workflow_node_failed',
       'client_registered', 'client_offline', 'client_dead', 'client_revived',
+      'agent_stopped', 'agent_started',
       'task_created', 'task_dispatched', 'task_completed', 'task_failed',
       'proposal_created', 'proposal_reviewed', 'proposal_applied',
       'evolve_started', 'evolve_completed', 'evolve_failed', 'ota_started', 'ota_completed'
@@ -736,7 +742,10 @@
         try { data = JSON.parse(text); } catch { data = { message: text }; }
       }
       if (!res.ok) {
-        throw new Error(data.error || data.message || `HTTP ${res.status}`);
+        const error = new Error(data.error || data.message || `HTTP ${res.status}`);
+        error.status = res.status;
+        error.data = data;
+        throw error;
       }
       return data;
     }
@@ -904,7 +913,7 @@
 
     function renderCodex() {
       const agents = codexAgents().slice().sort((a, b) => {
-        const rank = value => ['online', 'busy', 'standby', 'offline', 'dead'].indexOf(value);
+        const rank = value => ['online', 'busy', 'standby', 'stopped', 'offline', 'dead'].indexOf(value);
         return (rank(a.status) < 0 ? 99 : rank(a.status)) - (rank(b.status) < 0 ? 99 : rank(b.status)) || String(a.agent_name).localeCompare(String(b.agent_name));
       });
       state.codex.agents = agents;
@@ -1410,7 +1419,7 @@
     }
 
     function agentStatusRank(status) {
-      return ({ online: 0, busy: 1, standby: 2, offline: 3, dead: 4 }[String(status || '')] ?? 5);
+      return ({ online: 0, busy: 1, standby: 2, stopped: 3, offline: 4, dead: 5 }[String(status || '')] ?? 6);
     }
 
     function renderAgents() {
@@ -1463,6 +1472,7 @@
       const mcps = parseJson(agent.mcps, []);
       const historical = agent.status === 'offline' || agent.status === 'dead';
       const canDelete = historical && !config.readonly;
+      const canLifecycle = !config.readonly;
       $('agent-detail-title').textContent = agent.agent_name || t('agentDetail');
       $('agent-detail-body').innerHTML = `
         <div>${pill(agent.status)} ${pill(agent.runtime || 'opencode')}</div>
@@ -1494,9 +1504,15 @@
       const deleteButton = $('agent-delete-btn');
       deleteButton.hidden = !canDelete;
       deleteButton.textContent = t('deleteHistoricalAgent');
-      $('agent-delete-note').textContent = historical
-        ? (config.readonly ? t('readonlyAgentDelete') : '')
-        : t('deleteAgentOnlyHistorical');
+      const lifecycleButton = $('agent-lifecycle-btn');
+      lifecycleButton.hidden = !canLifecycle;
+      lifecycleButton.textContent = agent.status === 'stopped' ? t('startAgent') : t('stopAgent');
+      lifecycleButton.className = agent.status === 'stopped' ? 'btn' : 'btn danger';
+      $('agent-delete-note').textContent = config.readonly
+        ? t('readonlyAgentDelete')
+        : agent.status === 'stopped'
+          ? t('agentStoppedNote')
+          : historical ? '' : t('deleteAgentOnlyHistorical');
     }
 
     function showAgentDetail(agentId) {
@@ -1524,6 +1540,33 @@
         await refreshAll();
       } catch (err) {
         window.alert(`${t('deleteAgentFailed')}: ${err.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function toggleSelectedAgentLifecycle() {
+      const agent = selectedAgent();
+      if (!agent || config.readonly) return;
+      const starting = agent.status === 'stopped';
+      if (!window.confirm(`${t(starting ? 'startAgentConfirm' : 'stopAgentConfirm')}\n\n${agent.agent_name}`)) return;
+      const button = $('agent-lifecycle-btn');
+      button.disabled = true;
+      try {
+        if (starting) {
+          await apiPost(`/api/agents/${encodeURIComponent(agent.id)}/start`, { reason: 'Dashboard lifecycle action' });
+        } else {
+          try {
+            await apiPost(`/api/agents/${encodeURIComponent(agent.id)}/stop`, { force: false, reason: 'Dashboard lifecycle action' });
+          } catch (err) {
+            if (err.status !== 409 || !window.confirm(`${t('forceStopAgentConfirm')}\n\n${agent.agent_name}`)) throw err;
+            await apiPost(`/api/agents/${encodeURIComponent(agent.id)}/stop`, { force: true, reason: 'Dashboard force lifecycle action' });
+          }
+        }
+        await refreshAll();
+        renderAgentDetail();
+      } catch (err) {
+        window.alert(`${t('agentLifecycleFailed')}: ${err.message}`);
       } finally {
         button.disabled = false;
       }
@@ -1839,6 +1882,7 @@
 
     $('refresh-btn').addEventListener('click', refreshAll);
     $('agent-detail-close').addEventListener('click', closeAgentDetail);
+    $('agent-lifecycle-btn').addEventListener('click', toggleSelectedAgentLifecycle);
     $('agent-delete-btn').addEventListener('click', deleteSelectedAgent);
     $('agent-detail-dialog').addEventListener('click', event => {
       if (event.target === $('agent-detail-dialog')) closeAgentDetail();

@@ -175,8 +175,13 @@ export class AgentRegistry {
     const agents: Agent[] = [];
     const insertedAgentNames: string[] = [];
     for (const info of clientAgentInfos) {
-      // Daemon 上报的状态优先，没上报的默认 online（向后兼容旧版 Daemon）
-      const agentStatus = agentStatuses[info.agent_name] || 'online';
+      // Server 已知的 stopped 门禁优先；注册和心跳都不能解除管理员关闭。
+      const currentStatus = db.prepare(
+        'SELECT status FROM agents WHERE user_id = ? AND host_user = ? AND agent_name = ?'
+      ).get(payload.user_id, payload.host_user, info.agent_name) as { status?: string } | undefined;
+      const agentStatus = currentStatus?.status === 'stopped'
+        ? 'stopped'
+        : (agentStatuses[info.agent_name] || 'online');
 
       if (registry.isManaged(info.agent_name)) {
         // 受管理的 agent → UPDATE（保留原记录 ID）
@@ -345,15 +350,18 @@ export class AgentRegistry {
 
         // 先查当前状态，只在真正变化时更新 + 打日志
         const oldStatus = current?.status || '';
+        // stopped is an administrator gate, not a sampled executor status. Only
+        // the explicit start lifecycle API may remove it.
+        const effectiveStatus: AgentStatus = oldStatus === 'stopped' ? 'stopped' : status;
 
-        if (oldStatus && oldStatus !== status) {
+        if (oldStatus && oldStatus !== effectiveStatus) {
           db.prepare(`
             UPDATE agents SET status = ? WHERE user_id = ? AND host_user = ? AND agent_name = ?
-          `).run(status, userId, hostUser, agentName);
-          console.log(`[Registry] ${agentName}: ${oldStatus} → ${status}`);
-          const eventType = status === 'offline'
+          `).run(effectiveStatus, userId, hostUser, agentName);
+          console.log(`[Registry] ${agentName}: ${oldStatus} → ${effectiveStatus}`);
+          const eventType = effectiveStatus === 'offline'
             ? 'client_offline'
-            : status === 'dead'
+            : effectiveStatus === 'dead'
               ? 'client_dead'
               : 'client_revived';
           eventBus.emit({
@@ -362,7 +370,7 @@ export class AgentRegistry {
             timestamp: now,
           });
           // 异步回写外部注册表
-          registry.pushStatus(agentName, status).catch(() => {});
+          registry.pushStatus(agentName, effectiveStatus).catch(() => {});
         }
       }
     }
@@ -499,16 +507,18 @@ export class AgentRegistry {
       SELECT user_id, host_user, client_endpoint,
              CASE MAX(CASE status
                WHEN 'online' THEN 5
-               WHEN 'standby' THEN 4
-               WHEN 'busy' THEN 3
-               WHEN 'offline' THEN 2
-               WHEN 'dead' THEN 1
+               WHEN 'busy' THEN 4
+               WHEN 'standby' THEN 3
+               WHEN 'stopped' THEN 2
+               WHEN 'offline' THEN 1
+               WHEN 'dead' THEN 0
                ELSE 0 END)
                WHEN 5 THEN 'online'
-               WHEN 4 THEN 'standby'
-               WHEN 3 THEN 'busy'
-               WHEN 2 THEN 'offline'
-               WHEN 1 THEN 'dead'
+               WHEN 4 THEN 'busy'
+               WHEN 3 THEN 'standby'
+               WHEN 2 THEN 'stopped'
+               WHEN 1 THEN 'offline'
+               WHEN 0 THEN 'dead'
                ELSE 'offline' END as status,
              MAX(last_heartbeat) as last_heartbeat,
              COUNT(*) as agent_count

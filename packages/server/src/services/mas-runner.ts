@@ -344,7 +344,7 @@ ${agentList}
 This request must be handled by a remote Agent. Do not solve it in MAS.
 Match semantically using Agent description first, then Skills, MCPs, runtime, workspace, and live status.
 agent_name is an identifier, not a capability. preferred_agent is only a hint.
-online, standby, and busy Agents are dispatchable. standby means the Client Daemon is online and can auto-launch the runtime. offline and dead Agents are topology references only and must not receive new work.
+online, standby, and busy Agents are dispatchable. standby means the Client Daemon is online and can auto-launch the runtime. offline and dead Agents are topology references only and must not receive new work. stopped is an administrator gate and must never receive work until an explicit Agent start operation removes it.
 An Agent without a description is not a reliable capability match by itself.
 
 Output exactly one JSON object and no explanation.
