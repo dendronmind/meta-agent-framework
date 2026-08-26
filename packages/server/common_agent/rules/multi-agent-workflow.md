@@ -1,6 +1,8 @@
 # 多 Agent 编排
 
-当任务需要多个 Agent 协作时，在 `/api/workflows` 的 `nodes` 中定义多个节点，用 `depends_on` 表达依赖。单 Agent 任务不要使用本文件，直接按 `dispatch-flow.md` fast path 派发。
+当任务需要多个 Agent 协作时，在 `/api/workflows` 的 `nodes` 中定义多个节点，用 `depends_on` 表达依赖。单 Agent 任务不要使用本文件，直接使用已注入 `meta-agent-server` Skill 的 fast path。
+
+多 Agent 任务仍遵循“派发 -> 执行 -> 结果交付”。下方 `origin` / `notify` 负责结果路由，不证明异步交付能力；是否同步等待必须沿用 Skill 中对 `MAF_ASYNC_RESULT_DELIVERY` 的确定性规则。
 
 ## 多节点工作流
 

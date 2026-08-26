@@ -37,7 +37,7 @@ English | [中文](./README.md)
 
 - **Auto-networking** — Agents register on startup, forming a schedulable distributed network
 - **Conversational orchestration** — Talk to the Server Agent in natural language; it decides who handles what
-- **Async collaboration** — Tasks are dispatched without blocking; results stream back automatically
+- **Reliable collaboration delivery** — The user flow is always dispatch → execution → result delivery; asynchronous notification is used only when the entry point verifies session recovery, otherwise the framework waits synchronously
 - **Collaborative evolution** — Push skills / configs / MCP tools to all Agents simultaneously
 - **Auto-launch** — Offline Agents are automatically started via screen when tasks arrive
 - **Three runtimes** — Supports [opencode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and [Codex CLI](https://github.com/openai/codex)

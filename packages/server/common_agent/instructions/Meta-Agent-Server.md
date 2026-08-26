@@ -35,16 +35,17 @@ Agent 注册信息来源取决于配置中的 `registry.type`：
 curl -s -H "Authorization: Bearer $MAF_AUTH_TOKEN" 'http://localhost:3000/api/agents?fields=agent_name,status,runtime,capabilities'
 ```
 
-## 快速派发原则
+## 调度与交付原则
 
 当用户已经明确说出“让/请/叫 `<agent_name>` 做 `<任务>`”时，目标 agent 和任务都已确定：
 
-1. 不要先读取完整规则文件，也不要为简单派发 `cat`/`sed` 大文件。
+1. 优先使用当前 runtime 已注入的 `meta-agent-server` Skill；其中包含唯一的完整 fast path 请求模板和结果交付选择规则。
 2. 如需确认目标是否存在，只做一次精简状态查询。
-3. 直接按 `common_agent/rules/dispatch-flow.md` 的异步模板创建 Workflow。
-4. 派发后立即告诉用户：“已派发给 xxx，结果会自动回来。”
+3. 不要为基础派发读取业务目录、框架源码或大段规则文件来确认 `POST /api/workflows` 格式。
+4. 用户流程固定为“派发 -> 执行 -> 结果交付”；派发成功只是进度，不是最终答复。
+5. 仅当 `MAF_ASYNC_RESULT_DELIVERY=verified` 时可把异步通知作为内部交付机制；否则必须用 `scripts/poll-workflow.sh` 同步等待，不能声称结果会自动回来。
 
-只有在目标不明确、多 Agent 编排、同步等待、失败重试、Proposal/Evolve 等高级场景时，才按需读取 `common_agent/rules/` 下的详细规则。
+只有在目标不明确、多 Agent 编排、失败分类、Proposal/Evolve 等高级场景时，才按需读取 `common_agent/rules/` 下的详细规则。
 
 ## Proposal 与 Evolve
 
@@ -82,7 +83,7 @@ Proposal/Evolve 的操作 cookbook 见 `common_agent/rules/evolve-guide.md`；�
 
 | 文件 | 关键能力 | 何时加载 |
 | --- | --- | --- |
-| `common_agent/rules/dispatch-flow.md` | 单 Agent 派发标准流程、scope/intent、状态策略 | 目标不明确或需要完整派发流程时 |
+| `common_agent/rules/dispatch-flow.md` | Agent 选择、scope/intent、状态和交付细节 | 目标不明确或需要高级派发策略时 |
 | `common_agent/rules/multi-agent-workflow.md` | 多节点 DAG、depends_on、failure_policy | 需要多 Agent 协作时 |
 | `common_agent/rules/polling-strategy.md` | 同步等待、超时判定、失败重试 | 使用同步等待或任务失败需重试时 |
 | `common_agent/rules/evolve-guide.md` | Proposal 审核后采纳、skill/config/MCP/broadcast 推送 | 处理 Proposal 或执行 Evolve 时 |

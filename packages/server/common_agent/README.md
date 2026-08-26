@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `common_agent/instructions/` | `common_agent/instructions/` | Meta-Agent-Server 通用管理者协议 |
 | `common_agent/rules/` | `common_agent/rules/` | 通用调度/API/轮询/多 Agent 编排规则 |
-| `common_agent/server_skills/` | `.opencode/skills/`、`.claude/skills/`、`.codex/skills/` | Server agent 跨 runtime skill（轻量速查，避免重复协议） |
+| `common_agent/server_skills/` | `.opencode/skills/`、`.claude/skills/`、`.codex/skills/` | Server agent 跨 runtime skill；基础派发的完整可执行模板与交付选择规范源 |
 | `common_agent/client_skills/` | `skills/` | 由 Server 推送给远端 agent 的 client skill 模板 |
 
 runtime 专属源码映射示例：

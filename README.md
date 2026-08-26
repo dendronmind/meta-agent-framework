@@ -37,7 +37,7 @@
 
 - **自动组网** — Agent 启动即注册，形成可调度的分布式网络
 - **对话式调度** — 与 Server Agent 自然语言对话，它自动判断派给谁
-- **异步协作** — 任务派发后不阻塞，结果自动回传并渲染展示
+- **可靠协作交付** — 用户流程固定为“派发 → 执行 → 结果交付”；只有入口确认具备会话恢复能力时才异步通知，否则自动同步等待，避免远端完成而用户收不到结果
 - **协同进化** — Server 可向所有 Agent 推送 skill / 配置 / MCP 工具，整体能力同步提升
 - **按需拉起** — Agent 离线时 Daemon 自动通过 screen 拉起 TUI 执行
 - **三 Runtime** — 支持 [opencode](https://opencode.ai)、[Claude Code](https://docs.anthropic.com/en/docs/claude-code) 和 [Codex CLI](https://github.com/openai/codex)

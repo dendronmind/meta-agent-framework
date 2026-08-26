@@ -533,17 +533,23 @@ function saveRuntime(runtime) {
   } catch {}
 }
 
-function serverRuntimeEnv() {
+function serverRuntimeEnv(runtime = "") {
   const cfg = readConfig();
+  // This is a positive capability signal for the agent prompt, not a runtime guess.
+  // Codex stays conservative until its launcher can prove exact-thread result recovery.
+  const asyncResultDelivery = runtime === "opencode" || runtime === "claude"
+    ? "verified"
+    : "unverified";
   return {
     ...process.env,
     MAF_AUTH_TOKEN: readAdminToken(cfg),
+    MAF_ASYNC_RESULT_DELIVERY: asyncResultDelivery,
   };
 }
 
 function codexMetaServerEnv() {
   return {
-    ...serverRuntimeEnv(),
+    ...serverRuntimeEnv("codex"),
     MAF_AGENT_NAME: "Meta-Agent-Server",
     MAF_RUNTIME: "codex",
     MAF_DIRECTORY: MAF_HOME,
@@ -605,13 +611,13 @@ function cmdTui() {
   try {
     if (runtime === "opencode") {
       const cmd = `opencode --agent Meta-Agent-Server --hostname localhost ${extraArgs}`.trim();
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv("opencode") });
     } else if (runtime === "codex") {
       const cmd = `codex -C "${MAF_HOME}" ${extraArgs}`.trim();
       execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: codexMetaServerEnv() });
     } else {
       const cmd = `claude ${extraArgs}`.trim();
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv("claude") });
     }
   } catch (err) {
     // 用户退出 TUI
@@ -681,7 +687,7 @@ function cmdResume() {
 
     const cmd = `opencode --agent Meta-Agent-Server --hostname localhost --session ${lastSession} ${extraArgs}`.trim();
     try {
-      execSync(cmd, { cwd: sessionDir, stdio: "inherit", env: serverRuntimeEnv() });
+      execSync(cmd, { cwd: sessionDir, stdio: "inherit", env: serverRuntimeEnv("opencode") });
     } catch {
       // 用户退出 TUI
     }
@@ -699,7 +705,7 @@ function cmdResume() {
     console.log(`\n  🔄 恢复 Claude Code session (--continue)\n`);
     const cmd = `claude --continue ${extraArgs}`.trim();
     try {
-      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv() });
+      execSync(cmd, { cwd: MAF_HOME, stdio: "inherit", env: serverRuntimeEnv("claude") });
     } catch {
       // 用户退出
     }
