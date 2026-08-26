@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import { serverAuthHeaders } from '../auth';
+import { codexManagedExecutionService, resolveCodexDelivery } from './codex-managed-execution-service';
 import type {
   Agent, Workflow, WorkflowNode, ExecuteCommand, ExecutionResult, WorkflowFailurePolicy, ExecutionErrorCode, ExecutionRunContext,
 } from '../types';
@@ -688,6 +689,23 @@ export class WorkflowEngine {
     const endpoint = agent.client_endpoint;
     console.log(`[Workflow] 📦 Client /execute 模式: ${endpoint}`);
 
+    const delivery = agent.runtime === 'codex'
+      ? resolveCodexDelivery(node.delivery_mode || node.execution_mode, node.detached)
+      : node.delivery_mode;
+    const managedBinding = agent.runtime === 'codex' && delivery === 'managed'
+      ? codexManagedExecutionService.create(agent, `${workflow.title} / ${node.id}`, prompt, {
+        source_type: 'workflow',
+        workflow_id: workflow.id,
+        node_id: node.id,
+        execution_id: node.execution_id,
+      })
+      : undefined;
+    if (managedBinding) {
+      node.conversation_id = managedBinding.conversation_id;
+      node.conversation_turn_id = managedBinding.turn_id;
+      console.log(`           → Codex managed conversation: ${managedBinding.conversation_id}`);
+    }
+
     const cmd: ExecuteCommand = {
       execution_id: node.execution_id!,
       workflow_id: workflow.id,
@@ -698,26 +716,34 @@ export class WorkflowEngine {
       scope: node.scope || 'project',
       intent: node.intent || 'query',
       runtime: agent.runtime || 'opencode',
-      delivery_mode: node.delivery_mode,
+      delivery_mode: delivery,
       execution_mode: node.execution_mode,
       detached: node.detached,
       session_id: sessionId,
       workspace_id: node.workspace_id || node.agent_name,
       run_context: this.executionRunContext(workflow),
+      codex_conversation_id: managedBinding?.conversation_id,
+      codex_turn_id: managedBinding?.turn_id,
+      codex_thread_id: managedBinding?.thread_id,
     };
 
     const url = `${endpoint}/execute`;
     const body = JSON.stringify(cmd);
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      let detail = '';
-      try { detail = await res.text(); } catch {}
-      throw new Error(`Client ${endpoint} responded ${res.status}${detail ? `: ${detail.slice(0, 1000)}` : ''}`);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+        body,
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { detail = await res.text(); } catch {}
+        throw new Error(`Client ${endpoint} responded ${res.status}${detail ? `: ${detail.slice(0, 1000)}` : ''}`);
+      }
+    } catch (error) {
+      codexManagedExecutionService.fail(managedBinding, error);
+      throw error;
     }
 
     console.log(`[Workflow]    ✅ 任务已推送到 Client`);

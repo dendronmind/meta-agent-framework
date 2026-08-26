@@ -3,6 +3,7 @@ import { getDb } from '../db/database';
 import { agentRegistry } from './agent-registry';
 import { eventBus } from './event-bus';
 import { serverAuthHeaders } from '../auth';
+import { codexManagedExecutionService, resolveCodexDelivery } from './codex-managed-execution-service';
 import type { Agent, Task, TaskCreatePayload, TaskResultPayload } from '../types';
 
 // ============================================================
@@ -176,6 +177,10 @@ export class TaskDispatcher {
     const db = getDb();
     const task = this.getById(payload.task_id);
     if (!task) return null;
+    if (['completed', 'failed', 'timeout', 'cancelled'].includes(task.status)) {
+      console.log(`[Dispatcher] Ignore late result: "${task.title}" is already ${task.status}`);
+      return task;
+    }
 
     const now = new Date().toISOString();
     db.prepare(`
@@ -219,6 +224,51 @@ export class TaskDispatcher {
     }
 
     return this.getById(payload.task_id)!;
+  }
+
+  async cancel(taskId: string, reason = 'Task cancelled'): Promise<{ task: Task; termination_confirmed: boolean } | null> {
+    const task = this.getById(taskId);
+    if (!task) return null;
+    if (['completed', 'failed', 'timeout', 'cancelled'].includes(task.status)) {
+      return { task, termination_confirmed: true };
+    }
+
+    let terminationConfirmed = task.status === 'pending';
+    const agent = task.assigned_agent_id ? agentRegistry.getById(task.assigned_agent_id) : undefined;
+    if (agent?.client_endpoint && (task.status === 'dispatched' || task.status === 'running')) {
+      const url = `${agent.client_endpoint}/cancel`;
+      const body = JSON.stringify({
+        execution_id: task.id,
+        task_id: task.id,
+        agent_name: task.assigned_agent_name || agent.agent_name,
+        reason,
+      });
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+          body,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (response.ok) {
+          const value = await response.json() as { termination_confirmed?: boolean };
+          terminationConfirmed = value.termination_confirmed === true;
+        }
+      } catch {}
+    }
+
+    const now = new Date().toISOString();
+    getDb().prepare(`
+      UPDATE tasks SET status = 'cancelled', result = ?, updated_at = ?, completed_at = ?
+      WHERE id = ? AND status NOT IN ('completed', 'failed', 'timeout', 'cancelled')
+    `).run(reason, now, now, task.id);
+    if (task.assigned_agent_id) agentRegistry.updateStatus(task.assigned_agent_id, 'online');
+    eventBus.emit({
+      type: 'task_cancelled',
+      data: { task_id: task.id, agent_name: task.assigned_agent_name, termination_confirmed: terminationConfirmed },
+      timestamp: now,
+    });
+    return { task: this.getById(task.id)!, termination_confirmed: terminationConfirmed };
   }
 
   /**
@@ -310,20 +360,40 @@ export class TaskDispatcher {
 
   private async pushToClient(task: Task, agent: Agent): Promise<void> {
     const url = `${agent.client_endpoint}/execute`;
+    const metadata = JSON.parse(task.metadata || '{}') as Record<string, unknown>;
+    const delivery = agent.runtime === 'codex'
+      ? resolveCodexDelivery(metadata.delivery_mode || metadata.execution_mode, metadata.detached as boolean | undefined)
+      : undefined;
+    const managedBinding = agent.runtime === 'codex' && delivery === 'managed'
+      ? codexManagedExecutionService.create(agent, task.title, task.description, {
+        source_type: 'task',
+        task_id: task.id,
+        execution_id: task.id,
+      })
+      : undefined;
     const body = JSON.stringify({
       task_id: task.id, type: task.type, title: task.title,
       description: task.description, priority: task.priority,
       target_agent: agent.agent_name,
       runtime: agent.runtime || 'opencode',
-      metadata: JSON.parse(task.metadata || '{}'),
+      delivery_mode: delivery,
+      metadata,
+      codex_conversation_id: managedBinding?.conversation_id,
+      codex_turn_id: managedBinding?.turn_id,
+      codex_thread_id: managedBinding?.thread_id,
     });
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(`Client responded ${res.status}`);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: serverAuthHeaders('POST', url, body, { 'Content-Type': 'application/json' }),
+        body,
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`Client responded ${res.status}`);
+    } catch (error) {
+      codexManagedExecutionService.fail(managedBinding, error);
+      throw error;
+    }
     getDb().prepare("UPDATE tasks SET status = 'running', updated_at = ? WHERE id = ?")
       .run(new Date().toISOString(), task.id);
   }

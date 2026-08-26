@@ -129,6 +129,7 @@ function clientPathAllowed(req: Request): boolean {
   if (method === 'POST' && /^\/tasks\/[^/]+\/(result|claim)$/.test(pathName)) return true;
   if (method === 'POST' && /^\/workflows\/[^/]+\/nodes\/[^/]+\/(started|result)$/.test(pathName)) return true;
   if (method === 'POST' && /^\/v1\/executions\/[^/]+\/patch$/.test(pathName)) return true;
+  if (method === 'POST' && /^\/codex\/conversations\/[^/]+\/events$/.test(pathName)) return true;
   if (method === 'POST' && /^\/evolve\/[^/]+\/result$/.test(pathName)) return true;
   if (method === 'POST' && pathName === '/proposals') return true;
   if (method === 'GET' && pathName === '/proposals') return true;
@@ -150,7 +151,8 @@ const PUBLIC_DASHBOARD_READ_PATHS = new Set([
 function publicDashboardReadAllowed(req: Request): boolean {
   if (req.method.toUpperCase() !== 'GET') return false;
   const url = new URL(req.originalUrl, 'http://maf.local');
-  return PUBLIC_DASHBOARD_READ_PATHS.has(url.pathname);
+  return PUBLIC_DASHBOARD_READ_PATHS.has(url.pathname)
+    || /^\/api\/codex\/conversations(?:\/[^/]+(?:\/(?:events|stream))?)?$/.test(url.pathname);
 }
 
 export const requireApiAuth: RequestHandler = (req, res, next) => {

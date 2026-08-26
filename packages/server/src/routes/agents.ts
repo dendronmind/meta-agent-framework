@@ -8,6 +8,10 @@ import type { ClientRegisterPayload, HeartbeatPayload } from '../types';
 
 const router = Router();
 
+function clientRuntimeModes(): { codex_delivery: string } {
+  return { codex_delivery: getConfig().codex.workflow_delivery };
+}
+
 // ============================================================
 // Client 注册 / 心跳 / 同步
 // ============================================================
@@ -23,7 +27,7 @@ router.post('/clients/register', (req: Request, res: Response) => {
     return;
   }
   const agents = agentRegistry.registerClient(payload);
-  res.status(201).json({ agents });
+  res.status(201).json({ agents, runtime_modes: clientRuntimeModes() });
 });
 
 /** POST /api/clients/heartbeat */
@@ -31,7 +35,7 @@ router.post('/clients/heartbeat', (req: Request, res: Response) => {
   const { user_id, host_user, ...payload } = req.body;
   if (!user_id) { res.status(400).json({ error: 'user_id required' }); return; }
   const result = agentRegistry.heartbeat(user_id, host_user || '', payload as HeartbeatPayload);
-  res.json(result);
+  res.json({ ...result, runtime_modes: clientRuntimeModes() });
 });
 
 /** POST /api/clients/sync */

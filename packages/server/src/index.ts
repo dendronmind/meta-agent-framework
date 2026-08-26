@@ -18,6 +18,7 @@ import workflowsRouter from './routes/workflows';
 import evolveRouter from './routes/evolve';
 import proposalsRouter from './routes/proposals';
 import executionsRouter from './routes/executions';
+import codexConversationsRouter from './routes/codex-conversations';
 import {
   acceptSignedNonce,
   ensureServerIdentity,
@@ -32,6 +33,7 @@ import {
 import { verifySignedRequest } from './request-signing';
 import { clientIdentityService } from './services/client-identity-service';
 import { getConfig } from './config';
+import { codexConversationService } from './services/codex-conversation-service';
 
 const CONFIG = getConfig();
 const PORT = parseInt(process.env.PORT || String(CONFIG.server.port || 3000));
@@ -121,6 +123,7 @@ let shuttingDown = false;
 
 // --- Middleware ---
 app.use(express.json({
+  limit: '2mb',
   verify: (req, _res, buffer) => {
     (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
   },
@@ -223,6 +226,7 @@ app.use('/api/evolve', evolveRouter);
 app.use('/api/proposals', proposalsRouter);
 app.use('/api/events', eventsRouter);
 app.use('/api/v1/executions', executionsRouter);
+app.use('/api/codex', codexConversationsRouter);
 
 // --- Client 安装 ---
 // GET /install.sh — 动态注入 Server 地址，远端直接 curl 执行即可
@@ -355,6 +359,7 @@ async function start(): Promise<void> {
   if (reset.changes > 0) {
     console.log(`[DB] 启动重置: ${reset.changes} agents → offline（等待心跳恢复）`);
   }
+  codexConversationService.recoverAfterServerRestart();
 
   // 初始化外部注册表（只标记启用状态，不阻塞启动）
   const registry = getRegistry();
@@ -462,6 +467,7 @@ async function shutdown(signal = 'SIGTERM'): Promise<void> {
     healthMonitor.stop();
     workflowEngine.shutdown(`Server shutdown: ${signal}`);
     masRunner.shutdown(`Server shutdown: ${signal}`);
+    codexConversationService.closeAll(`Server shutdown: ${signal}`);
     eventBus.closeAll(`Server shutdown: ${signal}`);
     await closeHttpServer();
     closeDb();

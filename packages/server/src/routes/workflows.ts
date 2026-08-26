@@ -87,6 +87,16 @@ router.get('/:id', async (req: Request, res: Response) => {
   res.json(latest || wf);
 });
 
+/** POST /api/workflows/:id/cancel — 取消 Workflow，并中断所有活动执行器。 */
+router.post('/:id/cancel', async (req: Request, res: Response) => {
+  const reason = String(req.body?.reason || 'Workflow cancelled by caller').trim().slice(0, 4000);
+  if (!workflowEngine.get(req.params.id as string)) {
+    res.status(404).json({ error: 'Workflow not found' });
+    return;
+  }
+  res.json(await workflowEngine.cancel(req.params.id as string, reason || 'Workflow cancelled by caller'));
+});
+
 function sendNodeReportOutcome(res: Response, outcome: ReturnType<typeof workflowEngine.reportNodeResult>): void {
   if (outcome.accepted) { res.json({ received: true }); return; }
   if (outcome.code === 'unknown_workflow' || outcome.code === 'unknown_node') {

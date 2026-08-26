@@ -47,7 +47,9 @@
 #   46 MAS headless runtime 空输出不得误报成功
 #   47 Client local-only Agent 发布边界
 #   48 Headless Codex 首次终态回报不可被自动收尾覆盖
-#   49 通用 Execution 两阶段 Artifact + managed workspace + Patch
+#   49 通用 Execution 两阶段 Artifact + direct repository + Gerrit
+#   50 Codex Dashboard 实时对话完整链路
+#   51 Codex managed Workflow/Task 默认投递 + 取消
 #
 set -uo pipefail
 
@@ -57,7 +59,7 @@ cd "$SCRIPT_DIR"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 PASS=0; FAIL=0; TOTAL=0
-SERVER_PID=""; MOCK_PID=""; CC_KEEPALIVE_PID=""; PRIVACY_DAEMON_PID=""; RESULT_DAEMON_PID=""
+SERVER_PID=""; MOCK_PID=""; CC_KEEPALIVE_PID=""; PRIVACY_DAEMON_PID=""; RESULT_DAEMON_PID=""; CODEX_CONVERSATION_SSE_PID=""
 
 E2E_STATE_DIR="/tmp/maf-e2e-state"
 E2E_MAF_HOME="/tmp/maf-e2e-home"
@@ -79,6 +81,12 @@ DAEMON_URL="http://127.0.0.1:$NODE_PORT"
 export MAF_AUTH_TOKEN="maf-e2e-auth-token-0123456789abcdef0123456789abcdef"
 export MAF_LOCAL_TOKEN="$MAF_AUTH_TOKEN"
 
+# 不继承启动本测试的真实 Codex 会话/attached receiver 上下文。
+# 各 Codex case 必须只使用自己显式设置的隔离 app-server 参数。
+unset MAF_CODEX_APP_SERVER_URL MAF_CODEX_APP_SERVER_CMD MAF_CODEX_REMOTE \
+  MAF_CODEX_THREAD_ID MAF_CODEX_SESSION_PID MAF_CODEX_WRAPPER_ACTIVE \
+  MAF_AGENT_NAME MAF_DIRECTORY CODEX_CWD MAF_RUNTIME MAF_HOME
+
 # 测试默认走已鉴权链路；鉴权负例使用 command curl 绕过此包装。
 curl() {
   command curl -H "Authorization: Bearer ${MAF_AUTH_TOKEN}" "$@"
@@ -88,7 +96,7 @@ export -f curl
 # ============================================================
 # 参数解析：确定要跑哪些 case
 # ============================================================
-ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49)
+ALL_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51)
 RUN_CASES=()
 
 if [[ $# -eq 0 ]]; then
@@ -115,7 +123,7 @@ NEED_DAEMON=false
 NEED_CC=false
 for c in "${RUN_CASES[@]}"; do
   NEED_SERVER=true
-  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]] || [[ $c -ge 48 && $c -le 49 ]]; then NEED_DAEMON=true; fi
+  if [[ $c -ge 2 && $c -le 13 ]] || [[ $c -eq 15 ]] || [[ $c -eq 16 ]] || [[ $c -ge 18 && $c -le 21 ]] || [[ $c -eq 32 ]] || [[ $c -eq 33 ]] || [[ $c -ge 43 && $c -le 45 ]] || [[ $c -ge 48 && $c -le 51 ]]; then NEED_DAEMON=true; fi
   if [[ $c -eq 5 || $c -eq 7 || $c -eq 8 || $c -eq 9 || $c -eq 10 || $c -eq 11 || $c -eq 13 || $c -eq 18 ]]; then NEED_CC=true; fi
 done
 
@@ -317,6 +325,9 @@ cleanup() {
   [[ -n "$SERVER_PID" ]] && kill -9 "$SERVER_PID" 2>/dev/null
   [[ -n "$PRIVACY_DAEMON_PID" ]] && kill -9 "$PRIVACY_DAEMON_PID" 2>/dev/null
   [[ -n "$RESULT_DAEMON_PID" ]] && kill -9 "$RESULT_DAEMON_PID" 2>/dev/null
+  [[ -n "$CODEX_CONVERSATION_SSE_PID" ]] && kill "$CODEX_CONVERSATION_SSE_PID" 2>/dev/null
+  pkill -f '/tmp/e2e-codex-.*/maf-codex-attached-receiver\.mjs' 2>/dev/null || true
+  pkill -f '/tmp/e2e-codex-.*/maf-codex-app-server\.mjs' 2>/dev/null || true
   stop_cc_wait_keepalive
   local DAEMON_PID
   DAEMON_PID=$(ss -tlnp 2>/dev/null | grep ":${NODE_PORT} " | grep -oP 'pid=\K\d+' | head -1)
@@ -330,7 +341,7 @@ cleanup() {
   done
   rm -f "$E2E_DB_PATH" ~/.meta-agent-framework/ota-e2e-test.txt
   rm -f /tmp/cc-e2e-stderr.log
-  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project "$MOCK_CODEX_PROMPT_LOG" "$MOCK_CODEX_ARGS_LOG"
+  rm -rf "$E2E_STATE_DIR" "$PLUGIN_DIR" "$E2E_MAF_HOME" "$E2E_USER_HOME" "$E2E_BIN" /tmp/maf-e2e-late-client /tmp/maf-e2e-agent-privacy /tmp/maf-e2e-result-idempotency /tmp/maf-e2e-execution-origin.git /tmp/maf-e2e-execution-seed /tmp/maf-e2e-execution-base /tmp/e2e-codex-project /tmp/e2e-codex-autostart-home /tmp/e2e-codex-autostart-project /tmp/e2e-codex-wrapper-home /tmp/e2e-codex-wrapper-project /tmp/e2e-codex-wrapper-misc /tmp/e2e-codex-attached-home /tmp/e2e-codex-attached-project /tmp/e2e-codex-receiver-home /tmp/e2e-codex-receiver-project /tmp/e2e-codex-auto-remote-home /tmp/e2e-codex-auto-remote-project /tmp/e2e-codex-auto-remote-misc /tmp/e2e-codex-poll-home /tmp/e2e-codex-poll-project /tmp/e2e-codex-conversation-project /tmp/e2e-codex-managed-project /tmp/maf-e2e-codex-conversation.sse "$MOCK_CODEX_PROMPT_LOG" "$MOCK_CODEX_ARGS_LOG"
 }
 trap cleanup EXIT
 
@@ -358,6 +369,8 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[setup] 环境准备${NC}"
 pkill -f "mock-opencode" 2>/dev/null || true
+pkill -f '/tmp/e2e-codex-.*/maf-codex-attached-receiver\.mjs' 2>/dev/null || true
+pkill -f '/tmp/e2e-codex-.*/maf-codex-app-server\.mjs' 2>/dev/null || true
 for p in $E2E_SERVER_PORT $MOCK_PORT $NODE_PORT 14134 14135 14136 14137 14138 14139 14143 14147 14148 14937 14938 14940 14941; do
   PID=$(ss -tlnp 2>/dev/null | grep ":${p} " | grep -oP 'pid=\K\d+' | head -1)
   [[ -n "$PID" ]] && kill -9 "$PID" 2>/dev/null || true
@@ -473,7 +486,7 @@ con.commit(); con.close()
 PYDB
 
 # Codex mock：需要在 Daemon 启动前放进环境，让 Daemon 读取 CODEX_BIN
-if should_run 33 || should_run 34 || should_run 35 || should_run 38 || should_run 48 || should_run 49; then
+if should_run 33 || should_run 34 || should_run 35 || should_run 38 || should_run 48 || should_run 49 || should_run 50 || should_run 51; then
   mkdir -p "$E2E_BIN"
   cat > "$E2E_BIN/codex" << 'CODEXMOCK'
 #!/usr/bin/env bash
@@ -561,6 +574,8 @@ CODEXMOCK
   chmod +x "$E2E_BIN/codex"
   export CODEX_BIN="$E2E_BIN/codex"
   export MOCK_CODEX_PROMPT_LOG MOCK_CODEX_ARGS_LOG
+  export MOCK_CODEX_APP_SERVER_SCRIPT="$ROOT_DIR/scripts/mock-codex-app-server.mjs"
+  if should_run 49 || should_run 50 || should_run 51; then export MAF_CODEX_APP_SERVER_BIN="$E2E_BIN/codex"; fi
 fi
 
 # 启动 Server（所有 case 都需要）
@@ -1494,6 +1509,7 @@ SYNC_TEST_HOME="/tmp/maf-sync-test-home"
 SYNC_TEST_MAF_HOME="/tmp/maf-sync-test-maf-home"
 rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
 mkdir -p "$SYNC_TEST_HOME" \
+  "$SYNC_TEST_HOME/bin" \
   "$SYNC_TEST_MAF_HOME/common_agent/rules" \
   "$SYNC_TEST_MAF_HOME/skills/meta-agent-client" \
   "$SYNC_TEST_MAF_HOME/.opencode/skills/meta-agent-server" \
@@ -1526,8 +1542,39 @@ assert "client skill 被覆盖" "Meta-Agent Client Protocol" "$(cat "$SYNC_TEST_
 assert "opencode 配置同步" "instructions" "$(cat "$SYNC_TEST_MAF_HOME/opencode.json" 2>/dev/null || true)"
 assert "Claude settings 同步" "SessionStart" "$(cat "$SYNC_TEST_MAF_HOME/.claude/settings.local.json" 2>/dev/null || true)"
 assert "Claude 入口同步" "Meta-Agent-Server" "$(cat "$SYNC_TEST_MAF_HOME/CLAUDE.md" 2>/dev/null || true)"
-assert "Codex 入口被覆盖" "结构化 agent 定义" "$(cat "$SYNC_TEST_MAF_HOME/AGENTS.md" 2>/dev/null || true)"
+assert "Codex 入口被覆盖" "Codex runtime" "$(cat "$SYNC_TEST_MAF_HOME/AGENTS.md" 2>/dev/null || true)"
 assert "Codex standard agent 同步" "name = \"Meta-Agent-Server\"" "$(cat "$SYNC_TEST_MAF_HOME/.codex/agents/Meta-Agent-Server.toml" 2>/dev/null || true)"
+
+# 三种 runtime 安装同一份规范 Skill，不能在安装态产生漂移。
+for runtime_dir in .opencode .claude .codex; do
+  assert "$runtime_dir server skill 与规范源逐字一致" "same" \
+    "$(cmp -s "$SCRIPT_DIR/common_agent/server_skills/meta-agent-server/SKILL.md" "$SYNC_TEST_MAF_HOME/$runtime_dir/skills/meta-agent-server/SKILL.md" && echo same || echo different)"
+done
+assert "Codex AGENTS 与规范源逐字一致" "same" \
+  "$(cmp -s "$SCRIPT_DIR/codex/AGENTS.md" "$SYNC_TEST_MAF_HOME/AGENTS.md" && echo same || echo different)"
+assert "Claude CLAUDE 与规范源逐字一致" "same" \
+  "$(cmp -s "$SCRIPT_DIR/claude/CLAUDE.md" "$SYNC_TEST_MAF_HOME/CLAUDE.md" && echo same || echo different)"
+
+# 用 mock runtime 直接观察 maf-server 启动时注入的交付能力标记。
+DELIVERY_PROBE="$SYNC_TEST_HOME/delivery-capabilities.log"
+for runtime_bin in opencode claude codex; do
+  cat > "$SYNC_TEST_HOME/bin/$runtime_bin" <<'RUNTIMEPROBE'
+#!/usr/bin/env bash
+printf '%s=%s\n' "$(basename "$0")" "${MAF_ASYNC_RESULT_DELIVERY:-missing}" >> "$MAF_DELIVERY_PROBE"
+RUNTIMEPROBE
+  chmod +x "$SYNC_TEST_HOME/bin/$runtime_bin"
+done
+cat > "$SYNC_TEST_MAF_HOME/maf.config.json" <<JSON
+{"server":{"port":$E2E_SERVER_PORT}}
+JSON
+for runtime in opencode claude codex; do
+  HOME="$SYNC_TEST_HOME" MAF_HOME="$SYNC_TEST_MAF_HOME" \
+    MAF_DELIVERY_PROBE="$DELIVERY_PROBE" PATH="$SYNC_TEST_HOME/bin:$PATH" \
+    node "$SCRIPT_DIR/bin/maf-server.mjs" tui "$runtime" >/dev/null
+done
+assert "opencode 入口确认异步恢复能力" "opencode=verified" "$(cat "$DELIVERY_PROBE" 2>/dev/null || true)"
+assert "Claude 入口确认 asyncRewake 能力" "claude=verified" "$(cat "$DELIVERY_PROBE" 2>/dev/null || true)"
+assert "Codex 入口默认同步等待" "codex=unverified" "$(cat "$DELIVERY_PROBE" 2>/dev/null || true)"
 
 rm -rf "$SYNC_TEST_HOME" "$SYNC_TEST_MAF_HOME"
 fi
@@ -1594,13 +1641,23 @@ assert "Server sync maps codex AGENTS" "codex/AGENTS.md" "$(grep 'codex/AGENTS.m
 assert "Server sync maps codex standard agents" "codex/agents" "$(grep 'codex/agents' "$SCRIPT_DIR/bin/maf-server.mjs" 2>/dev/null || true)"
 assert "Opencode write guard protects .codex" "/.codex/" "$(grep '/.codex/' "$SCRIPT_DIR/plugins/opencode-plugin-meta-agent-framework/index.js" 2>/dev/null || true)"
 
-# 验证 Meta-Agent-Server 异步派发模板带结果通知路由元数据，且明确点名任务走 fast path
+# 验证 Meta-Agent-Server Skill 自包含完整模板，runtime 入口优先使用 Skill，交付策略默认保守。
+DISPATCH_SKILL="$(cat "$SCRIPT_DIR/common_agent/server_skills/meta-agent-server/SKILL.md" 2>/dev/null || true)"
 DISPATCH_DOC="$(cat "$SCRIPT_DIR/common_agent/instructions/Meta-Agent-Server.md" "$SCRIPT_DIR/common_agent/rules/dispatch-flow.md" "$SCRIPT_DIR/opencode/agents/Meta-Agent-Server.md" "$SCRIPT_DIR/codex/AGENTS.md" "$SCRIPT_DIR/claude/CLAUDE.md" 2>/dev/null || true)"
-assert "Meta-Agent-Server dispatch origin" '"origin"' "$DISPATCH_DOC"
-assert "Meta-Agent-Server dispatch notify" '"notify"' "$DISPATCH_DOC"
-assert "Meta-Agent-Server dispatch origin agent" '"agent_name": "Meta-Agent-Server"' "$DISPATCH_DOC"
-assert "Meta-Agent-Server explicit dispatch fast path" "明确点名" "$DISPATCH_DOC"
-assert "Meta-Agent-Server avoids reading big rules first" "不要先读取" "$DISPATCH_DOC"
+DISPATCH_ALL="$DISPATCH_SKILL
+$DISPATCH_DOC"
+assert "Meta-Agent-Server dispatch origin" '"origin"' "$DISPATCH_SKILL"
+assert "Meta-Agent-Server dispatch notify" '"notify"' "$DISPATCH_SKILL"
+assert "Meta-Agent-Server dispatch origin agent" '"agent_name": "Meta-Agent-Server"' "$DISPATCH_SKILL"
+assert "Meta-Agent-Server dispatch nodes" '"nodes"' "$DISPATCH_SKILL"
+assert "Meta-Agent-Server executable heredoc template" "MAF_MINIMAL_WORKFLOW_TEMPLATE_BEGIN" "$DISPATCH_SKILL"
+assert "Meta-Agent-Server explicit dispatch fast path" "明确点名" "$DISPATCH_ALL"
+assert "Meta-Agent-Server avoids source search" "不要搜索业务目录" "$DISPATCH_ALL"
+assert "Meta-Agent-Server fixed user flow" "派发 -> 执行 -> 结果交付" "$DISPATCH_ALL"
+assert "Meta-Agent-Server deterministic delivery capability" "MAF_ASYNC_RESULT_DELIVERY=verified" "$DISPATCH_ALL"
+assert "Meta-Agent-Server sync fallback" "bash scripts/poll-workflow.sh <workflow_id>" "$DISPATCH_ALL"
+assert "Meta-Agent-Server removed unconditional async promise" "not_found" \
+  "$(rg -n '默认异步派发并返回|派发后不轮询|回复用户.*结果会自动回来' "$SCRIPT_DIR/common_agent" "$SCRIPT_DIR/opencode" "$SCRIPT_DIR/codex" "$SCRIPT_DIR/claude" 2>/dev/null || echo not_found)"
 
 fi
 
@@ -1697,11 +1754,11 @@ curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json'
 
 wait_until 10 "get_agent_field runtime $CODEX_AGENT" "codex" || true
 assert "Codex agent runtime" "codex" "$(get_agent_field runtime $CODEX_AGENT)"
-assert "Codex agent standby" "standby" "$(get_agent_field status $CODEX_AGENT)"
+assert "Codex managed Agent 尚无执行器时待启动" "standby" "$(get_agent_field status $CODEX_AGENT)"
 
 CODEX_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" \
   -H 'Content-Type: application/json' \
-  -d "{\"title\":\"Codex e2e workflow\",\"nodes\":[{\"id\":\"codex-1\",\"agent_name\":\"$CODEX_AGENT\",\"prompt\":\"Codex e2e task: say hello\",\"scope\":\"project\",\"intent\":\"query\"}]}")
+  -d "{\"title\":\"Codex e2e workflow\",\"nodes\":[{\"id\":\"codex-1\",\"agent_name\":\"$CODEX_AGENT\",\"prompt\":\"Codex e2e task: say hello\",\"scope\":\"project\",\"intent\":\"query\",\"delivery_mode\":\"detached\"}]}")
 CODEX_WF_ID=$(echo "$CODEX_WF" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('workflow_id',''))" 2>/dev/null)
 assert "Codex workflow 创建" "true" "$([ -n "$CODEX_WF_ID" ] && echo true || echo false)"
 
@@ -1758,7 +1815,7 @@ assert "Codex hook daemon agent" "$CODEX_AUTO_AGENT" "$(curl -s $CODEX_AUTO_DAEM
 
 wait_until 10 "get_agent_field runtime $CODEX_AUTO_AGENT" "codex" || true
 assert "Codex autostart runtime" "codex" "$(get_agent_field runtime $CODEX_AUTO_AGENT)"
-assert "Codex autostart standby" "standby" "$(get_agent_field status $CODEX_AUTO_AGENT)"
+assert "Codex autostart detached 待启动" "standby" "$(get_agent_field status $CODEX_AUTO_AGENT)"
 
 AUTO_PID=$(ss -tlnp 2>/dev/null | grep ":${CODEX_AUTO_PORT} " | grep -oP 'pid=\K\d+' | head -1)
 [[ -n "$AUTO_PID" ]] && kill -9 "$AUTO_PID" 2>/dev/null || true
@@ -1906,6 +1963,7 @@ AGENTEOF
 
 HOME="$CODEX_RECV_HOME" XDG_CONFIG_HOME="$CODEX_RECV_HOME/.config" \
   META_AGENT_SERVER="$E2E_SERVER" MAF_NODE_PORT="$CODEX_RECV_PORT" MAF_DIRECTORY="$CODEX_RECV_PROJECT" \
+  MAF_CODEX_DELIVERY="attached" \
   node "$CODEX_RECV_HOME/.meta-agent-framework/daemon.mjs" >/tmp/e2e-codex-receiver-daemon.log 2>&1 &
 CODEX_RECV_DAEMON_PID=$!
 disown $CODEX_RECV_DAEMON_PID
@@ -2174,8 +2232,8 @@ assert "Codex auto-remote result from mock" "mock attached codex completed" "$RE
 assert "Codex auto-remote did not create screen" "No Sockets" "$(screen -ls 2>&1 || true)"
 
 wait "$CODEX_REMOTE_WRAPPER_PID" 2>/dev/null || true
-wait_until 10 "get_agent_field status $CODEX_REMOTE_AGENT" "offline" || true
-assert "Codex auto-remote wrapper exit offline" "offline" "$(get_agent_field status $CODEX_REMOTE_AGENT)"
+wait_until 10 "get_agent_field status $CODEX_REMOTE_AGENT" "standby" || true
+assert "Codex auto-remote wrapper 退出后无执行器待启动" "standby" "$(get_agent_field status $CODEX_REMOTE_AGENT)"
 
 CODEX_REMOTE_APP_PID=$(python3 -c "import json,sys,pathlib; p=pathlib.Path('$CODEX_REMOTE_HOME/.meta-agent-framework/state/codex-app-server-${CODEX_REMOTE_AGENT}.json'); print(json.loads(p.read_text()).get('pid','') if p.exists() else '')" 2>/dev/null || true)
 CODEX_REMOTE_RECV_PID=$(cat "$CODEX_REMOTE_HOME/.meta-agent-framework/codex-attached-receiver-${CODEX_REMOTE_AGENT}.pid" 2>/dev/null || true)
@@ -2547,29 +2605,33 @@ BASE_TOTAL=$(echo "$BASE_STATS_RES" | python3 -c "import json,sys;print(json.loa
 BASE_ONLINE=$(echo "$BASE_STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_online',0))" 2>/dev/null)
 BASE_INVENTORY_TOTAL=$(curl -s "$E2E_SERVER/api/agents/inventory" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('total_agents',0))" 2>/dev/null)
 BOARD_AGENT="board-agent-e2e-$$"
+STANDBY_BOARD_AGENT="standby-board-agent-e2e-$$"
 REGISTER_RES=$(curl -s -X POST "$E2E_SERVER/api/clients/register" -H 'Content-Type: application/json' \
-  -d "{\"user_id\":\"e2e\",\"host_user\":\"e2e\",\"client_endpoint\":\"http://127.0.0.1:$NODE_PORT\",\"agents\":[{\"agent_name\":\"Meta-Agent-Server\",\"kind\":\"server\",\"runtime\":\"codex\",\"project_path\":\"/tmp/maf-server\",\"capabilities\":\"server control plane\",\"mode\":\"primary\"},{\"agent_name\":\"$BOARD_AGENT\",\"runtime\":\"opencode\",\"project_path\":\"/tmp\",\"capabilities\":\"test\",\"mode\":\"subagent\"}]}" 2>/dev/null)
+  -d "{\"user_id\":\"e2e\",\"host_user\":\"e2e\",\"client_endpoint\":\"http://127.0.0.1:$NODE_PORT\",\"agent_statuses\":{\"$BOARD_AGENT\":\"online\",\"$STANDBY_BOARD_AGENT\":\"standby\"},\"agents\":[{\"agent_name\":\"Meta-Agent-Server\",\"kind\":\"server\",\"runtime\":\"codex\",\"project_path\":\"/tmp/maf-server\",\"capabilities\":\"server control plane\",\"mode\":\"primary\"},{\"agent_name\":\"$BOARD_AGENT\",\"runtime\":\"opencode\",\"project_path\":\"/tmp\",\"capabilities\":\"test\",\"mode\":\"subagent\"},{\"agent_name\":\"$STANDBY_BOARD_AGENT\",\"runtime\":\"codex\",\"project_path\":\"/tmp\",\"capabilities\":\"standby test\",\"mode\":\"subagent\"}]}" 2>/dev/null)
 
 REGISTER_NAMES=$(echo "$REGISTER_RES" | python3 -c "import json,sys;d=json.load(sys.stdin);print(','.join(a.get('agent_name','') for a in d.get('agents',[])))" 2>/dev/null)
-assert "注册响应只返回 Client Agent" "$BOARD_AGENT" "$REGISTER_NAMES"
+assert "注册响应只返回 Client Agent" "$BOARD_AGENT,$STANDBY_BOARD_AGENT" "$REGISTER_NAMES"
 assert "注册响应不含 Server" "not_found" "$(echo "$REGISTER_NAMES" | grep -o 'Meta-Agent-Server' || echo not_found)"
 
 AGENTS_RES=$(curl -s "$E2E_SERVER/api/agents?all=true" 2>/dev/null)
 SERVER_IN_BOARD=$(echo "$AGENTS_RES" | python3 -c "import json,sys;print(any(a.get('agent_name')=='Meta-Agent-Server' for a in json.load(sys.stdin)))" 2>/dev/null)
 BOARD_IN_BOARD=$(echo "$AGENTS_RES" | python3 -c "import json,sys;print(any(a.get('agent_name')=='$BOARD_AGENT' for a in json.load(sys.stdin)))" 2>/dev/null)
+STANDBY_STATUS=$(echo "$AGENTS_RES" | python3 -c "import json,sys;print(next((a.get('status','') for a in json.load(sys.stdin) if a.get('agent_name')=='$STANDBY_BOARD_AGENT'),''))" 2>/dev/null)
 assert "Agent 看板不含 Server" "False" "$SERVER_IN_BOARD"
 assert "Agent 看板保留普通 Agent" "True" "$BOARD_IN_BOARD"
+assert "Agent 看板保留待启动 Agent" "standby" "$STANDBY_STATUS"
 
 STATS_RES=$(curl -s "$E2E_SERVER/api/agents/stats" 2>/dev/null)
 AGENTS_TOTAL=$(echo "$STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_total',''))" 2>/dev/null)
 AGENTS_ONLINE=$(echo "$STATS_RES" | python3 -c "import json,sys;print(json.load(sys.stdin).get('agents_online',''))" 2>/dev/null)
-EXPECTED_TOTAL=$((BASE_TOTAL + 1))
+EXPECTED_TOTAL=$((BASE_TOTAL + 2))
 EXPECTED_ONLINE=$((BASE_ONLINE + 1))
 assert "Agent stats total 排除 Server" "$EXPECTED_TOTAL" "$AGENTS_TOTAL"
 assert "Agent stats online 排除 Server" "$EXPECTED_ONLINE" "$AGENTS_ONLINE"
+assert "Agent stats online 排除 standby" "$EXPECTED_ONLINE" "$AGENTS_ONLINE"
 
 INVENTORY_TOTAL=$(curl -s "$E2E_SERVER/api/agents/inventory" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('total_agents',''))" 2>/dev/null)
-EXPECTED_INVENTORY_TOTAL=$((BASE_INVENTORY_TOTAL + 1))
+EXPECTED_INVENTORY_TOTAL=$((BASE_INVENTORY_TOTAL + 2))
 assert "Inventory total 排除 Server" "$EXPECTED_INVENTORY_TOTAL" "$INVENTORY_TOTAL"
 fi
 
@@ -2996,7 +3058,7 @@ RESULT_DAEMON_PID=""
 fi
 
 # ============================================================
-# Case 49: 通用 Execution 两阶段 Artifact + managed workspace + Patch
+# Case 49: 通用 Execution 两阶段 Artifact + direct repository + Gerrit
 # ============================================================
 if should_run 49; then
 echo -e "\n${YELLOW}Case 49: 通用 managed Execution 完整链路${NC}"
@@ -3011,7 +3073,12 @@ git init -b main "$EXEC_SEED" >/dev/null
 git -C "$EXEC_SEED" config user.name "MAF E2E"
 git -C "$EXEC_SEED" config user.email "maf-e2e@local"
 printf 'original baseline\n' > "$EXEC_SEED/source.txt"
-git -C "$EXEC_SEED" add source.txt
+create_codex_agent_toml "$EXEC_SEED" "$EXEC_AGENT" "Managed Execution direct repository agent"
+cat >> "$EXEC_SEED/.codex/agents/${EXEC_AGENT}.toml" << 'TOMLEOF'
+target_branch = "main"
+remote_name = "origin"
+TOMLEOF
+git -C "$EXEC_SEED" add source.txt .codex
 git -C "$EXEC_SEED" commit -m initial >/dev/null
 git -C "$EXEC_SEED" remote add origin "$EXEC_ORIGIN"
 git -C "$EXEC_SEED" push -u origin main >/dev/null
@@ -3050,21 +3117,209 @@ wait_until 25 "curl -s '$E2E_SERVER/api/v1/executions/$EXEC_ID'" '"status":"comp
 EXEC_FINAL=$(curl -s "$E2E_SERVER/api/v1/executions/$EXEC_ID")
 assert "managed Execution 最终 completed" "completed" "$(echo "$EXEC_FINAL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
 assert "Execution 枚举已上传 Artifact" "evidence/input.txt" "$EXEC_FINAL"
-assert "Execution 产生 Patch" '"available":true' "$EXEC_FINAL"
-assert "Patch 记录变更文件" "source.txt" "$EXEC_FINAL"
-assert "Patch 下载包含源码修改" "changed by generic managed execution" "$(curl -s "$E2E_SERVER/api/v1/executions/$EXEC_ID/patch")"
-
-EXEC_WORKSPACE=$(echo "$EXEC_FINAL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('patch',{}).get('workspace_path',''))")
+assert "Execution 使用当前 direct_repository 策略" '"workdir_policy":"direct_repository"' "$EXEC_FINAL"
+assert "Direct repository 不生成旧 Patch" '"available":false' "$EXEC_FINAL"
+assert "Managed app-server 完成 Gerrit 收尾" "Gerrit 交付" "$EXEC_FINAL"
+assert "Managed Execution 使用 app-server stdio" '\[app-server\] \[--stdio\]' "$(cat "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || true)"
 assert "基础仓库未被改写" "original baseline" "$(cat "$EXEC_BASE/source.txt")"
 assert "基础仓库保持 clean" "" "$(git -C "$EXEC_BASE" status --porcelain)"
-assert "复用 workspace 已恢复远端基线" "original baseline" "$(cat "$EXEC_WORKSPACE/source.txt")"
-assert "成功后释放 workspace 锁" "False" "$(python3 -c "from pathlib import Path; print((Path('$EXEC_WORKSPACE').parent / 'workspace.lock').exists())")"
+assert "Gerrit refs/for/main 收到提交" "changed by generic managed execution" "$(git --git-dir="$EXEC_ORIGIN" show refs/for/main:source.txt)"
+assert "成功后释放 repository lock" "0" "$(find "$E2E_MAF_HOME/repository-locks" -type f 2>/dev/null | wc -l)"
 
 EXEC_DUPLICATE=$(curl -s -X POST "$E2E_SERVER/api/v1/executions" -H 'Content-Type: application/json' \
   -d '{"request_id":"generic-request-001","title":"must not replace","prompt":"must not replace"}')
 assert "request_id 重试返回同一 Execution" "$EXEC_ID" "$(echo "$EXEC_DUPLICATE" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")"
 assert "request_id 重试不覆盖原始标题" "generic managed execution e2e" "$EXEC_DUPLICATE"
 printf 'normal\n' > "$E2E_MAF_HOME/state/mas-runtime-mode"
+fi
+
+# ============================================================
+# Case 50: Codex Dashboard 实时对话完整链路
+# ============================================================
+if should_run 50; then
+echo -e "\n${YELLOW}Case 50: Codex Dashboard 实时对话完整链路${NC}"
+
+CODEX_CONVERSATION_PROJECT="/tmp/e2e-codex-conversation-project"
+CODEX_CONVERSATION_AGENT="codex-conversation-e2e"
+CODEX_CONVERSATION_SSE_FILE="/tmp/maf-e2e-codex-conversation.sse"
+rm -rf "$CODEX_CONVERSATION_PROJECT"
+rm -f "$CODEX_CONVERSATION_SSE_FILE" "$MOCK_CODEX_ARGS_LOG"
+mkdir -p "$CODEX_CONVERSATION_PROJECT"
+create_codex_agent_toml "$CODEX_CONVERSATION_PROJECT" "$CODEX_CONVERSATION_AGENT" "Codex realtime conversation e2e agent"
+
+CODEX_CONVERSATION_CONNECT=$(curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$CODEX_CONVERSATION_AGENT\",\"runtime\":\"codex\",\"directory\":\"$CODEX_CONVERSATION_PROJECT\"}")
+assert "Codex conversation Agent 连接 Daemon" '"ok":true' "$CODEX_CONVERSATION_CONNECT"
+wait_until 10 "get_agent_field status '$CODEX_CONVERSATION_AGENT'" "standby" || true
+assert "Codex conversation Agent 尚无 app-server 时待启动" "standby" "$(get_agent_field status "$CODEX_CONVERSATION_AGENT")"
+
+CODEX_CONVERSATION_AGENT_ID=$(curl -s "$E2E_SERVER/api/agents?all=true" | python3 -c "import json,sys; print(next((a.get('id','') for a in json.load(sys.stdin) if a.get('agent_name')=='$CODEX_CONVERSATION_AGENT'),''))")
+CODEX_CONVERSATION_CREATE=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations" -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$CODEX_CONVERSATION_AGENT_ID\",\"title\":\"Realtime E2E\"}")
+CODEX_CONVERSATION_ID=$(echo "$CODEX_CONVERSATION_CREATE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('conversation',{}).get('id',''))" 2>/dev/null)
+assert "Codex conversation 创建成功" "true" "$([ -n "$CODEX_CONVERSATION_ID" ] && echo true || echo false)"
+assert "Codex conversation thread 已就绪" "mock-thread-1" "$CODEX_CONVERSATION_CREATE"
+CODEX_CONVERSATION_REOPEN=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations" -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$CODEX_CONVERSATION_AGENT_ID\"}")
+assert "同一 Agent 重复打开复用 conversation" "$CODEX_CONVERSATION_ID" "$(echo "$CODEX_CONVERSATION_REOPEN" | python3 -c "import json,sys; print(json.load(sys.stdin).get('conversation',{}).get('id',''))")"
+assert "Agent conversation 使用统一 source_type" '"source_type":"agent"' "$CODEX_CONVERSATION_REOPEN"
+assert "Codex conversation 默认 danger-full-access" '"sandbox_mode":"danger-full-access"' "$CODEX_CONVERSATION_CREATE"
+assert "Codex conversation 默认 never approval" '"approval_policy":"never"' "$CODEX_CONVERSATION_CREATE"
+assert "Codex app-server 使用私有 stdio" '\[app-server\] \[--stdio\]' "$(cat "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || true)"
+wait_until 10 "get_agent_field status '$CODEX_CONVERSATION_AGENT'" "online" || true
+assert "Codex conversation app-server 启动后在线" "online" "$(get_agent_field status "$CODEX_CONVERSATION_AGENT")"
+
+command curl -sN "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/stream?after_seq=0" >"$CODEX_CONVERSATION_SSE_FILE" &
+CODEX_CONVERSATION_SSE_PID=$!
+sleep 0.2
+CODEX_TURN_ONE=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/turns" \
+  -H 'Content-Type: application/json' -d '{"input":"Codex attached e2e task: realtime first turn"}')
+assert "Codex realtime 第一 turn 已接受" "true" "$(echo "$CODEX_TURN_ONE" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('id') else 'false')" 2>/dev/null)"
+wait_until 10 "curl -s '$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID' | python3 -c \"import json,sys; print(sum(t.get('status')=='completed' for t in json.load(sys.stdin).get('turns',[])))\"" "1" || true
+wait_until 10 "cat '$CODEX_CONVERSATION_SSE_FILE'" "realtime first turn" || true
+CODEX_SSE_FIRST=$(cat "$CODEX_CONVERSATION_SSE_FILE" 2>/dev/null || true)
+assert "SSE 实时收到 Assistant delta" "item/agentMessage/delta" "$CODEX_SSE_FIRST"
+assert "SSE 实时收到 Assistant completed item" "item/completed" "$CODEX_SSE_FIRST"
+assert "SSE 实时收到 turn completed" "turn/completed" "$CODEX_SSE_FIRST"
+assert "SSE 实时收到 Assistant 文本" "realtime first turn" "$CODEX_SSE_FIRST"
+
+CODEX_FIRST_LAST_SEQ=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/events?after_seq=0&limit=5000" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[-1]['seq'] if d else 0)")
+kill "$CODEX_CONVERSATION_SSE_PID" 2>/dev/null || true
+wait "$CODEX_CONVERSATION_SSE_PID" 2>/dev/null || true
+CODEX_CONVERSATION_SSE_PID=""
+: > "$CODEX_CONVERSATION_SSE_FILE"
+command curl -sN "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/stream?after_seq=$CODEX_FIRST_LAST_SEQ" >"$CODEX_CONVERSATION_SSE_FILE" &
+CODEX_CONVERSATION_SSE_PID=$!
+sleep 0.2
+
+CODEX_TURN_TWO=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/turns" \
+  -H 'Content-Type: application/json' -d '{"input":"Codex attached e2e task: realtime second turn"}')
+assert "Codex realtime 第二 turn 已接受" "true" "$(echo "$CODEX_TURN_TWO" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('id') else 'false')" 2>/dev/null)"
+wait_until 10 "curl -s '$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID' | python3 -c \"import json,sys; print(sum(t.get('status')=='completed' for t in json.load(sys.stdin).get('turns',[])))\"" "2" || true
+CODEX_REMOTE_DETAIL=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID")
+assert "远端 thread/read 还原第一条用户消息" "realtime first turn" "$(echo "$CODEX_REMOTE_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(' '.join(str(i.get('text','')) for t in (d.get('remote') or {}).get('thread',{}).get('turns',[]) for i in t.get('items',[]) if i.get('type')=='userMessage'))")"
+assert "远端 thread/read 还原第二条用户消息" "realtime second turn" "$(echo "$CODEX_REMOTE_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(' '.join(str(i.get('text','')) for t in (d.get('remote') or {}).get('thread',{}).get('turns',[]) for i in t.get('items',[]) if i.get('type')=='userMessage'))")"
+assert "Server turn 元数据不保存用户输入" "metadata_empty" "$(echo "$CODEX_REMOTE_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print('metadata_empty' if d.get('turns') and all(not t.get('input') and not t.get('result') for t in d.get('turns',[])) else 'content_found')")"
+wait_until 10 "cat '$CODEX_CONVERSATION_SSE_FILE'" "realtime second turn" || true
+CODEX_SSE_RESUMED=$(cat "$CODEX_CONVERSATION_SSE_FILE" 2>/dev/null || true)
+assert "SSE after_seq 增量续传收到新 turn" "realtime second turn" "$CODEX_SSE_RESUMED"
+assert "SSE after_seq 不重放第一 turn" "not_found" "$(echo "$CODEX_SSE_RESUMED" | rg -o 'realtime first turn' || echo not_found)"
+
+CODEX_TURN_SLOW=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/turns" \
+  -H 'Content-Type: application/json' -d '{"input":"MAF_E2E_SLOW_TURN Codex attached e2e task: interrupt me"}')
+assert "Codex realtime 慢 turn 已接受" "true" "$(echo "$CODEX_TURN_SLOW" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('id') else 'false')" 2>/dev/null)"
+wait_until 10 "get_agent_field status '$CODEX_CONVERSATION_AGENT'" "busy" || true
+assert "Codex realtime 活动 turn 标记 busy" "busy" "$(get_agent_field status "$CODEX_CONVERSATION_AGENT")"
+CODEX_INTERRUPT=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/interrupt" -H 'Content-Type: application/json' -d '{}')
+assert "Codex realtime turn 中断请求成功" '"ok":true' "$CODEX_INTERRUPT"
+wait_until 10 "curl -s '$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID' | python3 -c \"import json,sys; print(json.load(sys.stdin).get('turns',[])[-1].get('status',''))\"" "interrupted" || true
+CODEX_CONVERSATION_DETAIL=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID")
+assert "Codex realtime 中断状态保留在 turn 元数据" "interrupted" "$CODEX_CONVERSATION_DETAIL"
+wait_until 10 "get_agent_field status '$CODEX_CONVERSATION_AGENT'" "online" || true
+assert "Codex realtime turn 结束后 bridge 仍在线" "online" "$(get_agent_field status "$CODEX_CONVERSATION_AGENT")"
+
+CODEX_EVENTS=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/events?after_seq=0&limit=5000")
+CODEX_SEQ_CHECK=$(echo "$CODEX_EVENTS" | python3 -c "import json,sys; d=json.load(sys.stdin); s=[e['seq'] for e in d]; print('ordered_unique' if s and s==sorted(s) and len(s)==len(set(s)) else 'bad')")
+assert "Codex event seq 严格递增且唯一" "ordered_unique" "$CODEX_SEQ_CHECK"
+assert "Codex 当前进程事件包含用户消息" "maf/userMessage" "$CODEX_EVENTS"
+assert "Codex 当前进程事件包含 interrupt 状态" "interrupted" "$CODEX_EVENTS"
+
+REMOTE_CODEX_READ=$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "$E2E_REMOTE_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID")
+REMOTE_CODEX_WRITE=$(command curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST "$E2E_REMOTE_SERVER/api/codex/conversations/$CODEX_CONVERSATION_ID/turns" -H 'Content-Type: application/json' -d '{"input":"must be rejected"}')
+assert "远端 Dashboard 可匿名只读 conversation" "200" "$REMOTE_CODEX_READ"
+assert "远端 Dashboard 不能写 conversation" "401" "$REMOTE_CODEX_WRITE"
+LOCAL_TOKEN_INJECTION=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$DAEMON_URL/codex/conversations/start" -H 'Content-Type: application/json' \
+  -d "{\"conversation_id\":\"local-token-must-fail-0001\",\"agent_name\":\"$CODEX_CONVERSATION_AGENT\",\"project_path\":\"$CODEX_CONVERSATION_PROJECT\"}")
+assert "Daemon conversation 控制拒绝 local token 注入" "403" "$LOCAL_TOKEN_INJECTION"
+
+CODEX_CONVERSATION_RESET=$(curl -s -X POST "$E2E_SERVER/api/codex/conversations" -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$CODEX_CONVERSATION_AGENT_ID\",\"reset\":true}")
+assert "新开远端会话保持 Agent conversation ID" "$CODEX_CONVERSATION_ID" "$(echo "$CODEX_CONVERSATION_RESET" | python3 -c "import json,sys;print(json.load(sys.stdin).get('conversation',{}).get('id',''))")"
+assert "新开远端会话清空 turn 关联元数据" "0" "$(echo "$CODEX_CONVERSATION_RESET" | python3 -c "import json,sys;print(len(json.load(sys.stdin).get('turns',[])))")"
+assert "新开远端会话的 thread/read 为空" "0" "$(echo "$CODEX_CONVERSATION_RESET" | python3 -c "import json,sys;d=json.load(sys.stdin);print(len(((d.get('remote') or {}).get('thread') or {}).get('turns',[])))")"
+
+kill "$CODEX_CONVERSATION_SSE_PID" 2>/dev/null || true
+wait "$CODEX_CONVERSATION_SSE_PID" 2>/dev/null || true
+CODEX_CONVERSATION_SSE_PID=""
+fi
+
+# ============================================================
+# Case 51: Codex managed Workflow/Task 默认投递 + 取消
+# ============================================================
+if should_run 51; then
+echo -e "\n${YELLOW}Case 51: Codex managed Workflow/Task 默认投递 + 取消${NC}"
+
+CODEX_MANAGED_PROJECT="/tmp/e2e-codex-managed-project"
+CODEX_MANAGED_AGENT="codex-managed-e2e"
+rm -rf "$CODEX_MANAGED_PROJECT"
+rm -f "$MOCK_CODEX_ARGS_LOG"
+mkdir -p "$CODEX_MANAGED_PROJECT"
+create_codex_agent_toml "$CODEX_MANAGED_PROJECT" "$CODEX_MANAGED_AGENT" "Codex managed workflow e2e agent"
+
+CODEX_MANAGED_CONNECT=$(curl -s -X POST "$DAEMON_URL/agents/connect" -H 'Content-Type: application/json' \
+  -d "{\"agent_name\":\"$CODEX_MANAGED_AGENT\",\"runtime\":\"codex\",\"directory\":\"$CODEX_MANAGED_PROJECT\"}")
+assert "Codex managed Agent 连接 Daemon" '"ok":true' "$CODEX_MANAGED_CONNECT"
+wait_until 10 "get_agent_field status '$CODEX_MANAGED_AGENT'" "standby" || true
+assert "Codex managed Agent 尚无 app-server 时待启动" "standby" "$(get_agent_field status "$CODEX_MANAGED_AGENT")"
+
+CODEX_MANAGED_WF=$(curl -s -X POST "$E2E_SERVER/api/workflows" -H 'Content-Type: application/json' -d "{
+  \"title\":\"Codex managed default workflow\",
+  \"nodes\":[{\"id\":\"managed-1\",\"agent_name\":\"$CODEX_MANAGED_AGENT\",\"prompt\":\"Codex managed e2e workflow task\",\"scope\":\"project\",\"intent\":\"query\"}]
+}")
+CODEX_MANAGED_WF_ID=$(echo "$CODEX_MANAGED_WF" | python3 -c "import json,sys;print(json.load(sys.stdin).get('workflow_id',''))")
+assert "Codex managed Workflow 创建" "true" "$([ -n "$CODEX_MANAGED_WF_ID" ] && echo true || echo false)"
+wait_until 20 "curl -s '$E2E_SERVER/api/workflows/$CODEX_MANAGED_WF_ID' | python3 -c \"import json,sys;print(json.load(sys.stdin).get('status',''))\"" "completed" || true
+CODEX_MANAGED_WF_DETAIL=$(curl -s "$E2E_SERVER/api/workflows/$CODEX_MANAGED_WF_ID")
+assert "Codex Workflow 默认 managed 完成" "completed" "$(echo "$CODEX_MANAGED_WF_DETAIL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+CODEX_MANAGED_CONVERSATION_ID=$(echo "$CODEX_MANAGED_WF_DETAIL" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('nodes',[{}])[0].get('conversation_id',''))")
+assert "Workflow 节点关联 managed conversation" "true" "$([ -n "$CODEX_MANAGED_CONVERSATION_ID" ] && echo true || echo false)"
+CODEX_MANAGED_CONVERSATION=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_MANAGED_CONVERSATION_ID")
+assert "Workflow 复用 Agent conversation source_type" '"source_type":"agent"' "$CODEX_MANAGED_CONVERSATION"
+assert "Workflow turn 严格关联 workflow_id" "$CODEX_MANAGED_WF_ID" "$CODEX_MANAGED_CONVERSATION"
+assert "Workflow Assistant 结果来自远端 thread/read" "mock attached codex completed" "$(echo "$CODEX_MANAGED_CONVERSATION" | python3 -c "import json,sys;d=json.load(sys.stdin);print(' '.join(str(i.get('text','')) for t in ((d.get('remote') or {}).get('thread') or {}).get('turns',[]) for i in t.get('items',[]) if i.get('type')=='agentMessage'))")"
+assert "Workflow turn 不保存正文" "metadata_empty" "$(echo "$CODEX_MANAGED_CONVERSATION" | python3 -c "import json,sys;d=json.load(sys.stdin);print('metadata_empty' if all(not t.get('input') and not t.get('result') for t in d.get('turns',[])) else 'content_found')")"
+assert "Managed Workflow 使用 app-server stdio" '\[app-server\] \[--stdio\]' "$(cat "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || true)"
+assert "Managed Workflow 未调用 Codex detached 参数" "not_found" "$(rg -o '\[-s\]|\[exec\]' "$MOCK_CODEX_ARGS_LOG" 2>/dev/null || echo not_found)"
+wait_until 10 "get_agent_field status '$CODEX_MANAGED_AGENT'" "online" || true
+assert "Managed Workflow app-server 空闲后在线" "online" "$(get_agent_field status "$CODEX_MANAGED_AGENT")"
+
+CODEX_MANAGED_TASK=$(curl -s -X POST "$E2E_SERVER/api/tasks" -H 'Content-Type: application/json' -d "{
+  \"type\":\"custom\",
+  \"title\":\"Codex managed traditional task\",
+  \"description\":\"Codex attached e2e task: managed traditional task\",
+  \"target_agent\":\"$CODEX_MANAGED_AGENT\",
+  \"metadata\":{\"delivery_mode\":\"managed\"}
+}")
+CODEX_MANAGED_TASK_ID=$(echo "$CODEX_MANAGED_TASK" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
+wait_until 20 "curl -s '$E2E_SERVER/api/tasks/$CODEX_MANAGED_TASK_ID' | python3 -c \"import json,sys;print(json.load(sys.stdin).get('status',''))\"" "completed" || true
+assert "传统 Task managed 完成" "completed" "$(curl -s "$E2E_SERVER/api/tasks/$CODEX_MANAGED_TASK_ID" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
+CODEX_TASK_CONVERSATION_ID="$CODEX_MANAGED_CONVERSATION_ID"
+CODEX_TASK_CONVERSATION=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_TASK_CONVERSATION_ID")
+assert "Workflow 与传统 Task 复用 conversation" "$CODEX_MANAGED_CONVERSATION_ID" "$CODEX_TASK_CONVERSATION_ID"
+assert "传统 Task conversation 保持 Agent source_type" '"source_type":"agent"' "$CODEX_TASK_CONVERSATION"
+assert "传统 Task turn 严格关联 task_id" "$CODEX_MANAGED_TASK_ID" "$CODEX_TASK_CONVERSATION"
+
+CODEX_CANCEL_TASK=$(curl -s -X POST "$E2E_SERVER/api/tasks" -H 'Content-Type: application/json' -d "{
+  \"type\":\"custom\",
+  \"title\":\"Codex managed cancellation task\",
+  \"description\":\"MAF_E2E_SLOW_TURN Codex attached e2e task: cancel managed task\",
+  \"target_agent\":\"$CODEX_MANAGED_AGENT\",
+  \"metadata\":{\"delivery_mode\":\"managed\"}
+}")
+CODEX_CANCEL_TASK_ID=$(echo "$CODEX_CANCEL_TASK" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
+CODEX_CANCEL_CONVERSATION_ID="$CODEX_MANAGED_CONVERSATION_ID"
+for i in $(seq 1 20); do
+  CODEX_CANCEL_TURN_STATUS=$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CANCEL_CONVERSATION_ID" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next((t.get('status','') for t in reversed(d.get('turns',[])) if t.get('task_id')=='$CODEX_CANCEL_TASK_ID'),''))")
+  [[ "$CODEX_CANCEL_TURN_STATUS" == "running" ]] && break
+  sleep 0.1
+done
+assert "取消 Task 仍复用同一 Agent conversation" "$CODEX_MANAGED_CONVERSATION_ID" "$CODEX_CANCEL_CONVERSATION_ID"
+CODEX_CANCEL_RESPONSE=$(curl -s -X POST "$E2E_SERVER/api/tasks/$CODEX_CANCEL_TASK_ID/cancel" -H 'Content-Type: application/json' -d '{"reason":"managed e2e cancellation"}')
+assert "传统 managed Task 取消成功" '"status":"cancelled"' "$CODEX_CANCEL_RESPONSE"
+wait_until 10 "curl -s '$E2E_SERVER/api/codex/conversations/$CODEX_CANCEL_CONVERSATION_ID' | python3 -c \"import json,sys;d=json.load(sys.stdin);print(next((t.get('status','') for t in reversed(d.get('turns',[])) if t.get('task_id')=='$CODEX_CANCEL_TASK_ID'),''))\"" "interrupted" || true
+assert "Task cancel 映射到 turn interrupt" "interrupted" "$(curl -s "$E2E_SERVER/api/codex/conversations/$CODEX_CANCEL_CONVERSATION_ID" | python3 -c "import json,sys;d=json.load(sys.stdin);print(next((t.get('status','') for t in reversed(d.get('turns',[])) if t.get('task_id')=='$CODEX_CANCEL_TASK_ID'),''))")"
+sleep 2.2
+assert "取消后的迟到结果不覆盖 Task" "cancelled" "$(curl -s "$E2E_SERVER/api/tasks/$CODEX_CANCEL_TASK_ID" | python3 -c "import json,sys;print(json.load(sys.stdin).get('status',''))")"
 fi
 
 # ============================================================

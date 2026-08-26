@@ -6,10 +6,12 @@
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 const THREAD_ID = process.env.MOCK_CODEX_THREAD_ID || "mock-thread-1";
 const NO_TURN_COMPLETED = process.env.MOCK_CODEX_NO_TURN_COMPLETED === "1" || process.env.MOCK_CODEX_NO_TURN_COMPLETED === "true";
+const NO_AGENT_DELTA = process.env.MOCK_CODEX_NO_AGENT_DELTA === "1" || process.env.MOCK_CODEX_NO_AGENT_DELTA === "true";
 const TURN_STATUS_OBJECT = process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "1" || process.env.MOCK_CODEX_TURN_STATUS_OBJECT === "true";
 const REQUIRE_WORKSPACE_WRITE = process.env.MOCK_CODEX_REQUIRE_WORKSPACE_WRITE === "1" || process.env.MOCK_CODEX_REQUIRE_WORKSPACE_WRITE === "true";
 const TURN_DELAY_MS = parseInt(process.env.MOCK_CODEX_TURN_DELAY_MS || "0", 10) || 50;
@@ -55,11 +57,53 @@ function mockThread() {
 
 function responseFor(msg, send) {
   const { id, method, params = {} } = msg;
+  if (process.env.MOCK_CODEX_RPC_LOG && method) {
+    try { appendFileSync(process.env.MOCK_CODEX_RPC_LOG, `${method}\n`); } catch {}
+  }
   if (method === "initialize") {
     send({ id, result: { userAgent: "mock-codex-app-server/0", codexHome: "/tmp/mock-codex-home", platformFamily: "unix", platformOs: "linux" } });
     return;
   }
   if (method === "initialized") return;
+  if (method === "thread/start") {
+    send({ id, result: {
+      thread: mockThread(),
+      model: params.model || "mock-model",
+      modelProvider: "mock",
+      serviceTier: null,
+      cwd: params.cwd || process.cwd(),
+      runtimeWorkspaceRoots: params.runtimeWorkspaceRoots || [],
+      instructionSources: [],
+      approvalPolicy: params.approvalPolicy || "never",
+      approvalsReviewer: { type: "user" },
+      sandbox: params.sandbox || { type: "dangerFullAccess" },
+      activePermissionProfile: null,
+      reasoningEffort: null,
+      multiAgentMode: "explicitRequestOnly",
+    } });
+    return;
+  }
+  if (method === "thread/resume") {
+    send({ id, result: {
+      thread: mockThread(),
+      model: params.model || "mock-model",
+      modelProvider: "mock",
+      serviceTier: null,
+      cwd: params.cwd || process.cwd(),
+      runtimeWorkspaceRoots: params.runtimeWorkspaceRoots || [],
+      instructionSources: [],
+      approvalPolicy: params.approvalPolicy || "never",
+      approvalsReviewer: { type: "user" },
+      sandbox: params.sandbox || { type: "dangerFullAccess" },
+      activePermissionProfile: null,
+      reasoningEffort: null,
+      multiAgentMode: "explicitRequestOnly",
+      initialTurnsPage: null,
+      turnsBackwardsCursor: null,
+      itemsBackwardsCursor: null,
+    } });
+    return;
+  }
   if (method === "thread/loaded/list") {
     send({ id, result: { data: [THREAD_ID], nextCursor: null } });
     return;
@@ -83,6 +127,18 @@ function responseFor(msg, send) {
     }
     const turnId = `mock-turn-${++nextTurn}`;
     const prompt = (params.input || []).map(i => i.text || "").join("\n");
+    if (prompt.includes("MAF_E2E_MANAGED_EXECUTION") && process.env.MAF_SOURCE_DIR) {
+      const sourceDir = process.env.MAF_SOURCE_DIR;
+      writeFileSync(`${sourceDir}/source.txt`, "changed by generic managed execution\n");
+      if (process.env.MAF_OUTPUT_DIR) {
+        mkdirSync(process.env.MAF_OUTPUT_DIR, { recursive: true });
+        writeFileSync(`${process.env.MAF_OUTPUT_DIR}/agent-output.txt`, "artifact consumed\n");
+      }
+      execFileSync("git", ["-C", sourceDir, "config", "user.name", "MAF E2E"]);
+      execFileSync("git", ["-C", sourceDir, "config", "user.email", "maf-e2e@local"]);
+      execFileSync("git", ["-C", sourceDir, "add", "source.txt"]);
+      execFileSync("git", ["-C", sourceDir, "commit", "-m", "Managed app-server execution\n\nChange-Id: I1111111111111111111111111111111111111111"]);
+    }
     if (process.env.MOCK_CODEX_TURN_LOG) {
       try {
         appendFileSync(process.env.MOCK_CODEX_TURN_LOG, `--- turn ${turnId} ---\n${prompt}\n`);
@@ -91,20 +147,48 @@ function responseFor(msg, send) {
     const match = prompt.match(/Codex attached e2e task:[^\n]*/i);
     const notice = prompt.match(/\[(?:MAF 任务回报完成|MAF 后台任务结果通知)\][\s\S]*/);
     const text = notice ? notice[0] : `mock attached codex completed: ${match ? match[0] : "no prompt match"}`;
+    const delayMs = prompt.includes("MAF_E2E_SLOW_TURN")
+      ? (parseInt(process.env.MOCK_CODEX_SLOW_TURN_DELAY_MS || "0", 10) || 2000)
+      : TURN_DELAY_MS;
     const startedAt = Date.now() / 1000;
-    const turn = { id: turnId, items: [], itemsView: "all", status: turnStatus("inProgress"), error: null, startedAt, completedAt: null, durationMs: null };
+    const turn = {
+      id: turnId,
+      items: [{ type: "userMessage", id: `user-${turnId}`, text: prompt }],
+      itemsView: "all",
+      status: turnStatus("inProgress"),
+      error: null,
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+    };
     turns.push(turn);
     send({ id, result: { turn: { ...turn } } });
     setTimeout(() => {
-      turn.items = [{ type: "agentMessage", id: "agent-1", text, phase: null, memoryCitation: null }];
+      if (normalizeTurnStatus(turn.status) !== "inProgress") return;
+      const agentItem = { type: "agentMessage", id: `agent-${turnId}`, text, phase: null, memoryCitation: null };
+      turn.items.push(agentItem);
       turn.status = turnStatus("completed");
       turn.completedAt = Date.now() / 1000;
       turn.durationMs = 10;
-      send({ method: "item/agentMessage/delta", params: { threadId: THREAD_ID, turnId, itemId: "agent-1", delta: text } });
+      if (!NO_AGENT_DELTA) {
+        send({ method: "item/agentMessage/delta", params: { threadId: THREAD_ID, turnId, itemId: "agent-1", delta: text } });
+      }
+      send({ method: "item/completed", params: { threadId: THREAD_ID, turnId, item: { ...agentItem } } });
       if (!NO_TURN_COMPLETED) {
         send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { ...turn, items: [...turn.items] } } });
       }
-    }, TURN_DELAY_MS);
+    }, delayMs);
+    return;
+  }
+  if (method === "turn/interrupt") {
+    const turn = turns.find(item => item.id === params.turnId);
+    if (turn) {
+      turn.status = turnStatus("interrupted");
+      turn.completedAt = Date.now() / 1000;
+      turn.durationMs = 10;
+      send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { ...turn, items: [...turn.items] } } });
+    }
+    send({ id, result: {} });
     return;
   }
   if (id !== undefined) send({ id, error: { code: -32601, message: `method not found: ${method}` } });

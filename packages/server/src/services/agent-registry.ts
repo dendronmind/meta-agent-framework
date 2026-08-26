@@ -576,9 +576,9 @@ export class AgentRegistry {
   getStats(): { users_total: number; users_online: number; agents_total: number; agents_online: number } {
     const db = getDb();
     const agents = db.prepare('SELECT COUNT(*) as c FROM agents WHERE agent_name <> ?').get(SERVER_AGENT_NAME) as { c: number };
-    const agentsOnline = db.prepare("SELECT COUNT(*) as c FROM agents WHERE status IN ('online', 'standby', 'busy') AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
+    const agentsOnline = db.prepare("SELECT COUNT(*) as c FROM agents WHERE status IN ('online', 'busy') AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
     const users = db.prepare('SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE agent_name <> ?').get(SERVER_AGENT_NAME) as { c: number };
-    const usersOnline = db.prepare("SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE status IN ('online', 'standby', 'busy') AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
+    const usersOnline = db.prepare("SELECT COUNT(DISTINCT user_id || host_user) as c FROM agents WHERE status IN ('online', 'busy') AND agent_name <> ?").get(SERVER_AGENT_NAME) as { c: number };
     return {
       users_total: users.c,
       users_online: usersOnline.c,

@@ -35,6 +35,14 @@ router.post('/:id/dispatch', (req: Request, res: Response) => {
   }
 });
 
+/** POST /api/tasks/:id/cancel — 取消传统 Task，并中断 managed Codex turn。 */
+router.post('/:id/cancel', async (req: Request, res: Response) => {
+  const reason = String(req.body?.reason || 'Task cancelled by caller').trim().slice(0, 4000);
+  const outcome = await taskDispatcher.cancel(req.params.id as string, reason || 'Task cancelled by caller');
+  if (!outcome) { res.status(404).json({ error: 'Task not found' }); return; }
+  res.json(outcome);
+});
+
 /** POST /api/tasks/:id/result — 远端 agent 回报结果 */
 router.post('/:id/result', (req: Request, res: Response) => {
   const principal = res.locals.mafPrincipal;

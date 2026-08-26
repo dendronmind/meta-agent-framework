@@ -301,6 +301,94 @@ function initTables(): void {
     )
   `);
 
+  sqlJsDb.run(`
+    CREATE TABLE IF NOT EXISTS codex_conversations (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'starting',
+      project_path TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      approval_policy TEXT NOT NULL DEFAULT 'never',
+      sandbox_mode TEXT NOT NULL DEFAULT 'danger-full-access',
+      source_type TEXT NOT NULL DEFAULT 'dashboard',
+      context_key TEXT NOT NULL DEFAULT '',
+      last_event_seq INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  sqlJsDb.run(`
+    CREATE TABLE IF NOT EXISTS codex_turns (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      remote_turn_id TEXT NOT NULL DEFAULT '',
+      input TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      error TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'dashboard',
+      workflow_id TEXT NOT NULL DEFAULT '',
+      node_id TEXT NOT NULL DEFAULT '',
+      execution_id TEXT NOT NULL DEFAULT '',
+      task_id TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES codex_conversations(id) ON DELETE CASCADE
+    )
+  `);
+
+  const conversationMigrations: Record<string, string> = {
+    source_type: "TEXT NOT NULL DEFAULT 'dashboard'",
+    context_key: "TEXT NOT NULL DEFAULT ''",
+  };
+  const conversationInfo = sqlJsDb.exec("PRAGMA table_info('codex_conversations')")?.[0];
+  const conversationColumns = new Set<string>((conversationInfo?.values || []).map((row: any[]) => String(row[1])));
+  for (const [name, definition] of Object.entries(conversationMigrations)) {
+    if (!conversationColumns.has(name)) sqlJsDb.run(`ALTER TABLE codex_conversations ADD COLUMN ${name} ${definition}`);
+  }
+
+  const turnMigrations: Record<string, string> = {
+    result: "TEXT NOT NULL DEFAULT ''",
+    source_type: "TEXT NOT NULL DEFAULT 'dashboard'",
+    workflow_id: "TEXT NOT NULL DEFAULT ''",
+    node_id: "TEXT NOT NULL DEFAULT ''",
+    execution_id: "TEXT NOT NULL DEFAULT ''",
+    task_id: "TEXT NOT NULL DEFAULT ''",
+  };
+  const turnInfo = sqlJsDb.exec("PRAGMA table_info('codex_turns')")?.[0];
+  const turnColumns = new Set<string>((turnInfo?.values || []).map((row: any[]) => String(row[1])));
+  for (const [name, definition] of Object.entries(turnMigrations)) {
+    if (!turnColumns.has(name)) sqlJsDb.run(`ALTER TABLE codex_turns ADD COLUMN ${name} ${definition}`);
+  }
+
+  sqlJsDb.run(`
+    CREATE TABLE IF NOT EXISTS codex_events (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL DEFAULT '',
+      client_event_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES codex_conversations(id) ON DELETE CASCADE,
+      UNIQUE(conversation_id, client_event_id),
+      UNIQUE(conversation_id, seq)
+    )
+  `);
+
+  // Conversation content belongs to the remote Codex thread. MAF only keeps
+  // routing/status metadata needed to address that thread and correlate work.
+  sqlJsDb.run("UPDATE codex_turns SET input = '', result = '' WHERE input != '' OR result != ''");
+  sqlJsDb.run('DELETE FROM codex_events');
+
   // 早期试验版 Execution 表使用 case_id/run_id/case_type。启动时一次性迁移为
   // 通用协议字段，避免框架数据库继续固化某个业务平台的数据模型。
   const executionInfo = sqlJsDb.exec("PRAGMA table_info('executions')")?.[0];
@@ -370,6 +458,14 @@ function initTables(): void {
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_client_identities_status ON client_identities(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status)");
   sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_executions_external_id ON executions(external_id)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_conversations_agent ON codex_conversations(agent_id, updated_at)");
+  sqlJsDb.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_conversations_context ON codex_conversations(context_key) WHERE context_key != ''");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_conversations_status ON codex_conversations(status)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_turns_conversation ON codex_turns(conversation_id, created_at)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_turns_status ON codex_turns(status)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_turns_workflow ON codex_turns(workflow_id, node_id, execution_id)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_turns_task ON codex_turns(task_id)");
+  sqlJsDb.run("CREATE INDEX IF NOT EXISTS idx_codex_events_conversation_seq ON codex_events(conversation_id, seq)");
 }
 
 // ============================================================

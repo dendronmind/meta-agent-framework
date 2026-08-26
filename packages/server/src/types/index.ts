@@ -113,7 +113,7 @@ export interface HeartbeatPayload {
 
 // --- Task ---
 
-export type TaskStatus = 'pending' | 'dispatched' | 'running' | 'completed' | 'failed' | 'timeout';
+export type TaskStatus = 'pending' | 'dispatched' | 'running' | 'completed' | 'failed' | 'timeout' | 'cancelled';
 export type TaskType = 'requirement' | 'bug' | 'review' | 'custom';
 
 export interface TaskCreatePayload {
@@ -232,6 +232,7 @@ export type ExecutionErrorCode =
 
 /** 工作流失败策略 */
 export type WorkflowFailurePolicy = 'fail_fast' | 'all_settled';
+export type CodexDeliveryMode = 'attached' | 'detached' | 'managed' | 'auto';
 
 /** 工作流节点定义 */
 export interface WorkflowNode {
@@ -240,13 +241,15 @@ export interface WorkflowNode {
   prompt: string;                  // 给 agent 的指令（描述目标即可，不需要写具体命令）
   scope?: ExecuteScope;            // 操作范围：project（默认）| agent_self
   intent?: ExecuteIntent;          // 任务意图：query（默认）| modify | review | diagnose | execute
-  delivery_mode?: 'attached' | 'detached' | 'auto'; // Codex 可选投递语义
-  execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
+  delivery_mode?: CodexDeliveryMode; // Codex 可选投递语义
+  execution_mode?: CodexDeliveryMode; // delivery_mode 兼容别名
   detached?: boolean;              // Codex detached screen/TUI 兜底开关
   workspace_id?: string;           // Client 侧可复用工作区的逻辑标识
   depends_on?: string[];           // 依赖的前置节点 ID
   status: WorkflowNodeStatus;
   execution_id?: string;           // Server 派发时生成；结果回报必须精确匹配
+  conversation_id?: string;        // managed app-server 可观测会话
+  conversation_turn_id?: string;   // managed app-server turn
   result?: string;                 // 执行结果
   error_code?: ExecutionErrorCode;
   started_at?: string;
@@ -308,12 +311,15 @@ export interface ExecuteCommand {
   scope: ExecuteScope;             // 操作范围：project（默认）| agent_self
   intent: ExecuteIntent;           // 任务意图：query | modify | review | diagnose | execute
   runtime?: AgentRuntime;          // 运行时：opencode（默认）/ claude-code / codex
-  delivery_mode?: 'attached' | 'detached' | 'auto'; // Codex 可选投递语义
-  execution_mode?: 'attached' | 'detached' | 'auto'; // delivery_mode 兼容别名
+  delivery_mode?: CodexDeliveryMode; // Codex 可选投递语义
+  execution_mode?: CodexDeliveryMode; // delivery_mode 兼容别名
   detached?: boolean;              // Codex detached screen/TUI 兜底开关
   session_id?: string;             // Client 侧 agent session ID（续接用，首次为空）
   workspace_id?: string;           // Client 侧可复用工作区的逻辑标识
   run_context?: ExecutionRunContext;
+  codex_conversation_id?: string;
+  codex_turn_id?: string;
+  codex_thread_id?: string;
 }
 
 // --- Framework Execution Protocol ---
@@ -546,7 +552,7 @@ export interface ProposalReviewPayload {
 
 export interface SSEEvent {
   type: 'client_registered' | 'client_offline' | 'client_dead' | 'client_revived' |
-        'task_created' | 'task_dispatched' | 'task_completed' | 'task_failed' |
+        'task_created' | 'task_dispatched' | 'task_completed' | 'task_failed' | 'task_cancelled' |
         'heartbeat' | 'agents_synced' | 'registry_synced' |
         'workflow_started' | 'workflow_node_running' | 'workflow_node_completed' |
         'workflow_node_failed' | 'workflow_completed' | 'workflow_failed' |

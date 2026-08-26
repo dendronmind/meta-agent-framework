@@ -308,7 +308,7 @@ export class FeishuRegistry implements ExternalRegistry {
     const recordId = this.recordIdMap.get(agent.agent_name);
     if (!recordId) return;
 
-    const isOnline = agent.status === 'online' || agent.status === 'standby' || agent.status === 'busy';
+    const isOnline = agent.status === 'online' || agent.status === 'busy';
     const fields: Record<string, any> = {
       '状态': agent.status,
       '最后心跳': Date.now(),

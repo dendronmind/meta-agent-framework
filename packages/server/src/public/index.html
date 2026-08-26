@@ -164,7 +164,7 @@
     .main-grid {
       margin-top: 16px;
       display: grid;
-      grid-template-columns: 390px minmax(560px, 1fr) 450px;
+      grid-template-columns: minmax(300px, 390px) minmax(0, 1fr) minmax(340px, 450px);
       gap: 16px;
       align-items: start;
     }
@@ -305,6 +305,51 @@
     .event .type { color: var(--blue); margin-right: 8px; font-weight: 750; }
     .event .data { color: #cbd5e1; word-break: break-word; }
     body.light .event .data { color: #475569; }
+
+    .codex-workspace { margin-top: 16px; }
+    .codex-grid { display: grid; grid-template-columns: 260px minmax(360px, 1fr) minmax(360px, 440px); min-height: 520px; }
+    .codex-column { min-width: 0; border-right: 1px solid var(--line); }
+    .codex-column:last-child { border-right: 0; }
+    .codex-column-header { padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--text-strong); font-size: 12px; font-weight: 750; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .codex-list { min-width: 0; padding: 10px; max-height: 520px; overflow: auto; }
+    .codex-agent, .codex-conversation { display: block; min-width: 0; width: 100%; overflow: hidden; text-align: left; border: 1px solid transparent; border-radius: 10px; padding: 10px; margin-bottom: 7px; color: var(--text); background: transparent; cursor: pointer; }
+    .codex-agent:hover, .codex-agent.selected, .codex-conversation:hover, .codex-conversation.selected { border-color: rgba(56, 189, 248, 0.45); background: rgba(14, 165, 233, 0.11); }
+    .codex-agent-title, .codex-conversation-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-strong); font-size: 12px; font-weight: 720; }
+    .codex-agent-meta, .codex-conversation-meta { display: block; min-width: 0; max-width: 100%; color: var(--muted); font-size: 10px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .codex-chat { display: flex; flex-direction: column; min-height: 520px; }
+    .codex-chat-header { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .codex-chat-header > div:first-child { min-width: 0; flex: 1 1 auto; }
+    .codex-chat-header > .codex-status-line { flex: 0 0 auto; }
+    .codex-chat-title { color: var(--text-strong); font-size: 14px; font-weight: 780; min-width: 0; }
+    .codex-chat-subtitle { color: var(--muted); font-size: 10px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .codex-messages { flex: 1; min-height: 300px; max-height: 520px; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .codex-message { max-width: 88%; padding: 10px 12px; border-radius: 12px; line-height: 1.55; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .codex-message.user { align-self: flex-end; background: rgba(14, 165, 233, 0.18); border: 1px solid rgba(56, 189, 248, 0.25); }
+    .codex-message.assistant { align-self: flex-start; background: rgba(51, 65, 85, 0.42); border: 1px solid rgba(148, 163, 184, 0.14); }
+    .codex-message-label { color: var(--muted); font-size: 10px; margin-bottom: 5px; font-weight: 720; }
+    .codex-composer { padding: 12px 14px; border-top: 1px solid var(--line); }
+    .codex-composer-row { display: flex; align-items: flex-end; gap: 8px; }
+    .codex-composer .textarea { min-height: 66px; max-height: 180px; }
+    .codex-side { min-height: 520px; }
+    .codex-timeline { padding: 10px; max-height: 470px; overflow: auto; }
+    .codex-timeline-item { border-left: 2px solid rgba(56, 189, 248, 0.42); padding: 8px 0 8px 11px; margin: 0 0 10px 3px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+    .codex-timeline-item.error { border-color: var(--red); color: #fda4af; }
+    .codex-timeline-item.running { border-color: var(--blue); }
+    .codex-timeline-item.completed { border-color: var(--green); }
+    .codex-timeline-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+    .codex-timeline-type { min-width: 0; color: var(--text-strong); font-weight: 720; }
+    .codex-timeline-text { color: var(--text); white-space: pre-wrap; }
+    .codex-timeline-files, .codex-timeline-plan { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+    .codex-timeline-file, .codex-timeline-plan-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: start; }
+    .codex-timeline-file code { min-width: 0; color: var(--text); white-space: normal; overflow-wrap: anywhere; }
+    .codex-timeline-details { margin-top: 6px; }
+    .codex-timeline-details summary { color: var(--blue); cursor: pointer; }
+    .codex-timeline-details pre { max-height: 260px; margin: 7px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: rgba(15, 23, 42, 0.35); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    body.light .codex-timeline-details pre { background: rgba(241, 245, 249, 0.72); }
+    .codex-empty { padding: 22px 14px; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; }
+    .codex-status-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    @media (max-width: 1100px) { .codex-grid { grid-template-columns: 220px minmax(0, 1fr); } .codex-side { grid-column: 1 / -1; min-height: 0; border-top: 1px solid var(--line); border-right: 0; } .codex-timeline { max-height: 220px; } }
+    @media (max-width: 700px) { .codex-grid { display: block; } .codex-column { border-right: 0; border-bottom: 1px solid var(--line); } .codex-list { max-height: 230px; } .codex-chat { min-height: 480px; } .codex-chat-header { align-items: stretch; flex-direction: column; } .codex-chat-header > .codex-status-line { justify-content: flex-start; } .codex-messages { max-height: 390px; } .codex-composer-row { align-items: stretch; flex-direction: column; } .codex-composer-row .btn { align-self: flex-end; } }
 
     .filter-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
     .chip {
@@ -504,6 +549,28 @@
       </div>
       <div class="panel-body scroll small"><div class="event-log" id="event-log"></div></div>
     </section>
+
+    <section class="panel codex-workspace" id="codex-workspace">
+      <div class="panel-header">
+        <div><div class="panel-title" data-i18n="codexConversations">Codex Conversations</div><div class="panel-subtitle" data-i18n="codexConversationsHint">通过远端 Codex app-server 实时查看对话与执行过程</div></div>
+        <div class="codex-status-line"><span class="dot yellow" id="codex-stream-dot"></span><span class="form-status" id="codex-stream-status">disconnected</span></div>
+      </div>
+      <div class="codex-grid">
+        <section class="codex-column">
+          <div class="codex-column-header"><span data-i18n="codexAgents">Codex Agents</span><span class="pill codex" id="codex-agent-count">0</span></div>
+          <div class="codex-list" id="codex-agent-list"></div>
+        </section>
+        <section class="codex-column codex-chat">
+          <div class="codex-chat-header"><div><div class="codex-chat-title" id="codex-chat-title">-</div><div class="codex-chat-subtitle mono" id="codex-chat-subtitle">-</div></div><div class="codex-status-line"><span class="pill unknown" id="codex-conversation-status">none</span><button class="btn" id="codex-new-btn" type="button" data-i18n="newConversation" disabled>新开远端会话</button><button class="btn danger" id="codex-stop-btn" type="button" data-i18n="stopTurn" disabled>停止</button></div></div>
+          <div class="codex-messages" id="codex-messages"></div>
+          <form class="codex-composer" id="codex-composer"><div class="codex-composer-row"><textarea class="textarea" id="codex-input" maxlength="262144" data-i18n-placeholder="codexInputPlaceholder" placeholder="向远端 Codex 发送消息…"></textarea><button class="btn primary" id="codex-send-btn" type="submit" data-i18n="sendMessage" disabled>发送</button></div><div class="form-status" id="codex-compose-status"></div></form>
+        </section>
+        <aside class="codex-column codex-side">
+          <div class="codex-column-header"><span data-i18n="codexExecution">Execution</span><span class="pill info" id="codex-event-count">0</span></div>
+          <div class="codex-timeline" id="codex-timeline"></div>
+        </aside>
+      </div>
+    </section>
   </div>
 
   <dialog class="agent-dialog" id="agent-detail-dialog">
@@ -518,6 +585,7 @@
     </div>
   </dialog>
 
+  <script src="/codex-process-view.js"></script>
   <script>
     const API = location.origin;
     const params = new URLSearchParams(location.search);
@@ -531,7 +599,8 @@
         agentBoard: 'Agent 看板', agentBoardHint: '点击 Agent 查看描述、源码路径和运行详情', agentDetail: 'Agent 详情', agentDescription: '职责描述', agentIdentity: '身份与运行位置', projectPath: '源码路径', clientEndpoint: 'Client 地址', clientId: 'Client ID', daemonPort: 'Daemon 端口', registeredAt: '注册时间', lastHeartbeat: '最后心跳', notConfigured: '未配置', deleteHistoricalAgent: '删除历史 Agent', deleteAgentConfirm: '确定删除这个历史 Agent 吗？此操作只删除注册记录。', deleteAgentFailed: '删除 Agent 失败', deleteAgentOnlyHistorical: '在线或忙碌 Agent 受保护，不能删除。', readonlyAgentDelete: '远程只读模式可查看详情；删除操作仅限 Server 本机管理视图。', masSessions: 'MAS 会话', masSessionsHint: 'Meta-Agent-Server 分诊 / 编排会话',
         tasks: 'Tasks', tasksHint: '传统任务队列 / Agent 回报', liveEvents: '实时事件日志', liveEventsHint: '/api/events SSE 实时事件', runtimeContext: 'Runtime 上下文', runtimeContextHint: 'Server / Registry / Filter 状态',
         inventory: 'Skills & MCP 能力矩阵', inventoryHint: '全网能力覆盖与缺口', otaStatus: 'OTA / 版本状态', otaStatusHint: 'Client 版本、Plugin hash 与升级状态', evolveResults: 'Evolve 结果', evolveResultsHint: 'Skill / MCP / Agent 配置进化结果', clientIdentities: 'Client 机器身份', clientIdentitiesHint: '机器身份准入、审批与单机吊销', approve: '批准', revoke: '吊销', noClientIdentities: '暂无 Client 机器身份。Client 首次上线后会自动出现在这里。', clientActionFailed: 'Client 身份操作失败', fingerprint: '指纹', sourceIp: '来源 IP', lastSeen: '最近在线',
-        submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败',
+        submitMasTask: '派发 MAS 任务', submitMasTaskHint: '向 Meta-Agent-Server 提交高层任务，由 MAS 自动分诊并创建 workflow', masTaskTitle: '任务标题', masTaskTitlePlaceholder: '例如：检查当前 Agent 网络状态', masTaskDescription: '任务描述', masTaskDescriptionPlaceholder: '描述目标、范围、约束和期望输出。', advancedOptions: '高级选项：origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: '提交给 MAS', clearForm: '清空表单', submitting: '提交中…', titleRequired: '请填写任务标题。', invalidJson: '不是合法 JSON', taskSubmitted: 'MAS 任务已提交', sessionId: 'Session ID', statusText: '状态', rounds: '轮', readonlyActionHint: '当前为只读模式，无法派发任务。', submitFailed: '提交失败', codexConversations: 'Codex 对话', codexConversationsHint: '当前远端 Codex 上下文与实时执行过程', codexAgents: 'Codex Agents', codexConversationList: '当前上下文', codexExecution: '执行过程', newConversation: '新开远端会话', sendMessage: '发送', stopTurn: '停止', openConversation: '打开对话', codexInputPlaceholder: '向远端 Codex 发送消息…', codexNoAgents: '暂无可对话的 Codex Agent。', codexNoConversations: '选择 Agent 以打开远端会话。', codexSelectConversation: '选择一个 Codex Agent。', codexReadonly: '当前为只读模式，发送和停止不可用。', codexConversationCreated: '远端会话已就绪', codexConversationFailed: '远端会话打开失败', codexTurnFailed: '消息发送失败', codexNewConversationConfirm: '新开远端会话会清空当前上下文，是否继续？', codexConnecting: '连接中', codexConnected: '实时流已连接', codexDisconnected: '实时流已断开', codexProcessDetails: '详情', codexProcessProtocol: '协议数据', codexFileAdd: '新增', codexFileDelete: '删除', codexFileUpdate: '修改',
+        codexStep: { turnStart: '开始处理', turnComplete: '本轮完成', reasoning: '分析', plan: '计划', command: '运行命令', files: '修改文件', mcp: '调用 MCP', tool: '调用工具', collaboration: '协作调度', subagent: '子 Agent', web: '搜索网页', image: '处理图片', review: '代码审查', compaction: '压缩上下文', wait: '等待', hook: '运行 Hook', interrupt: '停止处理', error: '执行错误', event: '执行事件' },
         noWorkflow: '暂无 workflow。可通过 /api/workflows 或 /api/workflows/mas/task 创建。', noSelectedWorkflow: '暂无可展示 workflow。选择左侧 workflow，或通过 query 参数 workflow_id / agent_name / origin_id 过滤。', noNodes: '该 workflow 暂无节点信息。', noAgents: '暂无 agent 数据。', noSessions: '暂无 MAS session。调用 /api/workflows/mas/task 后会出现。', noTasks: '暂无传统 task 数据。', noEvents: '等待 SSE 事件。', noInventory: '暂无 Skills/MCP inventory 数据。等待 agent 心跳上报 skills/mcps 后会出现。', noEvolve: '暂无 evolve 结果。通过 /api/evolve/skill、/api/evolve/mcp 等接口推送后会出现。', noOta: '暂无 OTA 状态数据。',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: '创建时间', completedAt: '完成时间', nodes: '节点', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: '任务进入 MAF 控制面', dispatchNote: '按 agent_name 路由到节点', executeNoteIdle: '等待执行或已结束', resultNote: '最终状态', currentNode: '当前节点', coverage: '覆盖', gaps: '缺口', allAgents: '全部 Agent', latestHash: '最新 Hash', clientMinimum: 'Client 最低版本', serverVersion: 'Server 版本', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: '耗时', actions: '动作', endpoint: 'Endpoint', version: '版本', pluginHash: 'Plugin Hash', unknown: '未知', total: '总数', latest: '最新',
         status: { online: '在线', standby: '待启动', offline: '离线', busy: '忙碌', dead: '已失联', pending: '等待中', dispatched: '已派发', running: '运行中', completed: '已完成', failed: '失败', skipped: '已跳过', active: '活跃', done: '完成', unknown: '未知', current: '当前', outdated: '需升级', info: '信息' }
@@ -544,7 +613,8 @@
         agentBoard: 'Agent Board', agentBoardHint: 'Select an Agent to inspect its description, source path, and runtime', agentDetail: 'Agent Details', agentDescription: 'Responsibilities', agentIdentity: 'Identity and location', projectPath: 'Source path', clientEndpoint: 'Client endpoint', clientId: 'Client ID', daemonPort: 'Daemon port', registeredAt: 'Registered at', lastHeartbeat: 'Last heartbeat', notConfigured: 'Not configured', deleteHistoricalAgent: 'Delete historical Agent', deleteAgentConfirm: 'Delete this historical Agent? This only removes its registry record.', deleteAgentFailed: 'Failed to delete Agent', deleteAgentOnlyHistorical: 'Online or busy Agents are protected and cannot be deleted.', readonlyAgentDelete: 'Remote readonly mode can inspect details; deletion is available only from the Server-local management view.', masSessions: 'MAS Sessions', masSessionsHint: 'Meta-Agent-Server triage / orchestration sessions',
         tasks: 'Tasks', tasksHint: 'Legacy task queue / Agent reports', liveEvents: 'Live Event Log', liveEventsHint: '/api/events SSE live events', runtimeContext: 'Runtime Context', runtimeContextHint: 'Server / Registry / Filter state',
         inventory: 'Skills & MCP Inventory', inventoryHint: 'Capability coverage and gaps', otaStatus: 'OTA / Version Status', otaStatusHint: 'Client version, plugin hash, and upgrade status', evolveResults: 'Evolve Results', evolveResultsHint: 'Skill / MCP / Agent config evolution results', clientIdentities: 'Client Identities', clientIdentitiesHint: 'Machine enrollment, approval, and per-client revocation', approve: 'Approve', revoke: 'Revoke', noClientIdentities: 'No Client identities yet. A Client appears here after its first connection.', clientActionFailed: 'Client identity action failed', fingerprint: 'Fingerprint', sourceIp: 'Source IP', lastSeen: 'Last seen',
-        submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed',
+        submitMasTask: 'Submit MAS Task', submitMasTaskHint: 'Submit a high-level task to Meta-Agent-Server for triage and workflow creation', masTaskTitle: 'Task title', masTaskTitlePlaceholder: 'Example: Check current Agent network status', masTaskDescription: 'Task description', masTaskDescriptionPlaceholder: 'Describe the goal, scope, constraints, and expected output.', advancedOptions: 'Advanced options: origin / notify JSON', masOrigin: 'Origin JSON', masOriginPlaceholder: '{"source":"maf-console"}', masNotify: 'Notify JSON', masNotifyPlaceholder: '{"target":"maf-console"}', submitToMas: 'Submit to MAS', clearForm: 'Clear form', submitting: 'Submitting…', titleRequired: 'Please enter a task title.', invalidJson: 'is not valid JSON', taskSubmitted: 'MAS task submitted', sessionId: 'Session ID', statusText: 'Status', rounds: 'rounds', readonlyActionHint: 'Readonly mode is enabled; task dispatch is disabled.', submitFailed: 'Submit failed', codexConversations: 'Codex Conversations', codexConversationsHint: 'Current remote Codex context and live execution trace', codexAgents: 'Codex Agents', codexConversationList: 'Current context', codexExecution: 'Execution', newConversation: 'New remote session', sendMessage: 'Send', stopTurn: 'Stop', openConversation: 'Open conversation', codexInputPlaceholder: 'Send a message to remote Codex…', codexNoAgents: 'No Codex Agents are available for conversation.', codexNoConversations: 'Select an Agent to open its remote conversation.', codexSelectConversation: 'Select a Codex Agent.', codexReadonly: 'Readonly mode: sending and stopping are disabled.', codexConversationCreated: 'Remote session is ready', codexConversationFailed: 'Failed to open remote session', codexTurnFailed: 'Message send failed', codexNewConversationConfirm: 'Starting a new remote session clears the current context. Continue?', codexConnecting: 'connecting', codexConnected: 'live stream connected', codexDisconnected: 'live stream disconnected', codexProcessDetails: 'Details', codexProcessProtocol: 'Protocol data', codexFileAdd: 'Add', codexFileDelete: 'Delete', codexFileUpdate: 'Update',
+        codexStep: { turnStart: 'Started', turnComplete: 'Turn completed', reasoning: 'Analysis', plan: 'Plan', command: 'Run command', files: 'File changes', mcp: 'MCP call', tool: 'Tool call', collaboration: 'Collaboration', subagent: 'Sub-agent', web: 'Web search', image: 'Image', review: 'Code review', compaction: 'Context compacted', wait: 'Wait', hook: 'Hook', interrupt: 'Stopped', error: 'Execution error', event: 'Execution event' },
         noWorkflow: 'No workflows. Create one via /api/workflows or /api/workflows/mas/task.', noSelectedWorkflow: 'No workflow to display. Select one on the left, or filter by workflow_id / agent_name / origin_id.', noNodes: 'This workflow has no node details.', noAgents: 'No agent data.', noSessions: 'No MAS sessions. Call /api/workflows/mas/task to create one.', noTasks: 'No legacy task data.', noEvents: 'Waiting for SSE events.', noInventory: 'No Skills/MCP inventory yet. It appears after agents report skills/mcps via heartbeat.', noEvolve: 'No evolve results yet. Push via /api/evolve/skill, /api/evolve/mcp, etc.', noOta: 'No OTA status data.',
         workflowId: 'Workflow ID', origin: 'Origin', notify: 'Notify', created: 'Created', completedAt: 'Completed', nodes: 'Nodes', createdStep: 'Created', dispatchStep: 'Dispatch', executeStep: 'Execute', resultStep: 'Result', createdNote: 'Task entered the MAF control plane', dispatchNote: 'Routed by agent_name', executeNoteIdle: 'Waiting or finished', resultNote: 'Final state', currentNode: 'Current node', coverage: 'coverage', gaps: 'gaps', allAgents: 'all agents', latestHash: 'Latest hash', clientMinimum: 'Client minimum', serverVersion: 'Server version', serverUrl: 'Server URL', registry: 'Registry', filter: 'Filter', duration: 'Duration', actions: 'Actions', endpoint: 'Endpoint', version: 'Version', pluginHash: 'Plugin Hash', unknown: 'unknown', total: 'total', latest: 'latest',
         status: { online: 'online', standby: 'standby', offline: 'offline', busy: 'busy', dead: 'unreachable', pending: 'pending', dispatched: 'dispatched', running: 'running', completed: 'completed', failed: 'failed', skipped: 'skipped', active: 'active', done: 'done', unknown: 'unknown', current: 'current', outdated: 'outdated', info: 'info' }
@@ -591,7 +661,13 @@
       statusFilter: 'all',
       lastError: '',
       masSubmit: { busy: false, status: '', message: '' },
+      codex: { agents: [], conversations: [], selectedAgentId: null, selectedConversationId: null, detail: null, events: [], lastSeq: 0, streamAbort: null, streamGeneration: 0, renderTimer: null, openingAgentId: null, refreshingConversationId: null, composeStatus: '' },
     };
+
+    // A long Codex turn can produce thousands of protocol events. The remote
+    // thread is the history source of truth; this buffer is only for live UI.
+    const CODEX_MAX_RENDER_EVENTS = 12000;
+    const CODEX_RENDER_DEBOUNCE_MS = 100;
 
     function $(id) { return document.getElementById(id); }
     function t(key) { return I18N[state.lang]?.[key] ?? I18N.en[key] ?? key; }
@@ -707,8 +783,395 @@
       return visible[0] || null;
     }
 
+    function codexAgents() {
+      return state.agents.filter(agent => agent.runtime === 'codex');
+    }
+
+    function selectedCodexConversation() {
+      return state.codex.conversations.find(item => item.id === state.codex.selectedConversationId) || null;
+    }
+
+    function codexStepLabel(kind) {
+      return I18N[state.lang]?.codexStep?.[kind] || I18N.en.codexStep[kind] || kind;
+    }
+
+    function codexReadableText(value) {
+      return String(value || '').replace(/\*\*([^*\n]+)\*\*/g, '$1').trim();
+    }
+
+    function codexFileKindLabel(kind) {
+      const value = String(kind || '').toLowerCase();
+      if (value === 'add' || value === 'create') return t('codexFileAdd');
+      if (value === 'delete' || value === 'remove') return t('codexFileDelete');
+      return t('codexFileUpdate');
+    }
+
+    function codexTechnicalText(value) {
+      if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) return '';
+      try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+    }
+
+    function renderCodexProcessStep(step) {
+      const status = step.status || 'running';
+      const error = status === 'failed' || step.kind === 'error';
+      const text = codexReadableText(step.text);
+      const files = (step.files || []).map(file => `
+        <div class="codex-timeline-file"><span>${escapeHtml(codexFileKindLabel(file.kind))}</span><code>${escapeHtml(file.path)}</code></div>`).join('');
+      const plan = (step.plan || []).map(item => `
+        <div class="codex-timeline-plan-row">${pill(item.status)}<span>${escapeHtml(codexReadableText(item.text))}</span></div>`).join('');
+      const technicalKinds = new Set(['command', 'files', 'mcp', 'tool', 'collaboration', 'subagent', 'web', 'image', 'hook', 'error']);
+      const protocol = technicalKinds.has(step.kind) ? codexTechnicalText(step.technical) : '';
+      const detail = String(step.detail || '').trim();
+      const details = detail || protocol ? `
+        <details class="codex-timeline-details">
+          <summary>${escapeHtml(t('codexProcessDetails'))}</summary>
+          ${detail ? `<pre>${escapeHtml(detail)}</pre>` : ''}
+          ${protocol ? `<pre title="${escapeHtml(t('codexProcessProtocol'))}">${escapeHtml(protocol)}</pre>` : ''}
+        </details>` : '';
+      return `<div class="codex-timeline-item ${error ? 'error' : escapeHtml(status)}">
+        <div class="codex-timeline-head"><div class="codex-timeline-type">${escapeHtml(codexStepLabel(step.kind))}</div>${pill(status)}</div>
+        ${text ? `<div class="codex-timeline-text">${escapeHtml(text)}</div>` : ''}
+        ${files ? `<div class="codex-timeline-files">${files}</div>` : ''}
+        ${plan ? `<div class="codex-timeline-plan">${plan}</div>` : ''}
+        ${details}
+      </div>`;
+    }
+
+    function cancelCodexRender() {
+      if (state.codex.renderTimer === null) return;
+      clearTimeout(state.codex.renderTimer);
+      state.codex.renderTimer = null;
+    }
+
+    function scheduleCodexRender(generation = state.codex.streamGeneration) {
+      if (generation !== state.codex.streamGeneration || state.codex.renderTimer !== null) return;
+      state.codex.renderTimer = setTimeout(() => {
+        state.codex.renderTimer = null;
+        if (generation === state.codex.streamGeneration) renderCodex();
+      }, CODEX_RENDER_DEBOUNCE_MS);
+    }
+
+    function appendCodexEvent(event, generation) {
+      if (generation !== state.codex.streamGeneration) return false;
+      const seq = Number(event?.seq || 0);
+      if (!(seq > state.codex.lastSeq)) return false;
+      state.codex.events.push(event);
+      state.codex.lastSeq = seq;
+      if (state.codex.events.length > CODEX_MAX_RENDER_EVENTS) {
+        state.codex.events.splice(0, state.codex.events.length - CODEX_MAX_RENDER_EVENTS);
+      }
+      scheduleCodexRender(generation);
+      return true;
+    }
+
+    function codexRemoteItemText(item) {
+      if (!item || typeof item !== 'object') return '';
+      if (typeof item.text === 'string') return item.text;
+      const content = Array.isArray(item.content) ? item.content : Array.isArray(item.input) ? item.input : [];
+      return content.map(part => typeof part === 'string' ? part : String(part?.text || part?.content || '')).filter(Boolean).join('\n');
+    }
+
+    function codexRemoteTurnStatus(turn) {
+      const status = turn?.status;
+      return typeof status === 'string' ? status : String(status?.type || status?.status || '');
+    }
+
+    function codexRemoteSnapshot(detail) {
+      const thread = detail?.remote?.thread;
+      const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+      const messages = [];
+      const events = [];
+      const completedRemoteTurnIds = new Set();
+      let seq = -100000;
+      let order = 0;
+      for (const turn of turns) {
+        const remoteTurnId = String(turn?.id || `snapshot-turn-${order}`);
+        const status = codexRemoteTurnStatus(turn);
+        const terminal = ['completed', 'failed', 'interrupted', 'cancelled', 'canceled'].includes(status);
+        if (terminal) completedRemoteTurnIds.add(remoteTurnId);
+        events.push({ seq: seq++, turn_id: `remote:${remoteTurnId}`, event_type: 'turn/started', payload: { turn } });
+        for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+          const type = String(item?.type || '');
+          const text = codexRemoteItemText(item);
+          if (type === 'userMessage' && text) messages.push({ role: 'user', text, order: order++ });
+          if (type === 'agentMessage' && text) messages.push({ role: 'assistant', text, order: order++ });
+          events.push({ seq: seq++, turn_id: `remote:${remoteTurnId}`, event_type: 'item/completed', payload: { item } });
+        }
+        if (terminal) events.push({ seq: seq++, turn_id: `remote:${remoteTurnId}`, event_type: 'turn/completed', payload: { turn } });
+      }
+      return { messages, events, completedRemoteTurnIds };
+    }
+
+    function renderCodex() {
+      const agents = codexAgents().slice().sort((a, b) => {
+        const rank = value => ['online', 'busy', 'standby', 'offline', 'dead'].indexOf(value);
+        return (rank(a.status) < 0 ? 99 : rank(a.status)) - (rank(b.status) < 0 ? 99 : rank(b.status)) || String(a.agent_name).localeCompare(String(b.agent_name));
+      });
+      state.codex.agents = agents;
+      $('codex-agent-count').textContent = agents.length;
+      $('codex-agent-list').innerHTML = agents.map(agent => `
+        <button class="codex-agent ${state.codex.selectedAgentId === agent.id ? 'selected' : ''}" type="button" data-codex-agent-id="${escapeHtml(agent.id)}">
+          <span class="codex-agent-title"><span>${escapeHtml(agent.agent_name)}</span>${pill(agent.status)}</span>
+          <span class="codex-agent-meta">${escapeHtml(agent.project_path || agent.client_endpoint || '-')}</span>
+        </button>`).join('') || `<div class="codex-empty">${t('codexNoAgents')}</div>`;
+
+      const selectedAgent = agents.find(agent => agent.id === state.codex.selectedAgentId);
+      const reachableAgent = selectedAgent && ['online', 'standby', 'busy'].includes(selectedAgent.status);
+
+      const detail = state.codex.detail;
+      const conversation = detail?.conversation || selectedCodexConversation();
+      $('codex-chat-title').textContent = conversation?.title || t('codexSelectConversation');
+      $('codex-chat-subtitle').textContent = conversation ? `${conversation.agent_name} · thread=${conversation.thread_id || '-'} · ${conversation.project_path || '-'}` : '-';
+      $('codex-conversation-status').className = `pill ${escapeHtml(conversation?.status || 'unknown')}`;
+      $('codex-conversation-status').textContent = conversation ? statusLabel(conversation.status) : statusLabel('unknown');
+      const canWrite = Boolean(state.accessContext.can_write) && Boolean(conversation) && Boolean(reachableAgent) && conversation.status !== 'failed' && conversation.status !== 'closed';
+      const activeTurn = detail?.turns?.find(turn => ['queued', 'starting', 'running'].includes(turn.status));
+      $('codex-new-btn').disabled = !state.accessContext.can_write || !reachableAgent || !conversation || Boolean(activeTurn);
+      $('codex-send-btn').disabled = !canWrite || Boolean(activeTurn);
+      $('codex-stop-btn').disabled = !canWrite || !activeTurn;
+      $('codex-input').disabled = !canWrite || Boolean(activeTurn);
+      $('codex-compose-status').textContent = !state.accessContext.can_write ? t('codexReadonly') : state.codex.composeStatus;
+
+      const remote = codexRemoteSnapshot(detail);
+      const messages = [...remote.messages];
+      const assistantByTurn = new Map();
+      const userByTurn = new Map();
+      const liveTurnIds = new Set((detail?.turns || [])
+        .filter(turn => ['queued', 'starting', 'running'].includes(turn.status))
+        .map(turn => turn.id));
+      for (const event of state.codex.events) {
+        if (!liveTurnIds.has(event.turn_id)) continue;
+        if (event.event_type === 'maf/userMessage' && event.turn_id) {
+          userByTurn.set(event.turn_id, { role: 'user', text: String(event.payload?.text || ''), order: Number(event.seq || 0) + 100000 });
+          continue;
+        }
+        if (event.event_type === 'item/agentMessage/delta' && event.turn_id) {
+          const target = assistantByTurn.get(event.turn_id) || { role: 'assistant', text: '', order: Number(event.seq || 0) + 100000, itemOrder: [], itemTexts: {} };
+          const itemId = String(event.payload?.itemId || 'stream');
+          if (!target.itemOrder.includes(itemId)) target.itemOrder.push(itemId);
+          target.itemTexts[itemId] = String(target.itemTexts[itemId] || '') + String(event.payload?.delta || '');
+          assistantByTurn.set(event.turn_id, target);
+        }
+        if (event.event_type === 'item/completed' && event.turn_id && event.payload?.item?.type === 'agentMessage') {
+          const target = assistantByTurn.get(event.turn_id) || { role: 'assistant', text: '', order: Number(event.seq || 0) + 100000, itemOrder: [], itemTexts: {} };
+          const itemId = String(event.payload.item.id || event.payload.itemId || 'completed');
+          if (!target.itemOrder.includes(itemId)) target.itemOrder.push(itemId);
+          const finalText = String(event.payload.item.text || '');
+          if (finalText) target.itemTexts[itemId] = finalText;
+          assistantByTurn.set(event.turn_id, target);
+        }
+      }
+      for (const item of userByTurn.values()) if (item.text) messages.push(item);
+      for (const item of assistantByTurn.values()) {
+        item.text = item.itemOrder.map(itemId => item.itemTexts[itemId] || '').filter(Boolean).join('\n\n');
+        if (item.text) messages.push(item);
+      }
+      messages.sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+      $('codex-messages').innerHTML = messages.map(item => `<div class="codex-message ${item.role}"><div class="codex-message-label">${item.role === 'user' ? 'You' : 'Codex'}</div>${escapeHtml(item.text)}</div>`).join('') || (conversation ? '' : `<div class="codex-empty">${t('codexSelectConversation')}</div>`);
+
+      const liveEvents = state.codex.events.filter(event => liveTurnIds.has(event.turn_id));
+      const timeline = window.MafCodexProcess?.aggregateCodexProcess([...remote.events, ...liveEvents]) || [];
+      $('codex-event-count').textContent = timeline.length;
+      $('codex-timeline').innerHTML = timeline.map(renderCodexProcessStep).join('') || (conversation ? '' : `<div class="codex-empty">${t('codexSelectConversation')}</div>`);
+      const box = $('codex-messages');
+      if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 100) box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadCodexConversation(id, options = {}) {
+      const resume = options.resume === true && state.codex.selectedConversationId === id;
+      cancelCodexRender();
+      if (state.codex.streamAbort) state.codex.streamAbort.abort();
+      state.codex.selectedConversationId = id;
+      const detail = await apiGet(`/api/codex/conversations/${encodeURIComponent(id)}`, null);
+      if (state.codex.selectedConversationId !== id) return;
+      state.codex.detail = detail;
+      if (!resume) {
+        state.codex.events = [];
+        state.codex.lastSeq = 0;
+      }
+      renderCodex();
+      if (!state.codex.detail) return;
+      const generation = ++state.codex.streamGeneration;
+      const controller = new AbortController();
+      state.codex.streamAbort = controller;
+      $('codex-stream-dot').className = 'dot yellow';
+      $('codex-stream-status').textContent = t('codexConnecting');
+      try {
+        const response = await fetch(`${API}/api/codex/conversations/${encodeURIComponent(id)}/stream?after_seq=${state.codex.lastSeq}`, { signal: controller.signal, headers: { Accept: 'text/event-stream' } });
+        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+        $('codex-stream-dot').className = 'dot green';
+        $('codex-stream-status').textContent = t('codexConnected');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (generation === state.codex.streamGeneration) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split('\n\n');
+          buffer = chunks.pop() || '';
+          for (const chunk of chunks) {
+            let eventType = ''; let raw = '';
+            for (const line of chunk.split('\n')) { if (line.startsWith('event:')) eventType = line.slice(6).trim(); if (line.startsWith('data:')) raw += line.slice(5).trim(); }
+            if (eventType !== 'codex_event' || !raw) continue;
+            try {
+              const event = JSON.parse(raw);
+              appendCodexEvent(event, generation);
+              if (event.event_type === 'maf/conversation/reset') {
+                state.codex.events = [];
+                state.codex.lastSeq = Number(event.seq || state.codex.lastSeq);
+                if (state.codex.detail) {
+                  state.codex.detail = { ...state.codex.detail, turns: [], remote: null };
+                  renderCodex();
+                }
+              }
+              if (/^(turn\/completed|maf\/turnAccepted|maf\/turnFailed|maf\/interruptRequested|maf\/conversation\/reset)$/.test(event.event_type)) {
+                apiGet(`/api/codex/conversations/${encodeURIComponent(id)}`, null).then(detail => { if (state.codex.selectedConversationId === id && generation === state.codex.streamGeneration && detail) { state.codex.detail = detail; renderCodex(); } });
+              }
+            } catch {}
+          }
+        }
+      if (generation === state.codex.streamGeneration) throw new Error('stream closed');
+      } catch (error) {
+        if (error.name !== 'AbortError' && generation === state.codex.streamGeneration) {
+          $('codex-stream-dot').className = 'dot red';
+          $('codex-stream-status').textContent = t('codexDisconnected');
+          setTimeout(() => { if (state.codex.selectedConversationId === id) loadCodexConversation(id, { resume: true }); }, 3000);
+        }
+      }
+      if (generation === state.codex.streamGeneration) {
+        cancelCodexRender();
+        renderCodex();
+      }
+      if (generation === state.codex.streamGeneration) state.codex.streamAbort = null;
+    }
+
+    async function refreshCodexSnapshot(id) {
+      if (state.codex.refreshingConversationId === id) return;
+      state.codex.refreshingConversationId = id;
+      try {
+        const detail = await apiGet(`/api/codex/conversations/${encodeURIComponent(id)}`, null);
+        if (state.codex.selectedConversationId === id && detail) {
+          state.codex.detail = detail;
+          renderCodex();
+        }
+      } finally {
+        if (state.codex.refreshingConversationId === id) state.codex.refreshingConversationId = null;
+      }
+    }
+
+    function clearCodexSelection() {
+      cancelCodexRender();
+      if (state.codex.streamAbort) state.codex.streamAbort.abort();
+      state.codex.streamAbort = null;
+      state.codex.streamGeneration += 1;
+      state.codex.selectedConversationId = null;
+      state.codex.detail = null;
+      state.codex.events = [];
+      state.codex.lastSeq = 0;
+    }
+
+    async function openCodexAgentConversation(agentId) {
+      const agent = state.codex.agents.find(item => item.id === agentId) || codexAgents().find(item => item.id === agentId);
+      if (!agent) return;
+      if (state.codex.selectedAgentId !== agent.id) clearCodexSelection();
+      state.codex.selectedAgentId = agent.id;
+      const conversation = state.codex.conversations.find(item => item.agent_id === agent.id);
+      if (conversation) {
+        state.codex.selectedConversationId = conversation.id;
+        renderCodex();
+        void loadCodexConversation(conversation.id);
+        return;
+      }
+      renderCodex();
+      if (!state.accessContext.can_write || !['online', 'standby', 'busy'].includes(agent.status) || state.codex.openingAgentId === agent.id) return;
+      state.codex.openingAgentId = agent.id;
+      state.codex.composeStatus = t('codexConnecting');
+      renderCodex();
+      try {
+        const detail = await apiPost('/api/codex/conversations', { agent_id: agent.id });
+        const opened = detail?.conversation;
+        if (!opened) throw new Error('Server returned no conversation');
+        state.codex.conversations = [opened, ...state.codex.conversations.filter(item => item.id !== opened.id)];
+        if (state.codex.selectedAgentId !== agent.id) return;
+        state.codex.selectedConversationId = opened.id;
+        state.codex.detail = detail;
+        state.codex.composeStatus = t('codexConversationCreated');
+        renderCodex();
+        void loadCodexConversation(opened.id);
+      } catch (error) {
+        if (state.codex.selectedAgentId === agent.id) {
+          state.codex.composeStatus = `${t('codexConversationFailed')}: ${error.message}`;
+          renderCodex();
+        }
+      } finally {
+        if (state.codex.openingAgentId === agent.id) state.codex.openingAgentId = null;
+      }
+    }
+
+    async function resetCodexConversation() {
+      if (!state.accessContext.can_write) { state.codex.composeStatus = t('codexReadonly'); renderCodex(); return; }
+      const agent = state.codex.agents.find(item => item.id === state.codex.selectedAgentId) || state.codex.agents.find(item => ['online', 'standby', 'busy'].includes(item.status));
+      if (!agent) { state.codex.composeStatus = t('codexNoAgents'); renderCodex(); return; }
+      const current = state.codex.conversations.find(item => item.agent_id === agent.id);
+      if (!current) { void openCodexAgentConversation(agent.id); return; }
+      if (!window.confirm(t('codexNewConversationConfirm'))) return;
+      state.codex.composeStatus = t('codexConnecting');
+      renderCodex();
+      try {
+        const detail = await apiPost('/api/codex/conversations', { agent_id: agent.id, reset: true });
+        const conversation = detail?.conversation;
+        if (!conversation) throw new Error('Server returned no conversation');
+        state.codex.conversations = [conversation, ...state.codex.conversations.filter(item => item.id !== conversation.id)];
+        clearCodexSelection();
+        state.codex.selectedAgentId = agent.id;
+        state.codex.selectedConversationId = conversation.id;
+        state.codex.detail = detail;
+        state.codex.composeStatus = t('codexConversationCreated');
+        renderCodex();
+        void loadCodexConversation(conversation.id);
+      } catch (error) {
+        state.codex.composeStatus = `${t('codexConversationFailed')}: ${error.message}`;
+        renderCodex();
+      }
+    }
+
+    async function sendCodexMessage(event) {
+      event.preventDefault();
+      const conversation = selectedCodexConversation();
+      const input = $('codex-input').value.trim();
+      if (!conversation || !input || !state.accessContext.can_write) return;
+      $('codex-input').value = '';
+      state.codex.composeStatus = t('codexConnecting');
+      renderCodex();
+      try {
+        const turn = await apiPost(`/api/codex/conversations/${encodeURIComponent(conversation.id)}/turns`, { input });
+        if (state.codex.detail?.conversation?.id === conversation.id && turn?.id) {
+          state.codex.detail.turns = [...(state.codex.detail.turns || []), turn];
+          state.codex.detail.conversation.status = 'running';
+        }
+        state.codex.composeStatus = '';
+        renderCodex();
+      } catch (error) {
+        state.codex.composeStatus = `${t('codexTurnFailed')}: ${error.message}`;
+        renderCodex();
+      }
+    }
+
+    async function stopCodexTurn() {
+      const conversation = selectedCodexConversation();
+      if (!conversation || !state.accessContext.can_write) return;
+      try {
+        await apiPost(`/api/codex/conversations/${encodeURIComponent(conversation.id)}/interrupt`, {});
+        state.codex.composeStatus = '';
+      } catch (error) {
+        state.codex.composeStatus = `${t('codexTurnFailed')}: ${error.message}`;
+      }
+      renderCodex();
+    }
+
     async function refreshAll() {
-      const [health, accessContext, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults, clientIdentities] = await Promise.all([
+      const [health, accessContext, agents, tasks, workflows, sessions, inventory, otaStatus, evolveResults, clientIdentities, codexConversations] = await Promise.all([
         apiGet('/api/health', null),
         apiGet('/api/access-context', { local: false, can_write: false }),
         apiGet('/api/agents?all=true', []),
@@ -719,6 +1182,7 @@
         apiGet('/api/ota/status', null),
         apiGet('/api/evolve', []),
         apiGet('/api/auth/clients', []),
+        apiGet('/api/codex/conversations?limit=200', []),
       ]);
 
       state.health = health;
@@ -732,6 +1196,14 @@
       state.otaStatus = otaStatus;
       state.evolveResults = Array.isArray(evolveResults) ? evolveResults : [];
       state.clientIdentities = Array.isArray(clientIdentities) ? clientIdentities : [];
+      state.codex.conversations = Array.isArray(codexConversations) ? codexConversations : [];
+      if (!state.codex.selectedAgentId) {
+        const firstAgent = codexAgents().find(agent => ['online', 'busy', 'standby'].includes(agent.status)) || codexAgents()[0];
+        state.codex.selectedAgentId = firstAgent?.id || null;
+      }
+      if (state.codex.selectedConversationId && !state.codex.conversations.some(item => item.id === state.codex.selectedConversationId)) {
+        clearCodexSelection();
+      }
 
       const visible = visibleWorkflows();
       if (!state.selectedWorkflowId || !visible.some(w => w.id === state.selectedWorkflowId || w.workflow_id === state.selectedWorkflowId)) {
@@ -739,6 +1211,18 @@
       }
 
       renderAll();
+      const selectedCodexAgent = codexAgents().find(agent => agent.id === state.codex.selectedAgentId);
+      const selectedAgentConversation = state.codex.conversations.find(item => item.agent_id === state.codex.selectedAgentId);
+      if (selectedAgentConversation && state.codex.selectedConversationId !== selectedAgentConversation.id) {
+        state.codex.selectedConversationId = selectedAgentConversation.id;
+        void loadCodexConversation(selectedAgentConversation.id);
+      } else if (selectedAgentConversation && !state.codex.detail && !state.codex.streamAbort) {
+        void loadCodexConversation(selectedAgentConversation.id, { resume: true });
+      } else if (selectedAgentConversation && state.codex.detail?.remote === null) {
+        void refreshCodexSnapshot(selectedAgentConversation.id);
+      } else if (!selectedAgentConversation && selectedCodexAgent && state.codex.openingAgentId !== selectedCodexAgent.id) {
+        void openCodexAgentConversation(selectedCodexAgent.id);
+      }
       $('last-refresh').textContent = `${t('lastRefresh')} ${new Date().toLocaleTimeString()}`;
       notifyResize();
     }
@@ -761,6 +1245,7 @@
       renderEvolveResults();
       renderRuntimeContext();
       renderEvents();
+      renderCodex();
     }
 
     function renderContextBar() {
@@ -793,7 +1278,7 @@
 
     function renderStats() {
       const visible = visibleWorkflows();
-      const online = state.agents.filter(a => a.status === 'online' || a.status === 'standby' || a.status === 'busy').length;
+      const online = state.agents.filter(a => a.status === 'online' || a.status === 'busy').length;
       const busy = state.agents.filter(a => a.status === 'busy').length + visible.flatMap(nodeList).filter(n => n.status === 'running').length;
       const runningWf = visible.filter(w => w.status === 'running').length;
       const activeSessions = state.sessions.filter(s => !['completed', 'failed'].includes(s.status)).length;
@@ -913,6 +1398,7 @@
               </div>
               ${n.prompt ? `<div class="node-prompt">${escapeHtml(short(n.prompt, 260))}</div>` : ''}
               ${n.result ? `<div class="node-result">${escapeHtml(short(n.result, 900))}</div>` : ''}
+              ${n.conversation_id ? `<div class="meta"><span class="mono">conversation ${escapeHtml(n.conversation_id)}</span></div>` : ''}
             </div>
           `).join('') || `<div class="empty">${t('noNodes')}</div>`}
         </div>`;
@@ -1321,6 +1807,12 @@
     }
 
     document.addEventListener('click', (event) => {
+      const codexAgent = event.target.closest('[data-codex-agent-id]');
+      if (codexAgent) {
+        void openCodexAgentConversation(codexAgent.dataset.codexAgentId);
+        $('codex-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       const agentCard = event.target.closest('[data-agent-id]');
       if (agentCard) {
         showAgentDetail(agentCard.dataset.agentId);
@@ -1354,6 +1846,9 @@
     $('agent-detail-dialog').addEventListener('close', () => { state.selectedAgentId = null; });
     $('clear-events-btn').addEventListener('click', () => { state.events = []; renderEvents(); notifyResize(); });
     $('mas-submit-form').addEventListener('submit', submitMasTask);
+    $('codex-new-btn').addEventListener('click', resetCodexConversation);
+    $('codex-composer').addEventListener('submit', sendCodexMessage);
+    $('codex-stop-btn').addEventListener('click', stopCodexTurn);
     $('mas-clear-btn').addEventListener('click', () => {
       $('mas-task-title').value = '';
       $('mas-task-description').value = '';

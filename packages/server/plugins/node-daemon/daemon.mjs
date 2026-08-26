@@ -3,7 +3,7 @@
  * Meta-Agent-Framework Node Daemon（驻地代理）
  *
  * 一台机器一个常驻进程，管理本机所有 agent。
- * 支持 opencode Plugin、Claude Code hook，以及 Codex attached/detached 两种投递语义。
+ * 支持 opencode Plugin、Claude Code hook，以及 Codex managed/detached/attached 投递语义。
  *
  * 职责：
  *   1. 管理本机所有 agent（注册/心跳/状态跟踪）
@@ -19,7 +19,7 @@
  *   MAF_DIRECTORY      — 工作目录
  *   MAF_PLUGIN_DIR     — Plugin 安装目录
  *   MAF_PARENT_PID     — 仅 Claude Code 首次拉起时使用（不再跟随退出）
- *   MAF_CODEX_DELIVERY  — Codex 投递语义：detached（默认）| attached | auto
+ *   MAF_CODEX_DELIVERY  — 旧请求的 Codex 投递兜底：managed | detached（默认）| attached | auto
  */
 
 import { createServer } from "node:http";
@@ -506,11 +506,19 @@ const CODEX_SANDBOX = process.env.MAF_CODEX_SANDBOX || "danger-full-access";
 const CODEX_APPROVAL = process.env.MAF_CODEX_APPROVAL || "never";
 const CODEX_BYPASS_SANDBOX = process.env.MAF_CODEX_BYPASS_SANDBOX === "1" || process.env.MAF_CODEX_DANGEROUS_BYPASS === "1";
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const CODEX_APP_SERVER_BIN = process.env.MAF_CODEX_APP_SERVER_BIN || process.env.MAF_CODEX_REAL_BIN || CODEX_BIN;
 const CODEX_MODE = process.env.MAF_CODEX_MODE || "tui"; // tui（screen + Codex TUI）| exec（headless）
+const CODEX_DELIVERY_EXPLICIT = Boolean(String(process.env.MAF_CODEX_DELIVERY || "").trim());
 const CODEX_DELIVERY = normalizeCodexDelivery(process.env.MAF_CODEX_DELIVERY || "detached");
+let serverCodexDelivery = "";
+const CODEX_CONVERSATION_SPOOL_DIR = join(STATE_DIR, "state", "codex-conversation-events");
+const CODEX_EVENT_RETRY_ATTEMPTS = Math.max(1, parseInt(process.env.MAF_CODEX_EVENT_RETRY_ATTEMPTS || "8", 10) || 8);
+const CODEX_EVENT_SPOOL_MAX_BYTES = Math.max(1024 * 1024, parseInt(process.env.MAF_CODEX_EVENT_SPOOL_MAX_BYTES || "", 10) || 64 * 1024 * 1024);
 const codexQueueRunners = new Set();
 const managedExecutionQueueRunners = new Set();
 const codexAgentScreens = new Map(); // agent_name → { screenName, projectPath, startedAt, lastTaskAt, currentTaskId }
+const codexConversationBridges = new Map(); // conversation_id → Codex stdio app-server bridge
+const codexManagedTaskBindings = new Map(); // task_id → { bridge, conversationId, remoteTurnId }
 const executionProcesses = new Map(); // execution_id/task_id → ChildProcess
 const cancelledExecutions = new Map(); // execution_id/task_id → cancelled_at
 const CANCELLED_EXECUTION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -518,6 +526,7 @@ const CANCELLED_EXECUTION_MAX = 10_000;
 
 function normalizeCodexDelivery(value) {
   const v = String(value || "detached").trim().toLowerCase();
+  if (["managed", "app-server", "app_server", "conversation", "realtime"].includes(v)) return "managed";
   if (["detached", "screen", "tui", "daemon", "offline"].includes(v)) return "detached";
   if (["auto", "fallback"].includes(v)) return "auto";
   if (["attached", "current", "foreground"].includes(v)) return "attached";
@@ -559,9 +568,697 @@ function codexShouldRunDetached(agentName, task = {}) {
   return codexEffectiveDelivery(agentName, task) === "detached";
 }
 
+function codexShouldRunManaged(agentName, task = {}) {
+  return codexEffectiveDelivery(agentName, task) === "managed";
+}
+
+function updateServerRuntimeModes(payload = {}) {
+  const raw = String(payload?.runtime_modes?.codex_delivery || "").trim();
+  if (!raw) return;
+  const value = normalizeCodexDelivery(raw);
+  if (!['managed', 'detached'].includes(value)) return;
+  if (serverCodexDelivery && serverCodexDelivery !== value) {
+    log(`Codex Server 默认投递模式更新: ${serverCodexDelivery} -> ${value}`);
+  }
+  serverCodexDelivery = value;
+}
+
+function codexAgentBridges(agentName) {
+  return [...codexConversationBridges.values()].filter(bridge => bridge.agentName === agentName && !bridge.closed);
+}
+
+function hasCodexDetachedScreen(agentName) {
+  const tracked = codexAgentScreens.get(agentName);
+  const screenName = tracked?.screenName || `maf-codex-${safeFilePart(agentName)}`;
+  return screenSessionExists(screenName);
+}
+
 function codexAttachedUnavailableMessage(agentName, task = {}) {
   const requested = codexDeliveryForTask(task);
   return `Codex attached delivery 当前不可用：agent=${agentName}, requested=${requested}。当前 Codex 尚无可被 Daemon 主动注入任务的附着 TUI 接收器；如需离线 screen+TUI 执行，请设置 MAF_CODEX_DELIVERY=detached/auto 或在任务中传 detached=true。`;
+}
+
+function codexConversationAgent(body = {}) {
+  const agentName = String(body.agent_name || "");
+  const info = agents.get(agentName);
+  if (!agentName || !info || info.runtime !== "codex" || info.visibility !== "published") {
+    throw new Error(`Codex Agent 不可用于实时对话: ${agentName || "missing"}`);
+  }
+  const directory = resolve(String(info.directory || DIRECTORY).replace(/^~/, homedir()));
+  const requested = body.project_path
+    ? resolve(String(body.project_path).replace(/^~/, homedir()))
+    : directory;
+  if (!existsSync(requested)) throw new Error(`Codex 工作目录不存在: ${requested}`);
+  if (requested !== directory) {
+    let registeredRoot = "";
+    let requestedRoot = "";
+    try {
+      registeredRoot = resolve(execFileSync("git", ["-C", directory, "rev-parse", "--show-toplevel"], { encoding: "utf-8", timeout: 5000 }).trim());
+      requestedRoot = resolve(execFileSync("git", ["-C", requested, "rev-parse", "--show-toplevel"], { encoding: "utf-8", timeout: 5000 }).trim());
+    } catch {}
+    const registeredExecutionRoot = body.managed_execution === true
+      && requested === requestedRoot
+      && requestedRoot === registeredRoot;
+    const isolatedExecutionRoot = body.managed_execution === true
+      && pathInside(requested, join(STATE_DIR, "workspaces"));
+    if (!registeredExecutionRoot && !isolatedExecutionRoot) {
+      throw new Error(`实时对话目录与 Agent 注册目录不一致: ${requested}`);
+    }
+  }
+  return { agentName, info, directory: requested };
+}
+
+function codexThreadPolicy(body = {}) {
+  const approvalPolicy = String(body.approval_policy || CODEX_APPROVAL || "never");
+  const sandbox = String(body.sandbox_mode || CODEX_SANDBOX || "danger-full-access");
+  if (approvalPolicy !== "never") throw new Error("后台实时对话仅允许 approval_policy=never");
+  if (!['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)) {
+    throw new Error(`不支持的 Codex sandbox_mode: ${sandbox}`);
+  }
+  return { approvalPolicy, sandbox };
+}
+
+function codexTurnSandboxPolicy(mode, cwd) {
+  if (mode === "danger-full-access") return { type: "dangerFullAccess" };
+  if (mode === "read-only") return { type: "readOnly", networkAccess: true };
+  return {
+    type: "workspaceWrite",
+    writableRoots: [cwd],
+    networkAccess: true,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  };
+}
+
+function defaultCodexServerRequestResult(method) {
+  if (method.includes("requestApproval") || method.includes("permissions")) return { decision: "denied" };
+  if (method.includes("requestUserInput")) return { answers: [] };
+  return {};
+}
+
+function codexConversationSpoolPath(conversationId) {
+  if (!/^[A-Za-z0-9-]{16,80}$/.test(conversationId)) throw new Error("conversation_id 非法");
+  return join(CODEX_CONVERSATION_SPOOL_DIR, `${conversationId}.jsonl`);
+}
+
+function readCodexConversationSpool(conversationId) {
+  const path = codexConversationSpoolPath(conversationId);
+  try {
+    return readFileSync(path, "utf-8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+  } catch (err) {
+    if (err?.code !== "ENOENT") log(`Codex conversation spool 读取失败: ${conversationId} ${err.message}`);
+    return [];
+  }
+}
+
+function appendCodexConversationSpoolEvent(conversationId, event) {
+  const path = codexConversationSpoolPath(conversationId);
+  const line = `${JSON.stringify(event)}\n`;
+  let currentBytes = 0;
+  try { currentBytes = statSync(path).size; } catch {}
+  if (currentBytes + Buffer.byteLength(line) > CODEX_EVENT_SPOOL_MAX_BYTES) {
+    throw new Error(`spool 超过 ${CODEX_EVENT_SPOOL_MAX_BYTES} bytes`);
+  }
+  mkdirSync(CODEX_CONVERSATION_SPOOL_DIR, { recursive: true, mode: 0o700 });
+  appendFileSync(path, line, { mode: 0o600 });
+}
+
+function removeCodexConversationSpoolEvents(conversationId, eventIds) {
+  const path = codexConversationSpoolPath(conversationId);
+  const ids = new Set(eventIds);
+  const remaining = readCodexConversationSpool(conversationId)
+    .filter(event => !ids.has(String(event?.event_id || "")));
+  if (remaining.length === 0) {
+    try { unlinkSync(path); } catch {}
+    return;
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, remaining.map(event => JSON.stringify(event)).join("\n") + "\n", { mode: 0o600 });
+    renameSync(temporary, path);
+  } catch (err) {
+    try { unlinkSync(temporary); } catch {}
+    log(`Codex conversation spool 更新失败: ${conversationId} ${err.message}`);
+  }
+}
+
+function limitCodexSnapshotValue(value, depth = 0) {
+  if (typeof value === "string") return value.length > 64_000 ? `${value.slice(0, 64_000)}\n[truncated]` : value;
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 8) return null;
+  if (Array.isArray(value)) return value.slice(-200).map(item => limitCodexSnapshotValue(item, depth + 1));
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, 100)) {
+    result[key] = limitCodexSnapshotValue(item, depth + 1);
+  }
+  return result;
+}
+
+function codexThreadSnapshot(thread) {
+  if (!thread || typeof thread !== "object") return null;
+  return limitCodexSnapshotValue({
+    ...thread,
+    turns: Array.isArray(thread.turns) ? thread.turns.slice(-20) : [],
+  });
+}
+
+async function postCodexConversationEventBatch(conversationId, events) {
+  if (!META_AGENT_SERVER) throw new Error("MAF Server URL 未配置");
+  const url = `${META_AGENT_SERVER}/api/codex/conversations/${encodeURIComponent(conversationId)}/events`;
+  const payload = JSON.stringify({ events });
+  let lastError = null;
+  for (let attempt = 1; attempt <= CODEX_EVENT_RETRY_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: clientAuthHeaders("POST", url, payload, { "Content-Type": "application/json" }),
+        body: payload,
+        signal: AbortSignal.timeout(10_000),
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < CODEX_EVENT_RETRY_ATTEMPTS) await waitMs(Math.min(5000, 100 * (2 ** (attempt - 1))));
+    }
+  }
+  throw lastError || new Error("Codex conversation 事件上报失败");
+}
+
+class CodexConversationBridge {
+  constructor({ conversationId, agentName, cwd, runtimeEnv = {} }) {
+    this.conversationId = conversationId;
+    this.agentName = agentName;
+    this.cwd = cwd;
+    this.runtimeEnv = runtimeEnv;
+    this.proc = null;
+    this.stdoutBuffer = "";
+    this.stderrBuffer = "";
+    this.nextRpcId = 1;
+    this.pending = new Map();
+    this.threadId = "";
+    this.activeMafTurnId = "";
+    this.remoteTurnToMaf = new Map();
+    this.turnWaiters = new Map();
+    this.turnTexts = new Map();
+    this.completedTurns = new Map();
+    this.abandonedTurns = new Set();
+    this.eventBuffer = readCodexConversationSpool(conversationId);
+    this.eventTimer = null;
+    this.flushingEvents = false;
+    this.closed = false;
+    this.closing = false;
+  }
+
+  async start() {
+    const proc = spawn(CODEX_APP_SERVER_BIN, ["app-server", "--stdio"], {
+      cwd: this.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...this.runtimeEnv },
+    });
+    this.proc = proc;
+    proc.stdout.on("data", chunk => this.handleStdout(chunk));
+    proc.stderr.on("data", chunk => {
+      this.stderrBuffer = (this.stderrBuffer + chunk.toString()).slice(-16_000);
+      const message = chunk.toString().trim();
+      if (message) log(`Codex app-server stderr (${this.conversationId}): ${message.slice(0, 1000)}`);
+    });
+    proc.on("error", err => this.markClosed(err));
+    proc.on("exit", (code, signal) => {
+      this.markClosed(new Error(`Codex app-server 退出: exit=${code ?? ""}${signal ? ` signal=${signal}` : ""}`));
+    });
+    await this.request("initialize", {
+      clientInfo: { name: "maf-client-daemon", title: "MAF Remote Conversation", version: CLIENT_VERSION },
+      capabilities: { experimentalApi: true, requestAttestation: false },
+    }, 15_000);
+    this.notify("initialized");
+    if (this.eventBuffer.length > 0) this.scheduleEventFlush(0);
+  }
+
+  handleStdout(chunk) {
+    this.stdoutBuffer += chunk.toString();
+    let index;
+    while ((index = this.stdoutBuffer.indexOf("\n")) >= 0) {
+      const line = this.stdoutBuffer.slice(0, index).trim();
+      this.stdoutBuffer = this.stdoutBuffer.slice(index + 1);
+      if (line) this.handleLine(line);
+    }
+  }
+
+  handleLine(line) {
+    let message;
+    try { message = JSON.parse(line); } catch {
+      log(`忽略 Codex app-server 非 JSON 输出: ${line.slice(0, 300)}`);
+      return;
+    }
+    if (message.id !== undefined && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message || JSON.stringify(message.error)}`));
+      else pending.resolve(message.result);
+      return;
+    }
+    if (!message.method) return;
+    if (message.id !== undefined) {
+      try {
+        this.send({ jsonrpc: "2.0", id: message.id, result: defaultCodexServerRequestResult(message.method) });
+      } catch {}
+    }
+    this.handleNotification(message.method, message.params || {});
+  }
+
+  handleNotification(method, params) {
+    const threadId = String(params?.threadId || params?.thread?.id || "");
+    if (this.threadId && threadId && threadId !== this.threadId) return;
+    if (!/^(thread|turn|item|error|hook)\//.test(method) && method !== "error") return;
+    const remoteTurnId = String(params?.turnId || params?.turn?.id || "");
+    const mafTurnId = this.remoteTurnToMaf.get(remoteTurnId) || this.activeMafTurnId || "";
+    if (remoteTurnId && method === "item/agentMessage/delta") {
+      const delta = typeof params?.delta === "string" ? params.delta : "";
+      if (delta) this.turnTexts.set(remoteTurnId, `${this.turnTexts.get(remoteTurnId) || ""}${delta}`);
+    }
+    if (remoteTurnId && method === "item/completed") {
+      const item = params?.item;
+      if (item?.type === "agentMessage" && typeof item.text === "string") this.turnTexts.set(remoteTurnId, item.text);
+    }
+    this.enqueueEvent({
+      event_id: randomUUID(),
+      turn_id: mafTurnId,
+      remote_turn_id: remoteTurnId,
+      event_type: method,
+      payload: params && typeof params === "object" ? params : { value: params },
+      created_at: new Date().toISOString(),
+    });
+    if (method === "turn/completed") {
+      const status = typeof params?.turn?.status === "string"
+        ? params.turn.status
+        : String(params?.turn?.status?.type || "");
+      const result = {
+        status: status === "interrupted" ? "interrupted" : status === "failed" ? "failed" : "completed",
+        text: this.turnTexts.get(remoteTurnId) || "",
+        payload: params,
+      };
+      const waiter = this.turnWaiters.get(remoteTurnId);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        this.turnWaiters.delete(remoteTurnId);
+        waiter.resolve(result);
+      } else if (!this.abandonedTurns.delete(remoteTurnId)) {
+        this.completedTurns.set(remoteTurnId, result);
+      }
+      this.turnTexts.delete(remoteTurnId);
+      if (remoteTurnId) this.remoteTurnToMaf.delete(remoteTurnId);
+      if (!remoteTurnId || this.remoteTurnToMaf.size === 0) this.activeMafTurnId = "";
+    }
+  }
+
+  waitForTurn(remoteTurnId, timeoutMs = CODEX_TASK_TIMEOUT_MS) {
+    const completed = this.completedTurns.get(remoteTurnId);
+    if (completed) {
+      this.completedTurns.delete(remoteTurnId);
+      return Promise.resolve(completed);
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.turnWaiters.delete(remoteTurnId);
+        this.abandonedTurns.add(remoteTurnId);
+        this.request("turn/interrupt", { threadId: this.threadId, turnId: remoteTurnId }, 15_000)
+          .catch(error => log(`Codex turn 超时中断失败: ${remoteTurnId} ${error.message}`));
+        reject(new Error(`Codex turn 等待超时: ${remoteTurnId}`));
+      }, timeoutMs);
+      this.turnWaiters.set(remoteTurnId, { resolve, reject, timer });
+    });
+  }
+
+  enqueueEvent(event) {
+    this.eventBuffer.push(event);
+    try {
+      appendCodexConversationSpoolEvent(this.conversationId, event);
+    } catch (err) {
+      log(`Codex conversation 事件落盘失败: ${this.conversationId} ${err.message}`);
+    }
+    this.scheduleEventFlush(25);
+  }
+
+  scheduleEventFlush(delayMs) {
+    if (this.eventTimer || this.flushingEvents) return;
+    this.eventTimer = setTimeout(() => {
+      this.eventTimer = null;
+      this.flushEvents().catch(err => log(`Codex conversation 事件上报失败: ${this.conversationId} ${err.message}`));
+    }, delayMs);
+    this.eventTimer.unref?.();
+  }
+
+  async flushEvents() {
+    if (this.flushingEvents) return;
+    this.flushingEvents = true;
+    try {
+      while (this.eventBuffer.length > 0) {
+        const batch = this.eventBuffer.slice(0, 50);
+        try {
+          await postCodexConversationEventBatch(this.conversationId, batch);
+          this.eventBuffer.splice(0, batch.length);
+          removeCodexConversationSpoolEvents(this.conversationId, batch.map(event => event.event_id));
+        } catch (err) {
+          log(`保留 ${batch.length} 个暂时无法上报的 Codex conversation 事件: ${this.conversationId} ${err.message}`);
+          break;
+        }
+      }
+    } finally {
+      this.flushingEvents = false;
+      if (this.eventBuffer.length > 0) {
+        this.scheduleEventFlush(5000);
+      }
+    }
+  }
+
+  send(message) {
+    if (!this.proc?.stdin?.writable || this.closed) throw new Error("Codex app-server stdio 未连接");
+    this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  request(method, params = {}, timeoutMs = 30_000) {
+    const id = this.nextRpcId++;
+    return new Promise((resolveRequest, rejectRequest) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        rejectRequest(new Error(`Codex app-server 请求超时: ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer, method });
+      try { this.send({ jsonrpc: "2.0", id, method, params }); } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        rejectRequest(err);
+      }
+    });
+  }
+
+  notify(method, params = undefined) {
+    const message = { jsonrpc: "2.0", method };
+    if (params !== undefined) message.params = params;
+    this.send(message);
+  }
+
+  markClosed(error) {
+    if (this.closed) return;
+    this.closed = true;
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+    for (const [turnId, waiter] of this.turnWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+      this.turnWaiters.delete(turnId);
+    }
+    this.completedTurns.clear();
+    this.abandonedTurns.clear();
+    this.turnTexts.clear();
+    if (codexConversationBridges.get(this.conversationId) === this) {
+      codexConversationBridges.delete(this.conversationId);
+    }
+    if (!this.closing) {
+      const detail = this.stderrBuffer.trim();
+      this.enqueueEvent({
+        event_id: randomUUID(),
+        turn_id: this.activeMafTurnId,
+        event_type: "maf/app-server/exited",
+        payload: { error: error.message, stderr: detail.slice(-4000) },
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  async close() {
+    this.closing = true;
+    if (this.eventTimer) { clearTimeout(this.eventTimer); this.eventTimer = null; }
+    await this.flushEvents();
+    try { this.proc?.stdin?.end(); } catch {}
+    try { this.proc?.kill("SIGTERM"); } catch {}
+    this.markClosed(new Error("Codex conversation bridge 已关闭"));
+  }
+}
+
+let codexOrphanSpoolFlushRunning = false;
+async function flushOrphanedCodexConversationSpools() {
+  if (codexOrphanSpoolFlushRunning || !META_AGENT_SERVER || enrollmentStatus !== "active") return;
+  codexOrphanSpoolFlushRunning = true;
+  try {
+    let files = [];
+    try { files = readdirSync(CODEX_CONVERSATION_SPOOL_DIR); } catch { return; }
+    for (const file of files) {
+      const match = /^([A-Za-z0-9-]{16,80})\.jsonl$/.exec(file);
+      if (!match || codexConversationBridges.has(match[1])) continue;
+      const conversationId = match[1];
+      while (!codexConversationBridges.has(conversationId)) {
+        const batch = readCodexConversationSpool(conversationId).slice(0, 50);
+        if (batch.length === 0) break;
+        try {
+          await postCodexConversationEventBatch(conversationId, batch);
+          removeCodexConversationSpoolEvents(conversationId, batch.map(event => event.event_id));
+        } catch (err) {
+          log(`Codex conversation spool 稍后重试: ${conversationId} ${err.message}`);
+          break;
+        }
+      }
+    }
+  } finally {
+    codexOrphanSpoolFlushRunning = false;
+  }
+}
+
+async function startCodexConversation(body) {
+  const conversationId = String(body.conversation_id || "");
+  if (!/^[A-Za-z0-9-]{16,80}$/.test(conversationId)) throw new Error("conversation_id 非法");
+  const { agentName, directory } = codexConversationAgent(body);
+  const policy = codexThreadPolicy(body);
+  let existing = codexConversationBridges.get(conversationId);
+  if (body.new_thread === true) {
+    if (existing && !existing.closed && existing.activeMafTurnId) throw new Error("Codex conversation 已有活动 turn");
+    if (existing) await existing.close().catch(() => {});
+    codexConversationBridges.delete(conversationId);
+    try { unlinkSync(codexConversationSpoolPath(conversationId)); } catch {}
+    existing = null;
+  }
+  if (existing && !existing.closed) {
+    if (existing.agentName !== agentName) throw new Error("conversation Agent 不匹配");
+    return { thread_id: existing.threadId, model: String(body.model || ""), reused: true };
+  }
+
+  const runtimeEnv = body.managed_execution === true ? {
+    MAF_SOURCE_DIR: String(body.source_dir || directory),
+    MAF_INPUT_DIR: String(body.input_dir || ""),
+    MAF_OUTPUT_DIR: String(body.output_dir || ""),
+  } : {};
+  const bridge = new CodexConversationBridge({ conversationId, agentName, cwd: directory, runtimeEnv });
+  codexConversationBridges.set(conversationId, bridge);
+  try {
+    await bridge.start();
+    const requestedThreadId = String(body.thread_id || "");
+    const params = {
+      cwd: directory,
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
+      ...(body.model ? { model: String(body.model) } : {}),
+    };
+    const result = requestedThreadId
+      ? await bridge.request("thread/resume", { threadId: requestedThreadId, ...params, excludeTurns: true }, 30_000)
+      : await bridge.request("thread/start", params, 30_000);
+    bridge.threadId = String(result?.thread?.id || requestedThreadId || "");
+    if (!bridge.threadId) throw new Error("Codex thread start/resume 未返回 thread id");
+    log(`Codex conversation 就绪: conversation=${conversationId} agent=${agentName} thread=${bridge.threadId}`);
+    bridge.enqueueEvent({
+      event_id: randomUUID(),
+      turn_id: "",
+      event_type: "maf/conversation/ready",
+      payload: {
+        thread_id: bridge.threadId,
+        model: String(result?.model || body.model || ""),
+        project_path: directory,
+        source_type: body.source_type || "workflow",
+      },
+      created_at: new Date().toISOString(),
+    });
+    return {
+      thread_id: bridge.threadId,
+      model: String(result?.model || body.model || ""),
+      model_provider: String(result?.modelProvider || ""),
+      reused: false,
+    };
+  } catch (err) {
+    codexConversationBridges.delete(conversationId);
+    await bridge.close().catch(() => {});
+    throw err;
+  }
+}
+
+async function readCodexConversation(body) {
+  const conversationId = String(body.conversation_id || "");
+  if (!/^[A-Za-z0-9-]{16,80}$/.test(conversationId)) throw new Error("conversation_id 非法");
+  const { agentName } = codexConversationAgent(body);
+  let bridge = codexConversationBridges.get(conversationId);
+  if (!bridge || bridge.closed) {
+    const threadId = String(body.thread_id || "");
+    if (!threadId) return { thread_id: "", thread: null };
+    await startCodexConversation({ ...body, new_thread: false });
+    bridge = codexConversationBridges.get(conversationId);
+  }
+  if (!bridge || bridge.closed) throw new Error("Codex conversation app-server 恢复失败");
+  if (bridge.agentName !== agentName) throw new Error("Codex conversation Agent 不匹配");
+  const result = await bridge.request("thread/read", {
+    threadId: bridge.threadId,
+    includeTurns: true,
+  }, 30_000);
+  return { thread_id: bridge.threadId, thread: codexThreadSnapshot(result?.thread) };
+}
+
+async function executeCodexManagedTask(agentName, task, projectPath) {
+  const started = Date.now();
+  await reportTaskStarted(task);
+  const conversationId = String(task.codex_conversation_id || "");
+  const mafTurnId = String(task.codex_turn_id || "");
+  if (!conversationId || !mafTurnId) {
+    await reportTaskResult(task, "failed", "[EXECUTION_PROTOCOL] managed Codex task 缺少 conversation/turn 关联", Date.now() - started);
+    return;
+  }
+  const cwd = resolve((projectPath || agents.get(agentName)?.directory || DIRECTORY).replace(/^~/, homedir()));
+  if (!existsSync(cwd)) {
+    await reportTaskResult(task, "failed", `[WORKSPACE_NOT_GIT] Codex 工作目录不存在: ${cwd}`, Date.now() - started);
+    return;
+  }
+  const binding = { bridge: null, conversationId, remoteTurnId: "" };
+  codexManagedTaskBindings.set(String(task.id), binding);
+  try {
+    const sandboxMode = task.run_paths?.writeAllowed === false ? "read-only" : CODEX_SANDBOX;
+    await startCodexConversation({
+      conversation_id: conversationId,
+      agent_name: agentName,
+      project_path: cwd,
+      thread_id: task.codex_thread_id || "",
+      model: task.codex_model || "",
+      approval_policy: CODEX_APPROVAL,
+      sandbox_mode: sandboxMode,
+      source_type: task.codex_source_type || (task.workflow_id ? "workflow" : "task"),
+      managed_execution: Boolean(task.run_context),
+      source_dir: task.run_paths?.sourceDir || cwd,
+      input_dir: task.run_paths?.inputDir || "",
+      output_dir: task.run_paths?.outputDir || "",
+    });
+    const bridge = codexConversationBridges.get(conversationId);
+    if (!bridge || bridge.closed) throw new Error("Codex managed app-server 未就绪");
+    binding.bridge = bridge;
+    const startedTurn = await startCodexConversationTurn({
+      conversation_id: conversationId,
+      maf_turn_id: mafTurnId,
+      agent_name: agentName,
+      project_path: cwd,
+      thread_id: bridge.threadId,
+      input: buildCodexPrompt(agentName, task, cwd),
+      approval_policy: CODEX_APPROVAL,
+      sandbox_mode: sandboxMode,
+      model: task.codex_model || "",
+      managed_execution: Boolean(task.run_context),
+    });
+    const remoteTurnId = String(startedTurn.turn_id || "");
+    binding.remoteTurnId = remoteTurnId;
+    if (task._cancelled || executionKeys(task).some(isCancelledExecution)) {
+      await bridge.request("turn/interrupt", { threadId: bridge.threadId, turnId: remoteTurnId }, 15_000);
+    }
+    const result = await bridge.waitForTurn(remoteTurnId, CODEX_TASK_TIMEOUT_MS);
+    const finalText = String(result?.text || "").trim() || `Codex managed turn ${result?.status || "completed"}`;
+    const finalStatus = result?.status === "completed" ? "completed" : "failed";
+    const detail = result?.status === "interrupted" ? `[EXECUTION_CANCELLED] ${finalText}` : finalText;
+    await reportTaskResult(task, finalStatus, detail, Date.now() - started);
+  } catch (error) {
+    await reportTaskResult(task, "failed", `[EXECUTION_PROTOCOL] Codex managed 执行失败: ${String(error?.message || error)}`, Date.now() - started);
+  } finally {
+    codexManagedTaskBindings.delete(String(task.id));
+  }
+}
+
+async function startCodexConversationTurn(body) {
+  const conversationId = String(body.conversation_id || "");
+  const mafTurnId = String(body.maf_turn_id || "");
+  const { agentName, directory } = codexConversationAgent(body);
+  if (!mafTurnId) throw new Error("maf_turn_id is required");
+  let bridge = codexConversationBridges.get(conversationId);
+  if (!bridge || bridge.closed) {
+    const threadId = String(body.thread_id || "");
+    if (!threadId) throw new Error("Codex conversation 缺少可恢复的 thread_id");
+    await startCodexConversation(body);
+    bridge = codexConversationBridges.get(conversationId);
+  }
+  if (!bridge || bridge.closed) throw new Error("Codex conversation app-server 恢复失败");
+  if (bridge.agentName !== agentName || bridge.threadId !== String(body.thread_id || "")) {
+    throw new Error("Codex conversation thread/Agent 不匹配");
+  }
+  if (bridge.activeMafTurnId) throw new Error("Codex conversation 已有活动 turn");
+  const input = String(body.input || "").trim();
+  if (!input) throw new Error("input is required");
+  const policy = codexThreadPolicy(body);
+  bridge.activeMafTurnId = mafTurnId;
+  try {
+    const result = await bridge.request("turn/start", {
+      threadId: bridge.threadId,
+      clientUserMessageId: `maf-${mafTurnId}`,
+      input: [{ type: "text", text: input, text_elements: [] }],
+      cwd: directory,
+      approvalPolicy: policy.approvalPolicy,
+      sandboxPolicy: codexTurnSandboxPolicy(policy.sandbox, directory),
+      ...(body.model ? { model: String(body.model) } : {}),
+    }, 30_000);
+    const remoteTurnId = String(result?.turn?.id || "");
+    if (!remoteTurnId) throw new Error("Codex turn/start 未返回 turn id");
+    const alreadyCompleted = bridge.completedTurns.has(remoteTurnId);
+    if (!alreadyCompleted) {
+      bridge.remoteTurnToMaf.set(remoteTurnId, mafTurnId);
+      bridge.enqueueEvent({
+        event_id: randomUUID(),
+        turn_id: mafTurnId,
+        remote_turn_id: remoteTurnId,
+        event_type: "turn/started",
+        payload: { threadId: bridge.threadId, turn: result.turn },
+        created_at: new Date().toISOString(),
+      });
+    }
+    const status = typeof result?.turn?.status === "string"
+      ? result.turn.status
+      : String(result?.turn?.status?.type || "");
+    if (["completed", "failed", "interrupted"].includes(status)) {
+      bridge.handleNotification("turn/completed", { threadId: bridge.threadId, turn: result.turn });
+    }
+    return { turn_id: remoteTurnId, status: status || "inProgress" };
+  } catch (err) {
+    bridge.activeMafTurnId = "";
+    throw err;
+  }
+}
+
+async function interruptCodexConversationTurn(body) {
+  const conversationId = String(body.conversation_id || "");
+  const bridge = codexConversationBridges.get(conversationId);
+  if (!bridge || bridge.closed) throw new Error("Codex conversation app-server 未运行");
+  const { agentName } = codexConversationAgent(body);
+  if (bridge.agentName !== agentName || bridge.threadId !== String(body.thread_id || "")) {
+    throw new Error("Codex conversation thread/Agent 不匹配");
+  }
+  const turnId = String(body.turn_id || "");
+  if (!turnId) throw new Error("turn_id is required");
+  await bridge.request("turn/interrupt", { threadId: bridge.threadId, turnId }, 15_000);
+  return { ok: true };
+}
+
+function cleanAllCodexConversationBridges() {
+  for (const bridge of codexConversationBridges.values()) {
+    bridge.closing = true;
+    try { bridge.proc?.stdin?.end(); } catch {}
+    try { bridge.proc?.kill("SIGTERM"); } catch {}
+  }
+  codexConversationBridges.clear();
+  codexManagedTaskBindings.clear();
 }
 
 function getAgentQueue(agentName) {
@@ -874,6 +1571,19 @@ async function cancelRunningTask(task, reason) {
   for (const key of executionKeys(task)) rememberCancelledExecution(key);
   const child = executionKeys(task).map(key => executionProcesses.get(key)).find(Boolean);
   let terminationConfirmed = !child;
+  const managedBinding = codexManagedTaskBindings.get(String(task?.id));
+  if (managedBinding) terminationConfirmed = false;
+  if (managedBinding?.bridge && managedBinding.remoteTurnId) {
+    try {
+      await managedBinding.bridge.request("turn/interrupt", {
+        threadId: managedBinding.bridge.threadId,
+        turnId: managedBinding.remoteTurnId,
+      }, 15_000);
+      terminationConfirmed = true;
+    } catch {
+      terminationConfirmed = false;
+    }
+  }
   if (child) {
     const closed = new Promise(resolveClose => child.once("close", () => resolveClose(true)));
     terminateExecutionProcess(child);
@@ -967,16 +1677,19 @@ function getAgentStatuses(agentEntries = agents) {
   for (const [name, info] of agentEntries) {
     const q = taskQueues.get(name);
 
-    // Codex 会话退出后保留为 standby，正式任务到达时由 Daemon 按需启动。
-    // 显式 attached 模式仍要求当前 TUI 接收器在线。
+    // Codex 在线状态只表示真实执行器存活；Daemon 可达但执行器尚未拉起时是 standby。
     if (info.runtime === "codex") {
-      if (q?.executingTaskId || q?.pending.length > 0) {
-        statuses[name] = "busy";
-      } else {
-        const directory = expandHomePath(info.directory);
-        if (!info.directory || !existsSync(directory)) statuses[name] = "offline";
-        else if (hasCodexAttachedReceiver(name)) statuses[name] = "online";
-        else statuses[name] = CODEX_DELIVERY !== "attached" ? "standby" : "offline";
+      const bridges = codexAgentBridges(name);
+      const attachedReceiverAlive = hasCodexAttachedReceiver(name);
+      const detachedScreenAlive = hasCodexDetachedScreen(name);
+      const executorAlive = bridges.length > 0 || attachedReceiverAlive || detachedScreenAlive;
+      const hasActiveWork = Boolean(q?.executingTaskId || q?.pending.length > 0 || bridges.some(bridge => bridge.activeMafTurnId));
+      const directory = expandHomePath(info.directory);
+      if (!info.directory || !existsSync(directory)) statuses[name] = "offline";
+      else if (executorAlive) statuses[name] = hasActiveWork ? "busy" : "online";
+      else {
+        const delivery = CODEX_DELIVERY_EXPLICIT ? CODEX_DELIVERY : (serverCodexDelivery || CODEX_DELIVERY);
+        statuses[name] = delivery === "attached" ? "offline" : "standby";
       }
       continue;
     }
@@ -1533,10 +2246,13 @@ async function registerToServer() {
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      updateServerRuntimeModes(data);
       const names = published.map(([name]) => name);
       log(`✅ 注册成功: [${names.join(", ")}] (${agentDefs[0]?.skills?.length || 0} skills, ${agentDefs[0]?.mcps?.length || 0} mcps)`);
       for (const [, info] of published) info.registered = true;
       lastInventoryFP = inventoryFP(agentDefs[0]?.skills || [], agentDefs[0]?.mcps || []);
+      void flushOrphanedCodexConversationSpools();
     } else {
       log(`❌ 注册失败: HTTP ${res.status}`);
       if (res.status === 401 || res.status === 403) {
@@ -1597,6 +2313,7 @@ async function heartbeat() {
       return;
     }
     const result = await res.json().catch(() => ({}));
+    updateServerRuntimeModes(result);
     const missingAgents = Array.isArray(result?.missing_agents) ? result.missing_agents : [];
     if (missingAgents.length > 0) {
       for (const [name, info] of published) {
@@ -1663,9 +2380,9 @@ function enqueueTask(agentName, task) {
         waiter.end(JSON.stringify({ task: { id: nextTask.id, title: nextTask.title, _notify: true } }));
       } catch {}
     } else if (runtime === "codex") {
-      const requested = codexDeliveryForTask(nextTask);
-      if (requested !== "detached") {
-        // attached/auto：当前 long-poll 请求就是附着接收器，直接交给它。
+      const delivery = codexEffectiveDelivery(agentName, nextTask);
+      if (delivery === "attached") {
+        // attached：当前 long-poll 请求就是附着接收器，直接交给它。
         q.lastExecuted = nextTask;
         q.executingTaskId = nextTask.id;
         void reportTaskStarted(nextTask);
@@ -1674,11 +2391,11 @@ function enqueueTask(agentName, task) {
           waiter.end(JSON.stringify({ task: nextTask, delivery_mode: "attached" }));
         } catch {}
       } else {
-        // detached：显式要求 Daemon 托管执行，不交给 attached receiver。
+        // managed/detached 都由 Daemon 托管执行，不交给 attached receiver。
         q.pending.unshift(nextTask);
         try {
           waiter.writeHead(200, { "Content-Type": "application/json" });
-          waiter.end(JSON.stringify({ task: null, delivery_mode: "detached" }));
+          waiter.end(JSON.stringify({ task: null, delivery_mode: delivery }));
         } catch {}
         scheduleCodexQueue(agentName);
       }
@@ -2282,7 +2999,8 @@ async function executeCodexExecTask(agentName, task, projectPath) {
 
 async function executeManagedExecutionTask(agentName, task, runtime, projectPath) {
   if (runtime === "codex") {
-    await executeCodexExecTask(agentName, task, projectPath);
+    if (codexShouldRunManaged(agentName, task)) await executeCodexManagedTask(agentName, task, projectPath);
+    else await executeCodexExecTask(agentName, task, projectPath);
     return;
   }
   const started = Date.now();
@@ -2385,6 +3103,24 @@ function scheduleManagedExecutionQueue(agentName, runtime) {
   }));
 }
 
+async function runQueuedCodexManagedTask(agentName, task, agentInfo) {
+  const q = getAgentQueue(agentName);
+  if (agentInfo) agentInfo.lastSeen = Date.now();
+  q.lastExecuted = task;
+  q.executingTaskId = task.id;
+  try {
+    await executeCodexManagedTask(agentName, task, task.project_path || agentInfo?.directory || DIRECTORY);
+  } catch (error) {
+    const message = `[EXECUTION_PROTOCOL] Codex managed queue 失败: ${String(error?.message || error)}`;
+    log(`❌ ${message}`);
+    await reportTaskResult(task, "failed", message, 0);
+  } finally {
+    q.executingTaskId = null;
+    q.lastExecuted = null;
+    if (agentInfo) agentInfo.lastSeen = Date.now();
+  }
+}
+
 async function runCodexQueue(agentName) {
   const q = getAgentQueue(agentName);
   try {
@@ -2393,7 +3129,13 @@ async function runCodexQueue(agentName) {
         const task = q.pending[0];
         if (!task) { q.pending.shift(); continue; }
         const agentInfo = agents.get(agentName);
-        if (!codexShouldRunDetached(agentName, task)) {
+        const delivery = codexEffectiveDelivery(agentName, task);
+        if (delivery === "managed") {
+          q.pending.shift();
+          await runQueuedCodexManagedTask(agentName, task, agentInfo);
+          continue;
+        }
+        if (delivery !== "detached") {
           q.pending.shift();
           const msg = codexAttachedUnavailableMessage(agentName, task);
           q.lastExecuted = task;
@@ -2418,7 +3160,13 @@ async function runCodexQueue(agentName) {
       if (!q.executingTaskId && q.pending.length > 0) {
         const task = q.pending[0];
         const agentInfo = agents.get(agentName);
-        if (!codexShouldRunDetached(agentName, task)) {
+        const delivery = codexEffectiveDelivery(agentName, task);
+        if (delivery === "managed") {
+          q.pending.shift();
+          await runQueuedCodexManagedTask(agentName, task, agentInfo);
+          return;
+        }
+        if (delivery !== "detached") {
           q.pending.shift();
           const msg = codexAttachedUnavailableMessage(agentName, task);
           q.lastExecuted = task;
@@ -2442,7 +3190,7 @@ async function runCodexQueue(agentName) {
     }
   } finally {
     codexQueueRunners.delete(agentName);
-    if (q.pending.length > 0 && codexShouldRunDetached(agentName, q.pending[0]) && (CODEX_MODE === "exec" || !q.executingTaskId)) {
+    if (q.pending.length > 0 && (codexShouldRunDetached(agentName, q.pending[0]) || codexShouldRunManaged(agentName, q.pending[0])) && (CODEX_MODE === "exec" || !q.executingTaskId)) {
       scheduleCodexQueue(agentName);
     }
   }
@@ -2453,7 +3201,7 @@ function scheduleCodexQueue(agentName) {
   if (agentInfo?.runtime !== "codex") return;
   const q = getAgentQueue(agentName);
   if (q.pending.length === 0) return;
-  if (!codexShouldRunDetached(agentName, q.pending[0])) return;
+  if (!codexShouldRunDetached(agentName, q.pending[0]) && !codexShouldRunManaged(agentName, q.pending[0])) return;
   if (codexQueueRunners.has(agentName)) return;
   codexQueueRunners.add(agentName);
   setImmediate(() => {
@@ -2874,12 +3622,59 @@ const httpServer = createServer(async (req, res) => {
   const signedBody = String(req.headers["x-maf-role"] || "") === "server"
     ? await readRawBody()
     : Buffer.alloc(0);
+  const serverControlAuthorized = String(req.headers["x-maf-role"] || "") === "server"
+    && serverSignatureAuthorized(req, signedBody);
   const authorized = req.method === "POST" && pathname === "/execute"
-    ? (serverSignatureAuthorized(req, signedBody)
+    ? (serverControlAuthorized
       || (process.env.MAF_TEST_ALLOW_LOCAL_EXECUTE === "1" && requestAuthorized(req, signedBody)))
-    : requestAuthorized(req, signedBody);
+    : (serverControlAuthorized || requestAuthorized(req, signedBody));
   if (!authorized) {
     json(401, { error: "Unauthorized" });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/codex/conversations/start") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    try {
+      const result = await startCodexConversation(await readBody());
+      json(201, result);
+    } catch (err) {
+      log(`Codex conversation 启动失败: ${err.message}`);
+      json(422, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/codex/conversations/turn") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    try {
+      json(202, await startCodexConversationTurn(await readBody()));
+    } catch (err) {
+      log(`Codex conversation turn 启动失败: ${err.message}`);
+      json(422, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/codex/conversations/read") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    try {
+      json(200, await readCodexConversation(await readBody()));
+    } catch (err) {
+      log(`Codex conversation 读取失败: ${err.message}`);
+      json(422, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/codex/conversations/interrupt") {
+    if (!serverControlAuthorized) { json(403, { error: "Server signature required" }); return; }
+    try {
+      json(202, await interruptCodexConversationTurn(await readBody()));
+    } catch (err) {
+      log(`Codex conversation turn 中断失败: ${err.message}`);
+      json(422, { error: err.message });
+    }
     return;
   }
 
@@ -3144,6 +3939,11 @@ const httpServer = createServer(async (req, res) => {
       execution_id: body.execution_id || "",
       detached: body.detached,
       delivery_mode: body.delivery_mode || body.deliveryMode || body.execution_mode || body.executionMode || "",
+      codex_conversation_id: body.codex_conversation_id || "",
+      codex_turn_id: body.codex_turn_id || "",
+      codex_thread_id: body.codex_thread_id || "",
+      codex_model: body.codex_model || "",
+      codex_source_type: body.codex_source_type || (body.workflow_id ? "workflow" : "task"),
       metadata: body.metadata || {},
       workspace_id: body.workspace_id || targetAgent,
       run_context: body.run_context || null,
@@ -3172,12 +3972,13 @@ const httpServer = createServer(async (req, res) => {
         json(409, { accepted: false, agent: targetAgent, error_code: "QUEUE_FULL", error: "queue full" });
         return;
       }
-      json(202, { accepted: true, agent: targetAgent, mode: `${runtime}-managed-execution`, delivery_mode: "detached" });
+      const delivery = runtime === "codex" ? codexEffectiveDelivery(targetAgent, task) : "detached";
+      json(202, { accepted: true, agent: targetAgent, mode: `${runtime}-managed-execution`, delivery_mode: delivery });
       scheduleManagedExecutionQueue(targetAgent, runtime);
       return;
     }
 
-    // Codex runtime：默认 detached，由 Daemon screen/exec 托管执行；attached/auto 需要任务或环境显式选择。
+    // Codex runtime：managed 由私有 app-server 执行，detached 保留 screen/exec 回退，attached 交给当前 TUI。
     if (runtime === "codex") {
       const existing = agents.get(targetAgent);
       const directory = projectPath || existing?.directory || DIRECTORY;
@@ -3204,9 +4005,11 @@ const httpServer = createServer(async (req, res) => {
 
       const ok = enqueueTask(targetAgent, task);
       if (ok) {
-        const mode = delivery === "attached" ? "codex-attached" : (CODEX_MODE === "exec" ? "codex-exec" : "codex-tui");
+        const mode = delivery === "managed"
+          ? "codex-managed-app-server"
+          : delivery === "attached" ? "codex-attached" : (CODEX_MODE === "exec" ? "codex-exec" : "codex-tui");
         json(202, { accepted: true, agent: targetAgent, mode, delivery_mode: delivery });
-        if (delivery === "detached") scheduleCodexQueue(targetAgent);
+        if (delivery === "detached" || delivery === "managed") scheduleCodexQueue(targetAgent);
       } else {
         json(409, { error_code: "QUEUE_FULL", error: "queue full" });
       }
@@ -3373,15 +4176,15 @@ const httpServer = createServer(async (req, res) => {
         json(200, { task: { id: q.pending[0].id, title: q.pending[0].title, _notify: true } });
       } else if (runtime === "codex") {
         const task = q.pending[0];
-        const requested = codexDeliveryForTask(task);
-        if (requested !== "detached") {
+        const delivery = codexEffectiveDelivery(targetAgent, task);
+        if (delivery === "attached") {
           q.pending.shift();
           q.lastExecuted = task;
           q.executingTaskId = task.id;
           await reportTaskStarted(task);
           json(200, { task, delivery_mode: "attached" });
         } else {
-          json(200, { task: null, delivery_mode: "detached" });
+          json(200, { task: null, delivery_mode: delivery });
           scheduleCodexQueue(targetAgent);
         }
       } else {
@@ -3731,6 +4534,7 @@ httpServer.listen(NODE_PORT, "0.0.0.0", async () => {
   setInterval(heartbeat, HEARTBEAT_INTERVAL);
   setInterval(pollTasks, POLL_INTERVAL);
   setInterval(() => { if (enrollmentStatus !== "active" && shouldContactServer()) ensureEnrollment(); }, 10_000);
+  setInterval(() => { void flushOrphanedCodexConversationSpools(); }, 30_000);
   setInterval(cleanDeadAgents, 60_000);
   setInterval(cleanIdleServes, 60_000);
 });
@@ -3747,8 +4551,8 @@ httpServer.on("error", (err) => {
   process.exit(1);
 });
 
-process.on("SIGINT", () => { cleanAllServes(); process.exit(0); });
-process.on("SIGTERM", () => { cleanAllServes(); process.exit(0); });
+process.on("SIGINT", () => { cleanAllCodexConversationBridges(); cleanAllServes(); process.exit(0); });
+process.on("SIGTERM", () => { cleanAllCodexConversationBridges(); cleanAllServes(); process.exit(0); });
 process.on("uncaughtException", (err) => {
   // 只写文件，绝不写 stdout/stderr（防 EPIPE 死循环）
   appendLogLine(`${new Date().toISOString().slice(11, 23)} [node-daemon] 异常: ${err.message}\n`);

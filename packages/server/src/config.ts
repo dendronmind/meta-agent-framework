@@ -20,6 +20,7 @@ import { homedir } from 'os';
 export type RegistryType = 'feishu' | 'none';
 /** Server 侧 Meta-Agent-Server runtime（配置兼容 claude / claude-code） */
 export type ServerRuntime = 'opencode' | 'codex' | 'claude' | 'claude-code';
+export type CodexWorkflowDelivery = 'managed' | 'detached';
 
 export interface MafConfig {
   auth: {
@@ -33,6 +34,9 @@ export interface MafConfig {
   };
   daemon: {
     port: number;
+  };
+  codex: {
+    workflow_delivery: CodexWorkflowDelivery;
   };
   /** 外部注册表配置（决定 Agent 数据来源） */
   registry: {
@@ -66,6 +70,9 @@ const DEFAULTS: MafConfig = {
   },
   daemon: {
     port: 4100,
+  },
+  codex: {
+    workflow_delivery: 'managed',
   },
   registry: {
     type: 'none',  // 默认纯自注册模式（零配置可用）
@@ -141,6 +148,11 @@ export function getConfig(projectRoot?: string): MafConfig {
   if (process.env.META_AGENT_PORT || process.env.PORT) config.server.port = parseInt(process.env.META_AGENT_PORT || process.env.PORT || '3000');
   if (process.env.MAF_SERVER_RUNTIME) config.server.runtime = process.env.MAF_SERVER_RUNTIME as ServerRuntime;
   if (process.env.MAF_NODE_PORT) config.daemon.port = parseInt(process.env.MAF_NODE_PORT);
+  if (process.env.MAF_CODEX_WORKFLOW_DELIVERY) {
+    config.codex.workflow_delivery = normalizeCodexWorkflowDelivery(process.env.MAF_CODEX_WORKFLOW_DELIVERY);
+  } else {
+    config.codex.workflow_delivery = normalizeCodexWorkflowDelivery(config.codex.workflow_delivery);
+  }
   if (process.env.MAF_REGISTRY_TYPE) config.registry.type = process.env.MAF_REGISTRY_TYPE as RegistryType;
   if (process.env.FEISHU_APP_ID) config.feishu.app_id = process.env.FEISHU_APP_ID;
   if (process.env.FEISHU_APP_SECRET) config.feishu.app_secret = process.env.FEISHU_APP_SECRET;
@@ -161,4 +173,10 @@ export function getConfig(projectRoot?: string): MafConfig {
 /** 重置缓存（测试用） */
 export function resetConfig(): void {
   _config = null;
+}
+
+export function normalizeCodexWorkflowDelivery(value: unknown): CodexWorkflowDelivery {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['detached', 'screen', 'tui'].includes(normalized)) return 'detached';
+  return 'managed';
 }
